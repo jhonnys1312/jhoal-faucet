@@ -17,7 +17,12 @@ const COOLDOWN = 30 * 60;
 const provider = new ethers.JsonRpcProvider(RPC);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 
-const ABI = ['function transfer(address to, uint256 amount) returns (bool)'];
+const ABI = [
+  'function transfer(address to, uint256 amount) returns (bool)',
+  'function balanceOf(address account) view returns (uint256)',
+  'function decimals() view returns (uint8)',
+  'function symbol() view returns (string)'
+];
 const token = new ethers.Contract(TOKEN_ADDRESS, ABI, wallet);
 
 const db = new Database('faucet.db');
