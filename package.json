@@ -1,16 +1,22 @@
-{
-  "name": "jhoal-faucet",
-  "version": "1.0.0",
-  "type": "module",
-  "main": "index.js",
-  "scripts": {
-    "start": "node index.js"
-  },
-  "dependencies": {
-    "express": "^4.19.2",
-    "ethers": "^6.13.0",
-    "@supabase/supabase-js": "^2.45.0",
-    "cors": "^2.8.5",
-    "dotenv": "^16.4.5"
+ res.json({
+      success: true,
+      totalReferidos: total,
+      jhoalGanado: ganado,
+      referidos: refs || []
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
-}
+});
+
+// ==== ENDPOINT: ROOT ====
+app.get('/', (req, res) => {
+  res.json({ status: 'Faucet JHOAL funcionando' });
+});
+
+// ==== INICIAR SERVIDOR ====
+app.listen(process.env.PORT || 3000, () => {
+  console.log('Faucet JHOAL corriendo en puerto', process.env.PORT || 3000);
+  console.log('Wallet de la faucet:', wallet.address);
+  console.log('Supabase conectado:', SUPABASE_URL);
+});
