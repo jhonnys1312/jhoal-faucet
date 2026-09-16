@@ -19,6 +19,10 @@ const REFERRAL_BONUS = ethers.parseUnits('0.25', 18);
 const COOLDOWN = 30 * 60;
 // ================
 
+if (!SUPABASE_URL || !SUPABASE_KEY) {
+  console.error('FALTA SUPABASE_URL o SUPABASE_SECRET_KEY en Environment!');
+}
+
 const provider = new ethers.JsonRpcProvider(RPC);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 
@@ -53,25 +57,24 @@ app.post('/claim', async (req, res) => {
   }
 
   try {
-    // Verificar cooldown
-    const { data: existing } = await supabase
+    const { data: existing, error: selError } = await supabase
       .from('claims')
       .select('last_claim')
       .eq('user_id', userId)
       .maybeSingle();
 
+    if (selError) throw selError;
+
     const now = Math.floor(Date.now() / 1000);
 
     if (existing && now - existing.last_claim < COOLDOWN) {
       const restante = COOLDOWN - (now - existing.last_claim);
-      const minutos = Math.floor(restante / 60);
-      const segundos = restante % 60;
       return res.status(429).json({
-        error: 'Espera ' + minutos + 'm ' + segundos + 's antes de reclamar otra vez'
+        error: 'Espera ' + Math.floor(restante / 60) + 'm ' + (restante % 60) + 's antes de reclamar otra vez'
       });
     }
 
-    // Registrar referido si es la primera vez
+    // Registrar referido si es primera vez
     if (referrerId && !existing) {
       const { data: alreadyRef } = await supabase
         .from('referrals')
@@ -113,7 +116,7 @@ app.post('/claim', async (req, res) => {
           bonusTxHash = bonusTx.hash;
           console.log('Bonus referido:', bonusTx.hash);
         } catch (e) {
-          console.log('Error enviando bonus:', e.message);
+          console.log('Error bonus:', e.message);
         }
       }
     }
@@ -135,7 +138,7 @@ app.post('/claim', async (req, res) => {
       amount: '1 JHOAL'
     });
   } catch (error) {
-    console.error('Error:', error);
+    console.error('Error claim:', error);
     res.status(500).json({ error: 'Error al enviar tokens: ' + error.message });
   }
 });
@@ -176,6 +179,7 @@ app.get('/recent', async (req, res) => {
 
     res.json({ success: true, recent: recent });
   } catch (e) {
+    console.error('Error recent:', e);
     res.status(500).json({ error: e.message });
   }
 });
