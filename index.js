@@ -12,24 +12,34 @@ app.use(express.json());
 const RPC = 'https://bsc-dataseed.binance.org/';
 const PRIVATE_KEY = process.env.PRIVATE_KEY;
 const TOKEN_ADDRESS = process.env.TOKEN_ADDRESS;
-const AMOUNT = ethers.parseUnits('1', 18); // 1 JHOAL por reclamo
-const COOLDOWN = 30 * 60; // 30 minutos
+const AMOUNT = ethers.parseUnits('1', 18);
+const COOLDOWN = 30 * 60;
 // ================
 
 const provider = new ethers.JsonRpcProvider(RPC);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 
-const ABI = ['function transfer(address to, uint256 amount) returns (bool)'];
+const ABI = [
+  'function transfer(address to, uint256 amount) returns (bool)',
+  'function balanceOf(address account) view returns (uint256)',
+  'function decimals() view returns (uint8)',
+  'function symbol() view returns (string)'
+];
 const token = new ethers.Contract(TOKEN_ADDRESS, ABI, wallet);
 
 const db = new Database('faucet.db');
-db.exec(`CREATE TABLE IF NOT EXISTS claims (
-  user_id INTEGER PRIMARY KEY,
-  wallet TEXT,
-  last_claim INTEGER
-)`);
+db.exec('CREATE TABLE IF NOT EXISTS claims (user_id INTEGER PRIMARY KEY, wallet TEXT, last_claim INTEGER)');
 
-// ==== ENDPOINT PRINCIPAL ====
+// Función auxiliar para tiempo relativo
+function timeAgo(timestamp) {
+  const seconds = Math.floor(Date.now() / 1000) - timestamp;
+  if (seconds < 60) return 'hace ' + seconds + 's';
+  if (seconds < 3600) return 'hace ' + Math.floor(seconds / 60) + 'm';
+  if (seconds < 86400) return 'hace ' + Math.floor(seconds / 3600) + 'h';
+  return 'hace ' + Math.floor(seconds / 86400) + 'd';
+}
+
+// ==== ENDPOINT: RECLAMAR ====
 app.post('/claim', async (req, res) => {
   const { userId, wallet: userWallet } = req.body;
 
@@ -38,7 +48,7 @@ app.post('/claim', async (req, res) => {
   }
 
   if (!ethers.isAddress(userWallet)) {
-    return res.status(400).json({ error: 'Wallet inválida' });
+    return res.status(400).json({ error: 'Wallet invalida' });
   }
 
   const row = db.prepare('SELECT last_claim FROM claims WHERE user_id = ?').get(userId);
@@ -49,7 +59,7 @@ app.post('/claim', async (req, res) => {
     const minutos = Math.floor(restante / 60);
     const segundos = restante % 60;
     return res.status(429).json({
-      error: Espera ${minutos}m ${segundos}s antes de reclamar otra vez
+      error: 'Espera ' + minutos + 'm ' + segundos + 's antes de reclamar otra vez'
     });
   }
 
@@ -64,7 +74,7 @@ app.post('/claim', async (req, res) => {
     res.json({
       success: true,
       txHash: tx.hash,
-      explorer: https://bscscan.com/tx/${tx.hash},
+      explorer: 'https://bscscan.com/tx/' + tx.hash,
       amount: '1 JHOAL'
     });
   } catch (error) {
@@ -73,6 +83,7 @@ app.post('/claim', async (req, res) => {
   }
 });
 
+// ==== ENDPOINT: BALANCE ====
 app.get('/balance', async (req, res) => {
   try {
     const balance = await token.balanceOf(wallet.address);
@@ -87,17 +98,10 @@ app.get('/balance', async (req, res) => {
   }
 });
 
-app.get('/', (req, res) => {
-  res.json({ status: 'Faucet JHOAL funcionando 🚰' });
-});
+// ==== ENDPOINT: ÚLTIMOS RECLAMOS ====
 app.get('/recent', (req, res) => {
   try {
-    const rows = db.prepare(`
-      SELECT user_id, wallet, last_claim 
-      FROM claims 
-      ORDER BY last_claim DESC 
-      LIMIT 10
-    `).all();
+    const rows = db.prepare('SELECT user_id, wallet, last_claim FROM claims ORDER BY last_claim DESC LIMIT 10').all();
 
     const recent = rows.map(row => ({
       userId: row.user_id,
@@ -107,20 +111,19 @@ app.get('/recent', (req, res) => {
       ago: timeAgo(row.last_claim)
     }));
 
-    res.json({ success: true, recent });
+    res.json({ success: true, recent: recent });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-function timeAgo(timestamp) {
-  const seconds = Math.floor(Date.now() / 1000) - timestamp;
-  if (seconds < 60) return 'hace ' + seconds + 's';
-  if (seconds < 3600) return 'hace ' + Math.floor(seconds / 60) + 'm';
-  if (seconds < 86400) return 'hace ' + Math.floor(seconds / 3600) + 'h';
-  return 'hace ' + Math.floor(seconds / 86400) + 'd';
-}
+// ==== ENDPOINT: ROOT ====
+app.get('/', (req, res) => {
+  res.json({ status: 'Faucet JHOAL funcionando' });
+});
+
+// ==== INICIAR SERVIDOR ====
 app.listen(process.env.PORT || 3000, () => {
-  console.log('🚰 Faucet JHOAL corriendo en puerto', process.env.PORT || 3000);
+  console.log('Faucet JHOAL corriendo en puerto', process.env.PORT || 3000);
   console.log('Wallet de la faucet:', wallet.address);
 });
