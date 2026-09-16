@@ -1,6 +1,6 @@
 import express from 'express';
 import { ethers } from 'ethers';
-import Database from 'better-sqlite3';
+import { createClient } from '@supabase/supabase-js';
 import cors from 'cors';
 import 'dotenv/config';
 
@@ -12,7 +12,10 @@ app.use(express.json());
 const RPC = 'https://bsc-dataseed.binance.org/';
 const PRIVATE_KEY = process.env.PRIVATE_KEY;
 const TOKEN_ADDRESS = process.env.TOKEN_ADDRESS;
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_SECRET_KEY;
 const AMOUNT = ethers.parseUnits('1', 18);
+const REFERRAL_BONUS = ethers.parseUnits('0.25', 18);
 const COOLDOWN = 30 * 60;
 // ================
 
@@ -27,10 +30,8 @@ const ABI = [
 ];
 const token = new ethers.Contract(TOKEN_ADDRESS, ABI, wallet);
 
-const db = new Database('faucet.db');
-db.exec('CREATE TABLE IF NOT EXISTS claims (user_id INTEGER PRIMARY KEY, wallet TEXT, last_claim INTEGER)');
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-// Función auxiliar para tiempo relativo
 function timeAgo(timestamp) {
   const seconds = Math.floor(Date.now() / 1000) - timestamp;
   if (seconds < 60) return 'hace ' + seconds + 's';
@@ -41,7 +42,7 @@ function timeAgo(timestamp) {
 
 // ==== ENDPOINT: RECLAMAR ====
 app.post('/claim', async (req, res) => {
-  const { userId, wallet: userWallet } = req.body;
+  const { userId, wallet: userWallet, referrerId } = req.body;
 
   if (!userId || !userWallet) {
     return res.status(400).json({ error: 'Faltan datos' });
@@ -51,29 +52,85 @@ app.post('/claim', async (req, res) => {
     return res.status(400).json({ error: 'Wallet invalida' });
   }
 
-  const row = db.prepare('SELECT last_claim FROM claims WHERE user_id = ?').get(userId);
-  const now = Math.floor(Date.now() / 1000);
-
-  if (row && now - row.last_claim < COOLDOWN) {
-    const restante = COOLDOWN - (now - row.last_claim);
-    const minutos = Math.floor(restante / 60);
-    const segundos = restante % 60;
-    return res.status(429).json({
-      error: 'Espera ' + minutos + 'm ' + segundos + 's antes de reclamar otra vez'
-    });
-  }
-
   try {
-    const tx = await token.transfer(userWallet, AMOUNT);
-    console.log('TX enviada:', tx.hash);
+    // Verificar cooldown
+    const { data: existing } = await supabase
+      .from('claims')
+      .select('last_claim')
+      .eq('user_id', userId)
+      .maybeSingle();
 
-    db.prepare('INSERT OR REPLACE INTO claims VALUES (?, ?, ?)').run(userId, userWallet, now);
+    const now = Math.floor(Date.now() / 1000);
+
+    if (existing && now - existing.last_claim < COOLDOWN) {
+      const restante = COOLDOWN - (now - existing.last_claim);
+      const minutos = Math.floor(restante / 60);
+      const segundos = restante % 60;
+      return res.status(429).json({
+        error: 'Espera ' + minutos + 'm ' + segundos + 's antes de reclamar otra vez'
+      });
+    }
+
+    // Registrar referido si es la primera vez
+    if (referrerId && !existing) {
+      const { data: alreadyRef } = await supabase
+        .from('referrals')
+        .select('referred_id')
+        .eq('referred_id', userId)
+        .maybeSingle();
+
+      if (!alreadyRef && Number(referrerId) !== Number(userId)) {
+        await supabase.from('referrals').insert({
+          referred_id: userId,
+          referrer_id: Number(referrerId),
+          created_at: now
+        });
+      }
+    }
+
+    // Enviar 1 JHOAL al usuario
+    const tx = await token.transfer(userWallet, AMOUNT);
+    console.log('TX reclamar:', tx.hash);
+
+    // Enviar 0.25 JHOAL al referidor (si aplica)
+    let bonusTxHash = null;
+    const { data: refData } = await supabase
+      .from('referrals')
+      .select('referrer_id')
+      .eq('referred_id', userId)
+      .maybeSingle();
+
+    if (refData) {
+      const { data: referrerClaim } = await supabase
+        .from('claims')
+        .select('wallet')
+        .eq('user_id', refData.referrer_id)
+        .maybeSingle();
+
+      if (referrerClaim && referrerClaim.wallet) {
+        try {
+          const bonusTx = await token.transfer(referrerClaim.wallet, REFERRAL_BONUS);
+          bonusTxHash = bonusTx.hash;
+          console.log('Bonus referido:', bonusTx.hash);
+        } catch (e) {
+          console.log('Error enviando bonus:', e.message);
+        }
+      }
+    }
+
+    // Guardar/actualizar en DB
+    await supabase.from('claims').upsert({
+      user_id: userId,
+      wallet: userWallet,
+      last_claim: now
+    });
 
     await tx.wait();
 
     res.json({
       success: true,
       txHash: tx.hash,
+      bonusTxHash: bonusTxHash,
       explorer: 'https://bscscan.com/tx/' + tx.hash,
       amount: '1 JHOAL'
     });
@@ -99,11 +156,17 @@ app.get('/balance', async (req, res) => {
 });
 
 // ==== ENDPOINT: ÚLTIMOS RECLAMOS ====
-app.get('/recent', (req, res) => {
+app.get('/recent', async (req, res) => {
   try {
-    const rows = db.prepare('SELECT user_id, wallet, last_claim FROM claims ORDER BY last_claim DESC LIMIT 10').all();
+    const { data: rows, error } = await supabase
+      .from('claims')
+      .select('user_id, wallet, last_claim')
+      .order('last_claim', { ascending: false })
+      .limit(10);
 
-    const recent = rows.map(row => ({
+    if (error) throw error;
+
+    const recent = (rows || []).map(row => ({
       userId: row.user_id,
       wallet: row.wallet.slice(0, 6) + '...' + row.wallet.slice(-4),
       fullWallet: row.wallet,
@@ -112,6 +175,32 @@ app.get('/recent', (req, res) => {
     }));
 
     res.json({ success: true, recent: recent });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ==== ENDPOINT: MIS REFERIDOS ====
+app.get('/my-referrals/:userId', async (req, res) => {
+  try {
+    const userId = req.params.userId;
+
+    const { data: refs, error } = await supabase
+      .from('referrals')
+      .select('referred_id, created_at')
+      .eq('referrer_id', userId);
+
+    if (error) throw error;
+
+    const total = (refs || []).length;
+    const ganado = total * 0.25;
+
+    res.json({
+      success: true,
+      totalReferidos: total,
+      jhoalGanado: ganado,
+      referidos: refs || []
+    });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -126,4 +215,5 @@ app.get('/', (req, res) => {
 app.listen(process.env.PORT || 3000, () => {
   console.log('Faucet JHOAL corriendo en puerto', process.env.PORT || 3000);
   console.log('Wallet de la faucet:', wallet.address);
+  console.log('Supabase conectado:', SUPABASE_URL);
 });
