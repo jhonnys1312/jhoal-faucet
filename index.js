@@ -12,6 +12,8 @@ app.use(express.json());
 const RPC = 'https://bsc-dataseed.binance.org/';
 const PRIVATE_KEY = process.env.PRIVATE_KEY;
 const TOKEN_ADDRESS = process.env.TOKEN_ADDRESS;
+const PAIR_ADDRESS = '0x70163906f11E7a05eb37Dce319602e7ffc4865e5';
+const USDT_ADDRESS = '0x55d398326f99059ff775485246999027b3197955';
 const AMOUNT = ethers.parseUnits('1', 18);
 const COOLDOWN = 30 * 60;
 // ================
@@ -26,6 +28,13 @@ const ABI = [
   'function symbol() view returns (string)'
 ];
 const token = new ethers.Contract(TOKEN_ADDRESS, ABI, wallet);
+
+const PAIR_ABI = [
+  'function getReserves() view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast)',
+  'function token0() view returns (address)',
+  'function token1() view returns (address)'
+];
+const pair = new ethers.Contract(PAIR_ADDRESS, PAIR_ABI, provider);
 
 const db = new Database('faucet.db');
 db.exec('CREATE TABLE IF NOT EXISTS claims (user_id INTEGER PRIMARY KEY, wallet TEXT, last_claim INTEGER)');
@@ -116,6 +125,41 @@ app.get('/recent', (req, res) => {
   }
 });
 
+// ==== ENDPOINT: PRECIO EN VIVO ====
+app.get('/price', async (req, res) => {
+  try {
+    const reserves = await pair.getReserves();
+    const token0 = await pair.token0();
+
+    let jhoalReserve, usdtReserve;
+
+    if (token0.toLowerCase() === TOKEN_ADDRESS.toLowerCase()) {
+      jhoalReserve = reserves.reserve0;
+      usdtReserve = reserves.reserve1;
+    } else {
+      jhoalReserve = reserves.reserve1;
+      usdtReserve = reserves.reserve0;
+    }
+
+    const jhoalAmount = parseFloat(ethers.formatUnits(jhoalReserve, 18));
+    const usdtAmount = parseFloat(ethers.formatUnits(usdtReserve, 18));
+
+    const pricePerJhoal = usdtAmount / jhoalAmount;
+    const jhoalPerUsdt = jhoalAmount / usdtAmount;
+
+    res.json({
+      success: true,
+      priceUsd: pricePerJhoal,
+      jhoalPerUsdt: jhoalPerUsdt,
+      jhoalReserve: jhoalAmount,
+      usdtReserve: usdtAmount
+    });
+  } catch (e) {
+    console.error('Error precio:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ==== ENDPOINT: ROOT ====
 app.get('/', (req, res) => {
   res.json({ status: 'Faucet JHOAL funcionando' });
@@ -125,4 +169,5 @@ app.get('/', (req, res) => {
 app.listen(process.env.PORT || 3000, () => {
   console.log('Faucet JHOAL corriendo en puerto', process.env.PORT || 3000);
   console.log('Wallet de la faucet:', wallet.address);
+  console.log('Pair address:', PAIR_ADDRESS);
 });
