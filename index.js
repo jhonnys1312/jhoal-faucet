@@ -626,38 +626,81 @@ if (SUPPORT_BOT_TOKEN && SUPPORT_CHAT_ID) {
       supportBot.sendMessage(msg.chat.id, '❌ Error al enviar: ' + err.message);
     }
   });
+supportBot.on('message', (msg) => {
+  const chatId = msg.chat.id;
+  const text = msg.text;
 
-  supportBot.on('message', (msg) => {
-    const chatId = msg.chat.id;
-    const text = msg.text;
+  // Ignorar comandos
+  if (text && text.startsWith('/')) return;
 
-    if (!text || text.startsWith('/')) return;
+  const userName = msg.from.first_name || 'Usuario';
+  const userUsername = msg.from.username ? '@' + msg.from.username : 'sin username';
+  const userId = msg.from.id;
 
-    const userName = msg.from.first_name || 'Usuario';
-    const userUsername = msg.from.username ? '@' + msg.from.username : 'sin username';
-    const userId = msg.from.id;
+  // Header del mensaje
+  const header =
+    '📩 *NUEVO MENSAJE DE SOPORTE*\n\n' +
+    '👤 De: ' + userName + '\n' +
+    '🔗 Username: ' + userUsername + '\n' +
+    '🆔 ID: ' + userId + '\n\n';
 
-    const supportMessage =
-      '📩 *NUEVO MENSAJE DE SOPORTE*\n\n' +
-      '👤 De: ' + userName + '\n' +
-      '🔗 Username: ' + userUsername + '\n' +
-      '🆔 ID: `' + userId + '`\n\n' +
-      '💬 Mensaje:\n' + text;
-
-    supportBot.sendMessage(SUPPORT_CHAT_ID, supportMessage, {
-      parse_mode: 'Markdown'
-    }).then(() => {
-      supportBot.sendMessage(chatId,
-        '✅ *Mensaje recibido*\n\n' +
-        'Tu consulta fue enviada al equipo de soporte. Te vamos a responder a la brevedad.',
-        { parse_mode: 'Markdown' }
-      );
-    }).catch((err) => {
-      console.error('Error enviando a soporte:', err);
-    });
-  });
-}
-
+  try {
+    // Si es TEXTO
+    if (msg.text) {
+      supportBot.sendMessage(SUPPORT_CHAT_ID, header + '💬 Mensaje:\n' + msg.text, { parse_mode: 'Markdown' });
+      supportBot.sendMessage(chatId, '✅ *Mensaje recibido*\n\nTu consulta fue enviada al equipo de soporte.', { parse_mode: 'Markdown' });
+    }
+    // Si es FOTO
+    else if (msg.photo) {
+      const photo = msg.photo[msg.photo.length - 1];
+      supportBot.sendPhoto(SUPPORT_CHAT_ID, photo.file_id, {
+        caption: header + '📷 Foto' + (msg.caption ? ':\n' + msg.caption : ''),
+        parse_mode: 'Markdown'
+      });
+      supportBot.sendMessage(chatId, '✅ *Foto recibida*\n\nFue enviada al equipo de soporte.', { parse_mode: 'Markdown' });
+    }
+    // Si es VIDEO
+    else if (msg.video) {
+      supportBot.sendVideo(SUPPORT_CHAT_ID, msg.video.file_id, {
+        caption: header + '🎥 Video' + (msg.caption ? ':\n' + msg.caption : ''),
+        parse_mode: 'Markdown'
+      });
+      supportBot.sendMessage(chatId, '✅ *Video recibido*\n\nFue enviado al equipo de soporte.', { parse_mode: 'Markdown' });
+    }
+    // Si es AUDIO
+    else if (msg.audio || msg.voice) {
+      const audioId = (msg.audio && msg.audio.file_id) || (msg.voice && msg.voice.file_id);
+      supportBot.sendAudio(SUPPORT_CHAT_ID, audioId, {
+        caption: header + '🎵 Audio',
+        parse_mode: 'Markdown'
+      });
+      supportBot.sendMessage(chatId, '✅ *Audio recibido*\n\nFue enviado al equipo de soporte.', { parse_mode: 'Markdown' });
+    }
+    // Si es DOCUMENTO
+    else if (msg.document) {
+      supportBot.sendDocument(SUPPORT_CHAT_ID, msg.document.file_id, {
+        caption: header + '📎 Documento' + (msg.caption ? ':\n' + msg.caption : ''),
+        parse_mode: 'Markdown'
+      });
+      supportBot.sendMessage(chatId, '✅ *Documento recibido*\n\nFue enviado al equipo de soporte.', { parse_mode: 'Markdown' });
+    }
+    // Si es STICKER
+    else if (msg.sticker) {
+      supportBot.sendMessage(SUPPORT_CHAT_ID, header + '🎨 Sticker', { parse_mode: 'Markdown' });
+      supportBot.sendSticker(SUPPORT_CHAT_ID, msg.sticker.file_id);
+      supportBot.sendMessage(chatId, '✅ *Sticker recibido*', { parse_mode: 'Markdown' });
+    }
+    // Cualquier otra cosa
+    else {
+      supportBot.sendMessage(SUPPORT_CHAT_ID, header + '📎 Mensaje tipo desconocido', { parse_mode: 'Markdown' });
+      supportBot.sendMessage(chatId, '✅ *Mensaje recibido*');
+    }
+  } catch (err) {
+    console.error('Error enviando a soporte:', err);
+    supportBot.sendMessage(chatId, '❌ Error al enviar tu mensaje. Intenta de nuevo.');
+  }
+});
+ 
 // ==== INICIAR SERVIDOR ====
 app.listen(process.env.PORT || 3000, () => {
   console.log('Faucet JHOAL + Dados + Huerto + Historial corriendo en puerto', process.env.PORT || 3000);
