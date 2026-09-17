@@ -15,9 +15,14 @@ const PRIVATE_KEY = process.env.PRIVATE_KEY;
 const TOKEN_ADDRESS = process.env.TOKEN_ADDRESS;
 const PAIR_ADDRESS = '0x70163906f11E7a05eb37Dce319602e7ffc4865e5';
 const BOT_TOKEN = process.env.BOT_TOKEN;
+const SUPPORT_BOT_TOKEN = process.env.SUPPORT_BOT_TOKEN;
+const SUPPORT_CHAT_ID = process.env.SUPPORT_CHAT_ID;
 const MINI_APP_URL = 'https://willowy-starburst-59c5f3.netlify.app';
+const SUPPORT_USERNAME = 'JhoalSupportbot';
 const AMOUNT = ethers.parseUnits('1', 18);
 const COOLDOWN = 30 * 60;
+const MIN_BET = 0.1;
+const MAX_BET = 1000;
 // ================
 
 const provider = new ethers.JsonRpcProvider(RPC);
@@ -87,15 +92,6 @@ function timeAgo(timestamp) {
   return 'hace ' + Math.floor(seconds / 86400) + 'd';
 }
 
-// ==== PROBABILIDADES DE LOS DADOS (más fáciles) ====
-// x0:    38% (pierde todo)
-// x1.1:  47% (recupera +10%)
-// x2:    10% (duplica)
-// x4:     3% (cuadruplica)
-// x6:   1.3% (sextuplica)
-// x8:   0.5% (octuplica)
-// x10:  0.2% (decuplica)
-// Total: 100% | House edge: ~2.5%
 function spinRoulette() {
   const random = Math.random() * 100;
   if (random < 38) return 0;
@@ -134,30 +130,31 @@ app.post('/claim', async (req, res) => {
   }
 });
 
-// ==== ENDPOINT: BALANCE DEL JUEGO ====
+// ==== ENDPOINT: BALANCE DEL JUEGO (con last_claim para sincronizar) ====
 app.get('/balance-game/:userId', (req, res) => {
   try {
     const user = db.prepare('SELECT * FROM users_balance WHERE user_id = ?').get(req.params.userId);
     if (!user) {
-      return res.json({ success: true, balance: 0, total_claimed: 0, total_won: 0, total_lost: 0 });
+      return res.json({ success: true, balance: 0, total_claimed: 0, total_won: 0, total_lost: 0, last_claim: 0 });
     }
     res.json({
       success: true,
       balance: user.balance,
       total_claimed: user.total_claimed,
       total_won: user.total_won,
-      total_lost: user.total_lost
+      total_lost: user.total_lost,
+      last_claim: user.last_claim || 0
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-// ==== ENDPOINT: APOSTAR ====
+// ==== ENDPOINT: APOSTAR (mínimo 0.1 JHOAL) ====
 app.post('/bet', async (req, res) => {
   const { userId, amount } = req.body;
   if (!userId || !amount) return res.status(400).json({ error: 'Faltan datos' });
-  if (amount <= 0 || amount > 1000) return res.status(400).json({ error: 'Apuesta inválida (1-1000)' });
+  if (amount < MIN_BET || amount > MAX_BET) return res.status(400).json({ error: 'Apuesta inválida (' + MIN_BET + '-' + MAX_BET + ')' });
 
   try {
     const user = db.prepare('SELECT * FROM users_balance WHERE user_id = ?').get(userId);
@@ -378,11 +375,11 @@ app.get('/', (req, res) => {
   res.json({ status: 'Faucet JHOAL + Dados de Horus funcionando' });
 });
 
-// ==== BOT DE TELEGRAM ====
+// ==== BOT PRINCIPAL DE TELEGRAM ====
 let bot = null;
 if (BOT_TOKEN) {
   bot = new TelegramBot(BOT_TOKEN, { polling: true });
-  console.log('Bot de Telegram iniciado');
+  console.log('Bot principal iniciado');
 
   bot.onText(/\/start/, (msg) => {
     const name = msg.from.first_name || 'guerrero';
@@ -431,9 +428,60 @@ if (BOT_TOKEN) {
 
   bot.onText(/\/help/, (msg) => {
     bot.sendMessage(msg.chat.id,
-      '🆘 *AYUDA*\n\n/start - Iniciar\n/faucet - Abrir faucet\n/price - Precio\n/help - Esta ayuda',
+      '🆘 *AYUDA*\n\n/start - Iniciar\n/faucet - Abrir faucet\n/price - Precio\n/help - Esta ayuda\n\n📩 Soporte: @' + SUPPORT_USERNAME,
       { parse_mode: 'Markdown' }
     );
+  });
+}
+
+// ==== BOT DE SOPORTE (recibe mensajes y los reenvía a ti) ====
+if (SUPPORT_BOT_TOKEN && SUPPORT_CHAT_ID) {
+  const supportBot = new TelegramBot(SUPPORT_BOT_TOKEN, { polling: true });
+  console.log('Bot de soporte iniciado');
+
+  supportBot.onText(/\/start/, (msg) => {
+    const chatId = msg.chat.id;
+    const name = msg.from.first_name || 'usuario';
+    supportBot.sendMessage(chatId,
+      '🆘 *SOPORTE JHOAL*\n\n' +
+      '¡Hola, ' + name + '!\n\n' +
+      'Por favor escribí tu consulta en un solo mensaje. Incluí:\n\n' +
+      '1. Tu problema (ej: depósito no verificado)\n' +
+      '2. El hash de la transacción (si aplica)\n' +
+      '3. Tu ID de Telegram\n\n' +
+      'Te vamos a responder a la brevedad.',
+      { parse_mode: 'Markdown' }
+    );
+  });
+
+  supportBot.on('message', (msg) => {
+    const chatId = msg.chat.id;
+    const text = msg.text;
+
+    if (!text || text.startsWith('/')) return;
+
+    const userName = msg.from.first_name || 'Usuario';
+    const userUsername = msg.from.username ? '@' + msg.from.username : 'sin username';
+    const userId = msg.from.id;
+
+    const supportMessage =
+      '📩 *NUEVO MENSAJE DE SOPORTE*\n\n' +
+      '👤 De: ' + userName + '\n' +
+      '🔗 Username: ' + userUsername + '\n' +
+      '🆔 ID: `' + userId + '`\n\n' +
+      '💬 Mensaje:\n' + text;
+
+    supportBot.sendMessage(SUPPORT_CHAT_ID, supportMessage, {
+      parse_mode: 'Markdown'
+    }).then(() => {
+      supportBot.sendMessage(chatId,
+        '✅ *Mensaje recibido*\n\n' +
+        'Tu consulta fue enviada al equipo de soporte. Te vamos a responder a la brevedad.',
+        { parse_mode: 'Markdown' }
+      );
+    }).catch((err) => {
+      console.error('Error enviando a soporte:', err);
+    });
   });
 }
 
@@ -441,4 +489,6 @@ if (BOT_TOKEN) {
 app.listen(process.env.PORT || 3000, () => {
   console.log('Faucet JHOAL + Dados de Horus corriendo en puerto', process.env.PORT || 3000);
   console.log('Wallet:', wallet.address);
+  console.log('Bot principal:', BOT_TOKEN ? 'SÍ' : 'NO');
+  console.log('Bot de soporte:', SUPPORT_BOT_TOKEN ? 'SÍ' : 'NO');
 });
