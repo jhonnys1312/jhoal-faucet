@@ -9,7 +9,7 @@
   "dependencies": {
     "express": "^4.19.2",
     "ethers": "^6.13.0",
-    "better-sqlite3": "^11.3.0",
+    "@supabase/supabase-js": "^2.45.0",
     "node-telegram-bot-api": "^0.66.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5"
