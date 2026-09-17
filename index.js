@@ -87,14 +87,23 @@ function timeAgo(timestamp) {
   return 'hace ' + Math.floor(seconds / 86400) + 'd';
 }
 
+// ==== PROBABILIDADES DE LOS DADOS (más fáciles) ====
+// x0:    38% (pierde todo)
+// x1.1:  47% (recupera +10%)
+// x2:    10% (duplica)
+// x4:     3% (cuadruplica)
+// x6:   1.3% (sextuplica)
+// x8:   0.5% (octuplica)
+// x10:  0.2% (decuplica)
+// Total: 100% | House edge: ~2.5%
 function spinRoulette() {
   const random = Math.random() * 100;
-  if (random < 40) return 0;
+  if (random < 38) return 0;
   else if (random < 85) return 1.1;
   else if (random < 95) return 2;
   else if (random < 98) return 4;
-  else if (random < 99.5) return 6;
-  else if (random < 99.9) return 8;
+  else if (random < 99.3) return 6;
+  else if (random < 99.8) return 8;
   else return 10;
 }
 
@@ -251,19 +260,16 @@ app.post('/verify-deposit', async (req, res) => {
   }
 
   try {
-    // Verificar que no se haya usado antes
     const existing = db.prepare('SELECT * FROM deposits WHERE tx_hash = ?').get(txHash);
     if (existing) {
       return res.status(400).json({ error: 'Esta transacción ya fue usada' });
     }
 
-    // Obtener la transacción
     const tx = await provider.getTransaction(txHash);
     if (!tx) {
       return res.status(400).json({ error: 'Transacción no encontrada. Espera 1-2 minutos.' });
     }
 
-    // Obtener el receipt (confirmación)
     const receipt = await provider.getTransactionReceipt(txHash);
     if (!receipt) {
       return res.status(400).json({ error: 'Transacción no confirmada todavía. Espera 1-2 minutos.' });
@@ -273,7 +279,6 @@ app.post('/verify-deposit', async (req, res) => {
       return res.status(400).json({ error: 'La transacción falló' });
     }
 
-    // Buscar el evento Transfer del token JHOAL
     const transferTopic = ethers.id('Transfer(address,address,uint256)');
     const transferLog = receipt.logs.find(function(log) {
       return log.topics[0] === transferTopic &&
@@ -284,36 +289,30 @@ app.post('/verify-deposit', async (req, res) => {
       return res.status(400).json({ error: 'No se encontró transferencia de JHOAL en la transacción' });
     }
 
-    // Decodificar el evento
     const iface = new ethers.Interface(['event Transfer(address indexed from, address indexed to, uint256 value)']);
     const decoded = iface.parseLog(transferLog);
 
-    // Verificar que el destino sea la wallet de la faucet
     if (decoded.args.to.toLowerCase() !== wallet.address.toLowerCase()) {
       return res.status(400).json({ error: 'La transferencia no fue a la wallet correcta' });
     }
 
-    // Calcular el monto
     const amount = parseFloat(ethers.formatUnits(decoded.args.value, 18));
 
     if (amount < 1) {
       return res.status(400).json({ error: 'El depósito mínimo es 1 JHOAL' });
     }
 
-    // Verificar antigüedad (última hora)
     const block = await provider.getBlock(receipt.blockNumber);
     const now = Math.floor(Date.now() / 1000);
     if (block && now - block.timestamp > 3600) {
       return res.status(400).json({ error: 'Transacción muy antigua (más de 1 hora)' });
     }
 
-    // Registrar depósito
     const nowReg = Math.floor(Date.now() / 1000);
     db.prepare('INSERT INTO deposits (user_id, wallet, amount, tx_hash, created_at) VALUES (?, ?, ?, ?, ?)').run(
       userId, decoded.args.from, amount, txHash, nowReg
     );
 
-    // Sumar al saldo
     const user = db.prepare('SELECT * FROM users_balance WHERE user_id = ?').get(userId);
     if (user) {
       db.prepare('UPDATE users_balance SET balance = balance + ?, total_deposited = total_deposited + ? WHERE user_id = ?').run(amount, amount, userId);
