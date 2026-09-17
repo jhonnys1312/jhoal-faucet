@@ -58,23 +58,26 @@ const PLANT_LEVELS = {
 const MAX_PLANTS = 12;
 
 function getPlantStatus(plant) {
+  if (plant.status === 'refunded') {
+    return { status: 'refunded', value: 0, minutesLeft: 0, progress: 0, canRefund: false };
+  }
   if (plant.status === 'dry' || !plant.last_watered) {
-    return { status: 'dry', value: 0, minutesLeft: 0, progress: 0 };
+    return { status: 'dry', value: 0, minutesLeft: 0, progress: 0, canRefund: false };
   }
   const now = Math.floor(Date.now() / 1000);
   const elapsed = (now - plant.last_watered) / 60;
   const level = PLANT_LEVELS[plant.level];
 
   if (elapsed < 25) {
-    return { status: 'growing', value: 0, minutesLeft: Math.ceil(25 - elapsed), progress: Math.floor((elapsed / 25) * 100) };
+    return { status: 'growing', value: 0, minutesLeft: Math.ceil(25 - elapsed), progress: Math.floor((elapsed / 25) * 100), canRefund: false };
   } else if (elapsed <= 35) {
-    return { status: 'ready', value: level.fruitValue, minutesLeft: Math.ceil(35 - elapsed), progress: 100 };
+    return { status: 'ready', value: level.fruitValue, minutesLeft: Math.ceil(35 - elapsed), progress: 100, canRefund: false };
   } else if (elapsed <= 60) {
     const withering = (elapsed - 35) / 25;
     const value = level.fruitValue * (1 - withering);
-    return { status: 'withering', value: Math.max(0, value), minutesLeft: Math.ceil(60 - elapsed), progress: 100 };
+    return { status: 'withering', value: Math.max(0, value), minutesLeft: Math.ceil(60 - elapsed), progress: 100, canRefund: false };
   } else {
-    return { status: 'rotten', value: 0, minutesLeft: 0, progress: 0 };
+    return { status: 'rotten', value: 0, minutesLeft: 0, progress: 0, canRefund: true };
   }
 }
 
@@ -125,6 +128,40 @@ async function addHistory(userId, type, amount, description, metadata, txHash) {
     });
   } catch (e) {
     console.error('Error history:', e);
+  }
+}
+
+async function refundPlant(userId, plantId) {
+  try {
+    const { data: plant } = await supabase.from('plants').select('*').eq('id', plantId).eq('user_id', userId).maybeSingle();
+    if (!plant) return { success: false, error: 'Planta no encontrada' };
+
+    const status = getPlantStatus(plant);
+    if (status.status !== 'rotten') return { success: false, error: 'La planta todavía no está podrida' };
+
+    const level = PLANT_LEVELS[plant.level];
+    const refundAmount = level.waterCost * 0.8;
+
+    const user = await ensureUser(userId);
+    const newBalance = parseFloat(user.balance) + refundAmount;
+    await supabase.from('users_balance').update({ balance: newBalance }).eq('user_id', userId);
+
+    await supabase.from('history').insert({
+      user_id: userId,
+      type: 'plant_refund',
+      amount: refundAmount,
+      description: 'Reembolso por planta marchita (' + level.name + ')',
+      metadata: String(plantId),
+      tx_hash: null,
+      created_at: Math.floor(Date.now() / 1000)
+    });
+
+    await supabase.from('plants').update({ status: 'refunded', last_watered: null }).eq('id', plantId);
+
+    return { success: true, amount: refundAmount, message: '¡Recibiste ' + refundAmount.toFixed(2) + ' JHOAL de reembolso!' };
+  } catch (e) {
+    console.error('Error refund:', e);
+    return { success: false, error: e.message };
   }
 }
 
@@ -352,7 +389,7 @@ app.post('/water-plant', async (req, res) => {
     if (!plant) return res.status(400).json({ error: 'Planta no encontrada' });
 
     const status = getPlantStatus(plant);
-    if (status.status !== 'dry' && status.status !== 'rotten') return res.status(400).json({ error: 'La planta todavía tiene fruto o está creciendo' });
+    if (status.status !== 'dry' && status.status !== 'rotten' && status.status !== 'refunded') return res.status(400).json({ error: 'La planta todavía tiene fruto o está creciendo' });
 
     const user = await ensureUser(userId);
     const level = PLANT_LEVELS[plant.level];
@@ -430,6 +467,19 @@ app.post('/sell-plant', async (req, res) => {
   }
 });
 
+// ==== HUERTO: RECLAMAR DEVOLUCIÓN ====
+app.post('/refund-plant', async (req, res) => {
+  const { userId, plantId } = req.body;
+  if (!userId || !plantId) return res.status(400).json({ error: 'Faltan datos' });
+
+  const result = await refundPlant(userId, plantId);
+  if (result.success) {
+    res.json({ success: true, amount: result.amount, message: result.message });
+  } else {
+    res.status(400).json({ error: result.error });
+  }
+});
+
 // ==== HUERTO: MIS PLANTAS ====
 app.get('/my-plants/:userId', async (req, res) => {
   try {
@@ -444,7 +494,9 @@ app.get('/my-plants/:userId', async (req, res) => {
         status: status.status, value: status.value,
         minutesLeft: status.minutesLeft || 0, progress: status.progress || 0,
         waterCost: level.waterCost, fruitValue: level.fruitValue, sellPrice: level.sellPrice,
-        lastWatered: p.last_watered
+        lastWatered: p.last_watered,
+        canRefund: status.canRefund || false,
+        refundAmount: status.canRefund ? (level.waterCost * 0.8) : 0
       };
     });
 
@@ -607,7 +659,6 @@ if (SUPPORT_BOT_TOKEN && SUPPORT_CHAT_ID) {
     );
   });
 
-  // ==== COMANDO /reply (solo admin) ====
   supportBot.onText(/\/reply\s+(\d+)\s+([\s\S]+)/, async (msg, match) => {
     const fromId = msg.from.id;
     const targetId = match[1];
@@ -628,12 +679,10 @@ if (SUPPORT_BOT_TOKEN && SUPPORT_CHAT_ID) {
     }
   });
 
-  // ==== RECIBIR MENSAJES (texto, foto, video, audio, doc, sticker) ====
   supportBot.on('message', (msg) => {
     const chatId = msg.chat.id;
     const text = msg.text;
 
-    // Ignorar comandos
     if (text && text.startsWith('/')) return;
 
     const userName = msg.from.first_name || 'Usuario';
@@ -647,12 +696,10 @@ if (SUPPORT_BOT_TOKEN && SUPPORT_CHAT_ID) {
       '🆔 ID: `' + userId + '`\n\n';
 
     try {
-      // TEXTO
       if (msg.text) {
         supportBot.sendMessage(SUPPORT_CHAT_ID, header + '💬 Mensaje:\n' + msg.text, { parse_mode: 'Markdown' });
         supportBot.sendMessage(chatId, '✅ *Mensaje recibido*\n\nTu consulta fue enviada al equipo de soporte.', { parse_mode: 'Markdown' });
       }
-      // FOTO
       else if (msg.photo) {
         const photo = msg.photo[msg.photo.length - 1];
         supportBot.sendPhoto(SUPPORT_CHAT_ID, photo.file_id, {
@@ -661,7 +708,6 @@ if (SUPPORT_BOT_TOKEN && SUPPORT_CHAT_ID) {
         });
         supportBot.sendMessage(chatId, '✅ *Foto recibida*\n\nFue enviada al equipo de soporte.', { parse_mode: 'Markdown' });
       }
-      // VIDEO
       else if (msg.video) {
         supportBot.sendVideo(SUPPORT_CHAT_ID, msg.video.file_id, {
           caption: header + '🎥 Video' + (msg.caption ? ':\n' + msg.caption : ''),
@@ -669,7 +715,6 @@ if (SUPPORT_BOT_TOKEN && SUPPORT_CHAT_ID) {
         });
         supportBot.sendMessage(chatId, '✅ *Video recibido*\n\nFue enviado al equipo de soporte.', { parse_mode: 'Markdown' });
       }
-      // AUDIO o VOZ
       else if (msg.audio || msg.voice) {
         const audioId = (msg.audio && msg.audio.file_id) || (msg.voice && msg.voice.file_id);
         supportBot.sendAudio(SUPPORT_CHAT_ID, audioId, {
@@ -678,7 +723,6 @@ if (SUPPORT_BOT_TOKEN && SUPPORT_CHAT_ID) {
         });
         supportBot.sendMessage(chatId, '✅ *Audio recibido*\n\nFue enviado al equipo de soporte.', { parse_mode: 'Markdown' });
       }
-      // DOCUMENTO
       else if (msg.document) {
         supportBot.sendDocument(SUPPORT_CHAT_ID, msg.document.file_id, {
           caption: header + '📎 Documento' + (msg.caption ? ':\n' + msg.caption : ''),
@@ -686,13 +730,11 @@ if (SUPPORT_BOT_TOKEN && SUPPORT_CHAT_ID) {
         });
         supportBot.sendMessage(chatId, '✅ *Documento recibido*\n\nFue enviado al equipo de soporte.', { parse_mode: 'Markdown' });
       }
-      // STICKER
       else if (msg.sticker) {
         supportBot.sendMessage(SUPPORT_CHAT_ID, header + '🎨 Sticker', { parse_mode: 'Markdown' });
         supportBot.sendSticker(SUPPORT_CHAT_ID, msg.sticker.file_id);
         supportBot.sendMessage(chatId, '✅ *Sticker recibido*', { parse_mode: 'Markdown' });
       }
-      // OTRO TIPO
       else {
         supportBot.sendMessage(SUPPORT_CHAT_ID, header + '📎 Mensaje tipo desconocido', { parse_mode: 'Markdown' });
         supportBot.sendMessage(chatId, '✅ *Mensaje recibido*');
