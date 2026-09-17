@@ -1,6 +1,6 @@
 import express from 'express';
 import { ethers } from 'ethers';
-import Database from 'better-sqlite3';
+import { createClient } from '@supabase/supabase-js';
 import TelegramBot from 'node-telegram-bot-api';
 import cors from 'cors';
 import 'dotenv/config';
@@ -17,6 +17,8 @@ const PAIR_ADDRESS = '0x70163906f11E7a05eb37Dce319602e7ffc4865e5';
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const SUPPORT_BOT_TOKEN = process.env.SUPPORT_BOT_TOKEN;
 const SUPPORT_CHAT_ID = process.env.SUPPORT_CHAT_ID;
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_SECRET_KEY;
 const MINI_APP_URL = 'https://willowy-starburst-59c5f3.netlify.app';
 const SUPPORT_USERNAME = 'JhoalSupportbot';
 const AMOUNT = ethers.parseUnits('1', 18);
@@ -42,87 +44,20 @@ const PAIR_ABI = [
 ];
 const pair = new ethers.Contract(PAIR_ADDRESS, PAIR_ABI, provider);
 
-// ==== BASE DE DATOS ====
-const db = new Database('faucet.db');
-
-db.exec(`CREATE TABLE IF NOT EXISTS users_balance (
-  user_id INTEGER PRIMARY KEY,
-  balance REAL DEFAULT 0,
-  total_claimed REAL DEFAULT 0,
-  total_won REAL DEFAULT 0,
-  total_lost REAL DEFAULT 0,
-  total_deposited REAL DEFAULT 0,
-  total_withdrawn REAL DEFAULT 0,
-  last_claim INTEGER DEFAULT 0
-)`);
-
-db.exec(`CREATE TABLE IF NOT EXISTS bets (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  user_id INTEGER,
-  amount REAL,
-  multiplier REAL,
-  payout REAL,
-  result TEXT,
-  created_at INTEGER
-)`);
-
-db.exec(`CREATE TABLE IF NOT EXISTS withdrawals (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  user_id INTEGER,
-  wallet TEXT,
-  amount REAL,
-  tx_hash TEXT,
-  created_at INTEGER
-)`);
-
-db.exec(`CREATE TABLE IF NOT EXISTS deposits (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  user_id INTEGER,
-  wallet TEXT,
-  amount REAL,
-  tx_hash TEXT UNIQUE,
-  created_at INTEGER
-)`);
-
-db.exec(`CREATE TABLE IF NOT EXISTS plants (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  user_id INTEGER,
-  level TEXT,
-  planted_at INTEGER,
-  last_watered INTEGER,
-  status TEXT DEFAULT 'dry',
-  created_at INTEGER
-)`);
-
-function timeAgo(timestamp) {
-  const seconds = Math.floor(Date.now() / 1000) - timestamp;
-  if (seconds < 60) return 'hace ' + seconds + 's';
-  if (seconds < 3600) return 'hace ' + Math.floor(seconds / 60) + 'm';
-  if (seconds < 86400) return 'hace ' + Math.floor(seconds / 3600) + 'h';
-  return 'hace ' + Math.floor(seconds / 86400) + 'd';
-}
-
-function spinRoulette() {
-  const random = Math.random() * 100;
-  if (random < 38) return 0;
-  else if (random < 85) return 1.1;
-  else if (random < 95) return 2;
-  else if (random < 98) return 4;
-  else if (random < 99.3) return 6;
-  else if (random < 99.8) return 8;
-  else return 10;
-}
+// ==== SUPABASE ====
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 // ==== HUERTO DE HORUS ====
 const PLANT_LEVELS = {
-  basic: { name: 'Básica', emoji: '🌱', price: 1, waterCost: 0.1, fruitValue: 0.5, growTime: 25, witherTime: 25 },
-  medium: { name: 'Media', emoji: '🌿', price: 5, waterCost: 0.5, fruitValue: 2.5, growTime: 25, witherTime: 25 },
-  premium: { name: 'Premium', emoji: '🌳', price: 25, waterCost: 2.5, fruitValue: 12.5, growTime: 25, witherTime: 25 },
-  pro: { name: 'Pro', emoji: '🌴', price: 100, waterCost: 10, fruitValue: 50, growTime: 25, witherTime: 25 }
+  basic: { name: 'Básica', emoji: '🌱', price: 10, waterCost: 1, fruitValue: 1.5, sellPrice: 8 },
+  medium: { name: 'Media', emoji: '🌿', price: 50, waterCost: 5, fruitValue: 7.5, sellPrice: 40 },
+  premium: { name: 'Premium', emoji: '🌳', price: 250, waterCost: 25, fruitValue: 37.5, sellPrice: 200 },
+  pro: { name: 'Pro', emoji: '🌴', price: 1000, waterCost: 100, fruitValue: 150, sellPrice: 800 }
 };
 
 const MAX_PLANTS = 12;
 
+// Estados: dry (seca), growing (creciendo), ready (lista), withering (marchitándose), rotten (podrida)
 function getPlantStatus(plant) {
   if (plant.status === 'dry' || !plant.last_watered) {
     return { status: 'dry', value: 0, minutesLeft: 0, progress: 0 };
@@ -159,46 +94,103 @@ function getPlantStatus(plant) {
   }
 }
 
+// ==== HELPERS ====
+function timeAgo(timestamp) {
+  const seconds = Math.floor(Date.now() / 1000) - timestamp;
+  if (seconds < 60) return 'hace ' + seconds + 's';
+  if (seconds < 3600) return 'hace ' + Math.floor(seconds / 60) + 'm';
+  if (seconds < 86400) return 'hace ' + Math.floor(seconds / 3600) + 'h';
+  return 'hace ' + Math.floor(seconds / 86400) + 'd';
+}
+
+function spinRoulette() {
+  const random = Math.random() * 100;
+  if (random < 38) return 0;
+  else if (random < 85) return 1.1;
+  else if (random < 95) return 2;
+  else if (random < 98) return 4;
+  else if (random < 99.3) return 6;
+  else if (random < 99.8) return 8;
+  else return 10;
+}
+
+async function getUser(userId) {
+  const { data } = await supabase.from('users_balance').select('*').eq('user_id', userId).maybeSingle();
+  return data;
+}
+
+async function ensureUser(userId) {
+  const user = await getUser(userId);
+  if (!user) {
+    await supabase.from('users_balance').insert({ user_id: userId, balance: 0 });
+    return await getUser(userId);
+  }
+  return user;
+}
+
+async function addHistory(userId, type, amount, description, metadata, txHash) {
+  try {
+    await supabase.from('history').insert({
+      user_id: userId,
+      type: type,
+      amount: amount,
+      description: description,
+      metadata: metadata || null,
+      tx_hash: txHash || null,
+      created_at: Math.floor(Date.now() / 1000)
+    });
+  } catch (e) {
+    console.error('Error history:', e);
+  }
+}
+
 // ==== ENDPOINT: RECLAMAR ====
 app.post('/claim', async (req, res) => {
   const { userId } = req.body;
   if (!userId) return res.status(400).json({ error: 'Falta userId' });
 
-  const now = Math.floor(Date.now() / 1000);
-  const user = db.prepare('SELECT * FROM users_balance WHERE user_id = ?').get(userId);
-
-  if (user && now - user.last_claim < COOLDOWN) {
-    const restante = COOLDOWN - (now - user.last_claim);
-    return res.status(429).json({
-      error: 'Espera ' + Math.floor(restante / 60) + 'm ' + (restante % 60) + 's antes de reclamar otra vez'
-    });
-  }
-
   try {
-    if (user) {
-      db.prepare('UPDATE users_balance SET balance = balance + 1, total_claimed = total_claimed + 1, last_claim = ? WHERE user_id = ?').run(now, userId);
-    } else {
-      db.prepare('INSERT INTO users_balance (user_id, balance, total_claimed, last_claim) VALUES (?, 1, 1, ?)').run(userId, now);
+    const user = await ensureUser(userId);
+    const now = Math.floor(Date.now() / 1000);
+
+    if (user.last_claim && now - user.last_claim < COOLDOWN) {
+      const restante = COOLDOWN - (now - user.last_claim);
+      return res.status(429).json({
+        error: 'Espera ' + Math.floor(restante / 60) + 'm ' + (restante % 60) + 's antes de reclamar otra vez'
+      });
     }
+
+    const newBalance = parseFloat(user.balance) + 1;
+    const newClaimed = parseFloat(user.total_claimed || 0) + 1;
+
+    await supabase.from('users_balance').update({
+      balance: newBalance,
+      total_claimed: newClaimed,
+      last_claim: now
+    }).eq('user_id', userId);
+
+    await addHistory(userId, 'faucet', 1, 'Reclamo del faucet', null, null);
+
     res.json({ success: true, amount: 1, message: '¡1 JHOAL añadido a tu saldo!' });
   } catch (error) {
+    console.error('Error claim:', error);
     res.status(500).json({ error: 'Error: ' + error.message });
   }
 });
 
-// ==== ENDPOINT: BALANCE DEL JUEGO ====
-app.get('/balance-game/:userId', (req, res) => {
+// ==== ENDPOINT: BALANCE ====
+app.get('/balance-game/:userId', async (req, res) => {
   try {
-    const user = db.prepare('SELECT * FROM users_balance WHERE user_id = ?').get(req.params.userId);
+    const user = await getUser(req.params.userId);
     if (!user) {
       return res.json({ success: true, balance: 0, total_claimed: 0, total_won: 0, total_lost: 0, last_claim: 0 });
     }
     res.json({
       success: true,
-      balance: user.balance,
-      total_claimed: user.total_claimed,
-      total_won: user.total_won,
-      total_lost: user.total_lost,
+      balance: parseFloat(user.balance),
+      total_claimed: parseFloat(user.total_claimed || 0),
+      total_won: parseFloat(user.total_won || 0),
+      total_lost: parseFloat(user.total_lost || 0),
       last_claim: user.last_claim || 0
     });
   } catch (e) {
@@ -213,35 +205,66 @@ app.post('/bet', async (req, res) => {
   if (amount < MIN_BET || amount > MAX_BET) return res.status(400).json({ error: 'Apuesta inválida (' + MIN_BET + '-' + MAX_BET + ')' });
 
   try {
-    const user = db.prepare('SELECT * FROM users_balance WHERE user_id = ?').get(userId);
-    if (!user || user.balance < amount) return res.status(400).json({ error: 'Saldo insuficiente' });
+    const user = await ensureUser(userId);
+    if (parseFloat(user.balance) < amount) return res.status(400).json({ error: 'Saldo insuficiente' });
 
     const multiplier = spinRoulette();
     const payout = amount * multiplier;
     const profit = payout - amount;
     const now = Math.floor(Date.now() / 1000);
 
+    let newBalance, newWon, newLost;
     if (multiplier === 0) {
-      db.prepare('UPDATE users_balance SET balance = balance - ?, total_lost = total_lost + ? WHERE user_id = ?').run(amount, amount, userId);
+      newBalance = parseFloat(user.balance) - amount;
+      newWon = parseFloat(user.total_won || 0);
+      newLost = parseFloat(user.total_lost || 0) + amount;
     } else {
-      db.prepare('UPDATE users_balance SET balance = balance - ? + ?, total_won = total_won + ? WHERE user_id = ?').run(amount, payout, profit, userId);
+      newBalance = parseFloat(user.balance) - amount + payout;
+      newWon = parseFloat(user.total_won || 0) + profit;
+      newLost = parseFloat(user.total_lost || 0);
     }
 
-    db.prepare('INSERT INTO bets (user_id, amount, multiplier, payout, result, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
-      userId, amount, multiplier, payout, multiplier === 0 ? 'lose' : 'win', now
-    );
+    await supabase.from('users_balance').update({
+      balance: newBalance,
+      total_won: newWon,
+      total_lost: newLost
+    }).eq('user_id', userId);
 
-    const newUser = db.prepare('SELECT balance FROM users_balance WHERE user_id = ?').get(userId);
+    await supabase.from('bets').insert({
+      user_id: userId,
+      amount: amount,
+      multiplier: multiplier,
+      payout: payout,
+      result: multiplier === 0 ? 'lose' : 'win',
+      created_at: now
+    });
+
+    if (multiplier === 0) {
+      await addHistory(userId, 'dice_lose', -amount, 'Perdiste en los dados (x0)', null, null);
+    } else {
+      await addHistory(userId, 'dice_win', profit, 'Ganaste x' + multiplier + ' en los dados', null, null);
+    }
 
     res.json({
       success: true,
       multiplier: multiplier,
       payout: payout,
       profit: profit,
-      newBalance: newUser.balance
+      newBalance: newBalance
     });
   } catch (error) {
+    console.error('Error bet:', error);
     res.status(500).json({ error: 'Error: ' + error.message });
+  }
+});
+
+// ==== ENDPOINT: HISTORIAL DE APUESTAS ====
+app.get('/bet-history/:userId', async (req, res) => {
+  try {
+    const { data } = await supabase.from('bets').select('*').eq('user_id', req.params.userId).order('created_at', { ascending: false }).limit(10);
+    res.json({ success: true, bets: data || [] });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
 });
 
@@ -253,19 +276,30 @@ app.post('/withdraw', async (req, res) => {
   if (amount <= 0) return res.status(400).json({ error: 'Cantidad inválida' });
 
   try {
-    const user = db.prepare('SELECT * FROM users_balance WHERE user_id = ?').get(userId);
-    if (!user || user.balance < amount) return res.status(400).json({ error: 'Saldo insuficiente' });
+    const user = await ensureUser(userId);
+    if (parseFloat(user.balance) < amount) return res.status(400).json({ error: 'Saldo insuficiente' });
 
     const amountWei = ethers.parseUnits(amount.toString(), 18);
     const tx = await token.transfer(userWallet, amountWei);
     console.log('Withdraw TX:', tx.hash);
 
-    db.prepare('UPDATE users_balance SET balance = balance - ?, total_withdrawn = total_withdrawn + ? WHERE user_id = ?').run(amount, amount, userId);
+    const newBalance = parseFloat(user.balance) - amount;
+    const newWithdrawn = parseFloat(user.total_withdrawn || 0) + amount;
 
-    const now = Math.floor(Date.now() / 1000);
-    db.prepare('INSERT INTO withdrawals (user_id, wallet, amount, tx_hash, created_at) VALUES (?, ?, ?, ?, ?)').run(
-      userId, userWallet, amount, tx.hash, now
-    );
+    await supabase.from('users_balance').update({
+      balance: newBalance,
+      total_withdrawn: newWithdrawn
+    }).eq('user_id', userId);
+
+    await supabase.from('withdrawals').insert({
+      user_id: userId,
+      wallet: userWallet,
+      amount: amount,
+      tx_hash: tx.hash,
+      created_at: Math.floor(Date.now() / 1000)
+    });
+
+    await addHistory(userId, 'withdraw', -amount, 'Retiro a wallet', null, tx.hash);
 
     await tx.wait();
 
@@ -276,17 +310,8 @@ app.post('/withdraw', async (req, res) => {
       amount: amount
     });
   } catch (error) {
+    console.error('Error withdraw:', error);
     res.status(500).json({ error: 'Error: ' + error.message });
-  }
-});
-
-// ==== ENDPOINT: HISTORIAL DE APUESTAS ====
-app.get('/bet-history/:userId', (req, res) => {
-  try {
-    const bets = db.prepare('SELECT * FROM bets WHERE user_id = ? ORDER BY created_at DESC LIMIT 10').all(req.params.userId);
-    res.json({ success: true, bets: bets });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
   }
 });
 
@@ -304,43 +329,26 @@ app.get('/deposit-info', (req, res) => {
 app.post('/verify-deposit', async (req, res) => {
   const { userId, txHash } = req.body;
 
-  if (!userId || !txHash) {
-    return res.status(400).json({ error: 'Faltan datos' });
-  }
-
-  if (!/^0x[a-fA-F0-9]{64}$/.test(txHash)) {
-    return res.status(400).json({ error: 'Hash de transacción inválido' });
-  }
+  if (!userId || !txHash) return res.status(400).json({ error: 'Faltan datos' });
+  if (!/^0x[a-fA-F0-9]{64}$/.test(txHash)) return res.status(400).json({ error: 'Hash inválido' });
 
   try {
-    const existing = db.prepare('SELECT * FROM deposits WHERE tx_hash = ?').get(txHash);
-    if (existing) {
-      return res.status(400).json({ error: 'Esta transacción ya fue usada' });
-    }
+    const { data: existing } = await supabase.from('deposits').select('*').eq('tx_hash', txHash).maybeSingle();
+    if (existing) return res.status(400).json({ error: 'Esta transacción ya fue usada' });
 
     const tx = await provider.getTransaction(txHash);
-    if (!tx) {
-      return res.status(400).json({ error: 'Transacción no encontrada. Espera 1-2 minutos.' });
-    }
+    if (!tx) return res.status(400).json({ error: 'Transacción no encontrada. Espera 1-2 minutos.' });
 
     const receipt = await provider.getTransactionReceipt(txHash);
-    if (!receipt) {
-      return res.status(400).json({ error: 'Transacción no confirmada todavía. Espera 1-2 minutos.' });
-    }
-
-    if (receipt.status !== 1) {
-      return res.status(400).json({ error: 'La transacción falló' });
-    }
+    if (!receipt) return res.status(400).json({ error: 'Transacción no confirmada todavía.' });
+    if (receipt.status !== 1) return res.status(400).json({ error: 'La transacción falló' });
 
     const transferTopic = ethers.id('Transfer(address,address,uint256)');
     const transferLog = receipt.logs.find(function(log) {
-      return log.topics[0] === transferTopic &&
-             log.address.toLowerCase() === TOKEN_ADDRESS.toLowerCase();
+      return log.topics[0] === transferTopic && log.address.toLowerCase() === TOKEN_ADDRESS.toLowerCase();
     });
 
-    if (!transferLog) {
-      return res.status(400).json({ error: 'No se encontró transferencia de JHOAL en la transacción' });
-    }
+    if (!transferLog) return res.status(400).json({ error: 'No se encontró transferencia de JHOAL' });
 
     const iface = new ethers.Interface(['event Transfer(address indexed from, address indexed to, uint256 value)']);
     const decoded = iface.parseLog(transferLog);
@@ -350,10 +358,7 @@ app.post('/verify-deposit', async (req, res) => {
     }
 
     const amount = parseFloat(ethers.formatUnits(decoded.args.value, 18));
-
-    if (amount < 1) {
-      return res.status(400).json({ error: 'El depósito mínimo es 1 JHOAL' });
-    }
+    if (amount < 1) return res.status(400).json({ error: 'El depósito mínimo es 1 JHOAL' });
 
     const block = await provider.getBlock(receipt.blockNumber);
     const now = Math.floor(Date.now() / 1000);
@@ -361,17 +366,24 @@ app.post('/verify-deposit', async (req, res) => {
       return res.status(400).json({ error: 'Transacción muy antigua (más de 1 hora)' });
     }
 
-    const nowReg = Math.floor(Date.now() / 1000);
-    db.prepare('INSERT INTO deposits (user_id, wallet, amount, tx_hash, created_at) VALUES (?, ?, ?, ?, ?)').run(
-      userId, decoded.args.from, amount, txHash, nowReg
-    );
+    await supabase.from('deposits').insert({
+      user_id: userId,
+      wallet: decoded.args.from,
+      amount: amount,
+      tx_hash: txHash,
+      created_at: now
+    });
 
-    const user = db.prepare('SELECT * FROM users_balance WHERE user_id = ?').get(userId);
-    if (user) {
-      db.prepare('UPDATE users_balance SET balance = balance + ?, total_deposited = total_deposited + ? WHERE user_id = ?').run(amount, amount, userId);
-    } else {
-      db.prepare('INSERT INTO users_balance (user_id, balance, total_deposited) VALUES (?, ?, ?)').run(userId, amount, amount);
-    }
+    const user = await ensureUser(userId);
+    const newBalance = parseFloat(user.balance) + amount;
+    const newDeposited = parseFloat(user.total_deposited || 0) + amount;
+
+    await supabase.from('users_balance').update({
+      balance: newBalance,
+      total_deposited: newDeposited
+    }).eq('user_id', userId);
+
+    await addHistory(userId, 'deposit', amount, 'Depósito de JHOAL', null, txHash);
 
     res.json({
       success: true,
@@ -383,36 +395,41 @@ app.post('/verify-deposit', async (req, res) => {
     res.status(500).json({ error: 'Error al verificar: ' + error.message });
   }
 });
-
 // ==== ENDPOINTS: HUERTO DE HORUS ====
 
 // Comprar planta
 app.post('/buy-plant', async (req, res) => {
   const { userId, level } = req.body;
-  
   if (!userId || !level) return res.status(400).json({ error: 'Faltan datos' });
   if (!PLANT_LEVELS[level]) return res.status(400).json({ error: 'Nivel inválido' });
-  
+
   try {
-    const user = db.prepare('SELECT * FROM users_balance WHERE user_id = ?').get(userId);
-    if (!user) return res.status(400).json({ error: 'Usuario no existe' });
-    
-    const plantCount = db.prepare('SELECT COUNT(*) as count FROM plants WHERE user_id = ?').get(userId);
-    if (plantCount.count >= MAX_PLANTS) {
-      return res.status(400).json({ error: 'Máximo ' + MAX_PLANTS + ' plantas por usuario' });
-    }
-    
+    const user = await ensureUser(userId);
+    const { count } = await supabase.from('plants').select('*', { count: 'exact', head: true }).eq('user_id', userId);
+
+    if (count >= MAX_PLANTS) return res.status(400).json({ error: 'Máximo ' + MAX_PLANTS + ' plantas por usuario' });
+
     const plantInfo = PLANT_LEVELS[level];
-    if (user.balance < plantInfo.price) {
+    if (parseFloat(user.balance) < plantInfo.price) {
       return res.status(400).json({ error: 'Saldo insuficiente. Necesitás ' + plantInfo.price + ' JHOAL' });
     }
-    
+
     const now = Math.floor(Date.now() / 1000);
-    db.prepare('UPDATE users_balance SET balance = balance - ? WHERE user_id = ?').run(plantInfo.price, userId);
-    db.prepare('INSERT INTO plants (user_id, level, status, created_at) VALUES (?, ?, ?, ?)').run(userId, level, 'dry', now);
-    
+    const newBalance = parseFloat(user.balance) - plantInfo.price;
+
+    await supabase.from('users_balance').update({ balance: newBalance }).eq('user_id', userId);
+    await supabase.from('plants').insert({
+      user_id: userId,
+      level: level,
+      status: 'dry',
+      created_at: now
+    });
+
+    await addHistory(userId, 'plant_buy', -plantInfo.price, 'Compraste planta ' + plantInfo.name, null, null);
+
     res.json({ success: true, message: '¡Compraste una planta ' + plantInfo.name + '!' });
   } catch (error) {
+    console.error('Error buy-plant:', error);
     res.status(500).json({ error: 'Error: ' + error.message });
   }
 });
@@ -420,31 +437,35 @@ app.post('/buy-plant', async (req, res) => {
 // Regar planta
 app.post('/water-plant', async (req, res) => {
   const { userId, plantId } = req.body;
-  
   if (!userId || !plantId) return res.status(400).json({ error: 'Faltan datos' });
-  
+
   try {
-    const plant = db.prepare('SELECT * FROM plants WHERE id = ? AND user_id = ?').get(plantId, userId);
+    const { data: plant } = await supabase.from('plants').select('*').eq('id', plantId).eq('user_id', userId).maybeSingle();
     if (!plant) return res.status(400).json({ error: 'Planta no encontrada' });
-    
+
     const status = getPlantStatus(plant);
     if (status.status !== 'dry' && status.status !== 'rotten') {
       return res.status(400).json({ error: 'La planta todavía tiene fruto o está creciendo' });
     }
-    
-    const user = db.prepare('SELECT * FROM users_balance WHERE user_id = ?').get(userId);
+
+    const user = await ensureUser(userId);
     const level = PLANT_LEVELS[plant.level];
-    
-    if (user.balance < level.waterCost) {
+
+    if (parseFloat(user.balance) < level.waterCost) {
       return res.status(400).json({ error: 'Saldo insuficiente. Necesitás ' + level.waterCost + ' JHOAL' });
     }
-    
+
     const now = Math.floor(Date.now() / 1000);
-    db.prepare('UPDATE users_balance SET balance = balance - ? WHERE user_id = ?').run(level.waterCost, userId);
-    db.prepare('UPDATE plants SET last_watered = ?, status = ? WHERE id = ?').run(now, 'growing', plantId);
-    
+    const newBalance = parseFloat(user.balance) - level.waterCost;
+
+    await supabase.from('users_balance').update({ balance: newBalance }).eq('user_id', userId);
+    await supabase.from('plants').update({ last_watered: now, status: 'growing' }).eq('id', plantId);
+
+    await addHistory(userId, 'plant_water', -level.waterCost, 'Regaste ' + level.name, null, null);
+
     res.json({ success: true, message: '¡Regaste tu planta! Lista en 25 minutos.' });
   } catch (error) {
+    console.error('Error water-plant:', error);
     res.status(500).json({ error: 'Error: ' + error.message });
   }
 });
@@ -452,37 +473,71 @@ app.post('/water-plant', async (req, res) => {
 // Cosechar
 app.post('/harvest', async (req, res) => {
   const { userId, plantId } = req.body;
-  
   if (!userId || !plantId) return res.status(400).json({ error: 'Faltan datos' });
-  
+
   try {
-    const plant = db.prepare('SELECT * FROM plants WHERE id = ? AND user_id = ?').get(plantId, userId);
+    const { data: plant } = await supabase.from('plants').select('*').eq('id', plantId).eq('user_id', userId).maybeSingle();
     if (!plant) return res.status(400).json({ error: 'Planta no encontrada' });
-    
+
     const status = getPlantStatus(plant);
     if (status.status !== 'ready' && status.status !== 'withering') {
       return res.status(400).json({ error: 'Todavía no podés cosechar esta planta' });
     }
-    
+
     const value = status.value;
     if (value <= 0) return res.status(400).json({ error: 'El fruto está podrido' });
-    
-    db.prepare('UPDATE users_balance SET balance = balance + ?, total_won = total_won + ? WHERE user_id = ?').run(value, value, userId);
-    db.prepare('UPDATE plants SET status = ?, last_watered = NULL WHERE id = ?').run('dry', plantId);
-    
+
+    const user = await ensureUser(userId);
+    const newBalance = parseFloat(user.balance) + value;
+    const newWon = parseFloat(user.total_won || 0) + value;
+
+    await supabase.from('users_balance').update({ balance: newBalance, total_won: newWon }).eq('user_id', userId);
+    await supabase.from('plants').update({ status: 'dry', last_watered: null }).eq('id', plantId);
+
+    const level = PLANT_LEVELS[plant.level];
+    await addHistory(userId, 'plant_harvest', value, 'Cosechaste ' + level.name, null, null);
+
     res.json({ success: true, value: value, message: '¡Cosechaste ' + value.toFixed(2) + ' JHOAL!' });
   } catch (error) {
+    console.error('Error harvest:', error);
+    res.status(500).json({ error: 'Error: ' + error.message });
+  }
+});
+
+// Vender planta
+app.post('/sell-plant', async (req, res) => {
+  const { userId, plantId } = req.body;
+  if (!userId || !plantId) return res.status(400).json({ error: 'Faltan datos' });
+
+  try {
+    const { data: plant } = await supabase.from('plants').select('*').eq('id', plantId).eq('user_id', userId).maybeSingle();
+    if (!plant) return res.status(400).json({ error: 'Planta no encontrada' });
+
+    const level = PLANT_LEVELS[plant.level];
+    const sellValue = level.sellPrice;
+
+    const user = await ensureUser(userId);
+    const newBalance = parseFloat(user.balance) + sellValue;
+
+    await supabase.from('users_balance').update({ balance: newBalance }).eq('user_id', userId);
+    await supabase.from('plants').delete().eq('id', plantId);
+
+    await addHistory(userId, 'plant_sell', sellValue, 'Vendiste ' + level.name, null, null);
+
+    res.json({ success: true, value: sellValue, message: '¡Vendiste por ' + sellValue + ' JHOAL!' });
+  } catch (error) {
+    console.error('Error sell-plant:', error);
     res.status(500).json({ error: 'Error: ' + error.message });
   }
 });
 
 // Ver mis plantas
-app.get('/my-plants/:userId', (req, res) => {
+app.get('/my-plants/:userId', async (req, res) => {
   try {
     const userId = req.params.userId;
-    const plants = db.prepare('SELECT * FROM plants WHERE user_id = ? ORDER BY created_at ASC').all(userId);
-    
-    const plantsWithStatus = plants.map(function(p) {
+    const { data: plants } = await supabase.from('plants').select('*').eq('user_id', userId).order('created_at', { ascending: true });
+
+    const plantsWithStatus = (plants || []).map(function(p) {
       const status = getPlantStatus(p);
       const level = PLANT_LEVELS[p.level];
       return {
@@ -496,18 +551,64 @@ app.get('/my-plants/:userId', (req, res) => {
         progress: status.progress || 0,
         waterCost: level.waterCost,
         fruitValue: level.fruitValue,
+        sellPrice: level.sellPrice,
         lastWatered: p.last_watered
       };
     });
-    
+
     res.json({
       success: true,
       plants: plantsWithStatus,
-      count: plants.length,
+      count: plantsWithStatus.length,
       maxPlants: MAX_PLANTS,
       plantLevels: PLANT_LEVELS
     });
   } catch (error) {
+    console.error('Error my-plants:', error);
+    res.status(500).json({ error: 'Error: ' + error.message });
+  }
+});
+
+// ==== ENDPOINT: HISTORIAL COMPLETO ====
+app.get('/history/:userId', async (req, res) => {
+  try {
+    const userId = req.params.userId;
+    const limit = parseInt(req.query.limit) || 50;
+    const type = req.query.type;
+
+    let query = supabase.from('history').select('*').eq('user_id', userId).order('created_at', { ascending: false }).limit(limit);
+    if (type && type !== 'all') query = query.eq('type', type);
+
+    const { data: history } = await query;
+
+    const { data: allHistory } = await supabase.from('history').select('type, amount').eq('user_id', userId);
+
+    let summary = {
+      faucet: 0,
+      dice: 0,
+      deposit: 0,
+      withdraw: 0,
+      garden: 0,
+      total: 0
+    };
+
+    (allHistory || []).forEach(function(h) {
+      const amount = parseFloat(h.amount) || 0;
+      if (h.type === 'faucet') summary.faucet += amount;
+      else if (h.type === 'dice_win' || h.type === 'dice_lose') summary.dice += amount;
+      else if (h.type === 'deposit') summary.deposit += amount;
+      else if (h.type === 'withdraw') summary.withdraw += amount;
+      else if (h.type && h.type.startsWith('plant_')) summary.garden += amount;
+      summary.total += amount;
+    });
+
+    res.json({
+      success: true,
+      history: history || [],
+      summary: summary
+    });
+  } catch (error) {
+    console.error('Error history:', error);
     res.status(500).json({ error: 'Error: ' + error.message });
   }
 });
@@ -556,7 +657,7 @@ app.get('/balance', async (req, res) => {
 
 // ==== ENDPOINT: ROOT ====
 app.get('/', (req, res) => {
-  res.json({ status: 'Faucet JHOAL + Dados de Horus + Huerto funcionando' });
+  res.json({ status: 'Faucet JHOAL + Dados + Huerto + Historial funcionando' });
 });
 
 // ==== BOT PRINCIPAL ====
@@ -573,6 +674,7 @@ if (BOT_TOKEN) {
       '💰 Reclama *1 JHOAL GRATIS* cada 30 minutos\n' +
       '🎲 Juega en *Los Dados de Horus*\n' +
       '🌱 Planta en el *Huerto de Horus*\n' +
+      '📜 Mirá tu *Historial*\n' +
       '📊 Precio actual: *$0.00005 USD*\n\n' +
       '👉 Toca "Abrir Faucet" para empezar.',
       { parse_mode: 'Markdown' }
@@ -672,8 +774,9 @@ if (SUPPORT_BOT_TOKEN && SUPPORT_CHAT_ID) {
 
 // ==== INICIAR SERVIDOR ====
 app.listen(process.env.PORT || 3000, () => {
-  console.log('Faucet JHOAL + Dados + Huerto corriendo en puerto', process.env.PORT || 3000);
+  console.log('Faucet JHOAL + Dados + Huerto + Historial corriendo en puerto', process.env.PORT || 3000);
   console.log('Wallet:', wallet.address);
   console.log('Bot principal:', BOT_TOKEN ? 'SÍ' : 'NO');
   console.log('Bot de soporte:', SUPPORT_BOT_TOKEN ? 'SÍ' : 'NO');
+  console.log('Supabase:', SUPABASE_URL ? 'SÍ' : 'NO');
 });
