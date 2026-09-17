@@ -15,7 +15,6 @@ const PRIVATE_KEY = process.env.PRIVATE_KEY;
 const TOKEN_ADDRESS = process.env.TOKEN_ADDRESS;
 const PAIR_ADDRESS = '0x70163906f11E7a05eb37Dce319602e7ffc4865e5';
 const BOT_TOKEN = process.env.BOT_TOKEN;
-const BSCSCAN_API_KEY = process.env.BSCSCAN_API_KEY;
 const MINI_APP_URL = 'https://willowy-starburst-59c5f3.netlify.app';
 const AMOUNT = ethers.parseUnits('1', 18);
 const COOLDOWN = 30 * 60;
@@ -239,7 +238,7 @@ app.get('/deposit-info', (req, res) => {
   });
 });
 
-// ==== ENDPOINT: VERIFICAR DEPÓSITO ====
+// ==== ENDPOINT: VERIFICAR DEPÓSITO (ethers.js directo, sin APIs externas) ====
 app.post('/verify-deposit', async (req, res) => {
   const { userId, txHash } = req.body;
 
@@ -258,28 +257,20 @@ app.post('/verify-deposit', async (req, res) => {
       return res.status(400).json({ error: 'Esta transacción ya fue usada' });
     }
 
-    // Consultar Etherscan API V2 (chainid=56 para BSC)
-    const url = `https://api.etherscan.io/v2/api?chainid=56&module=account&action=tokentx&contractaddress=${TOKEN_ADDRESS}&address=${wallet.address}&page=1&offset=20&sort=desc&apikey=${BSCSCAN_API_KEY}`;
-    
-    const response = await fetch(url);
-    const data = await response.json();
-
-    if (!data.result || !Array.isArray(data.result)) {
-      return res.status(500).json({ error: 'Error al consultar Etherscan. Intenta más tarde.' });
-    }
-
-    // Buscar la transacción en la lista
-    const tx = data.result.find(t => t.hash.toLowerCase() === txHash.toLowerCase());
-
+    // Obtener la transacción
+    const tx = await provider.getTransaction(txHash);
     if (!tx) {
-      return res.status(400).json({ error: 'Transacción no encontrada. Espera 1-2 minutos y vuelve a intentar.' });
+      return res.status(400).json({ error: 'Transacción no encontrada. Espera 1-2 minutos.' });
     }
 
-    // Verificar que sea reciente (últimos 60 min)
-    const txTime = parseInt(tx.timeStamp);
-    const now = Math.floor(Date.now() / 1000);
-    if (now - txTime > 3600) {
-      return res.status(400).json({ error: 'Transacción muy antigua (más de 1 hora)' });
+    // Obtener el receipt (confirmación)
+    const receipt = await provider.getTransactionReceipt(txHash);
+    if (!receipt) {
+      return res.status(400).json({ error: 'Transacción no confirmada todavía. Espera 1-2 minutos.' });
+    }
+
+    if (receipt.status !== 1) {
+      return res.status(400).json({ error: 'La transacción falló' });
     }
 
     // Verificar que vaya a la wallet de la faucet
@@ -287,22 +278,44 @@ app.post('/verify-deposit', async (req, res) => {
       return res.status(400).json({ error: 'La transacción no fue enviada a la wallet correcta' });
     }
 
-    // Verificar que sea del token correcto
-    if (tx.contractAddress.toLowerCase() !== TOKEN_ADDRESS.toLowerCase()) {
-      return res.status(400).json({ error: 'Token incorrecto' });
+    // Buscar el evento Transfer del token JHOAL
+    const transferTopic = ethers.id('Transfer(address,address,uint256)');
+    const transferLog = receipt.logs.find(function(log) {
+      return log.topics[0] === transferTopic &&
+             log.address.toLowerCase() === TOKEN_ADDRESS.toLowerCase();
+    });
+
+    if (!transferLog) {
+      return res.status(400).json({ error: 'No se encontró transferencia de JHOAL en la transacción' });
     }
 
-    // Calcular el monto (formato JHOAL, 18 decimales)
-    const amount = parseFloat(tx.value) / 1e18;
+    // Decodificar el evento
+    const iface = new ethers.Interface(['event Transfer(address indexed from, address indexed to, uint256 value)']);
+    const decoded = iface.parseLog(transferLog);
+
+    // Verificar que el destino sea la wallet de la faucet
+    if (decoded.args.to.toLowerCase() !== wallet.address.toLowerCase()) {
+      return res.status(400).json({ error: 'La transferencia no fue a la wallet correcta' });
+    }
+
+    // Calcular el monto
+    const amount = parseFloat(ethers.formatUnits(decoded.args.value, 18));
 
     if (amount < 1) {
       return res.status(400).json({ error: 'El depósito mínimo es 1 JHOAL' });
     }
 
+    // Verificar antigüedad
+    const block = await provider.getBlock(receipt.blockNumber);
+    const now = Math.floor(Date.now() / 1000);
+    if (block && now - block.timestamp > 3600) {
+      return res.status(400).json({ error: 'Transacción muy antigua (más de 1 hora)' });
+    }
+
     // Registrar depósito
-    const now2 = Math.floor(Date.now() / 1000);
+    const nowReg = Math.floor(Date.now() / 1000);
     db.prepare('INSERT INTO deposits (user_id, wallet, amount, tx_hash, created_at) VALUES (?, ?, ?, ?, ?)').run(
-      userId, tx.from, amount, txHash, now2
+      userId, decoded.args.from, amount, txHash, nowReg
     );
 
     // Sumar al saldo
@@ -320,7 +333,7 @@ app.post('/verify-deposit', async (req, res) => {
     });
   } catch (error) {
     console.error('Error deposit:', error);
-    res.status(500).json({ error: 'Error: ' + error.message });
+    res.status(500).json({ error: 'Error al verificar: ' + error.message });
   }
 });
 
@@ -429,10 +442,3 @@ if (BOT_TOKEN) {
     );
   });
 }
-
-// ==== INICIAR SERVIDOR ====
-app.listen(process.env.PORT || 3000, () => {
-  console.log('Faucet JHOAL + Dados de Horus corriendo en puerto', process.env.PORT || 3000);
-  console.log('Wallet:', wallet.address);
-  console.log('BscScan API:', BSCSCAN_API_KEY ? 'SÍ' : 'NO');
-});
