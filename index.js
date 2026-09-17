@@ -15,10 +15,10 @@ const PRIVATE_KEY = process.env.PRIVATE_KEY;
 const TOKEN_ADDRESS = process.env.TOKEN_ADDRESS;
 const PAIR_ADDRESS = '0x70163906f11E7a05eb37Dce319602e7ffc4865e5';
 const BOT_TOKEN = process.env.BOT_TOKEN;
+const BSCSCAN_API_KEY = process.env.BSCSCAN_API_KEY;
 const MINI_APP_URL = 'https://willowy-starburst-59c5f3.netlify.app';
 const AMOUNT = ethers.parseUnits('1', 18);
 const COOLDOWN = 30 * 60;
-const MIN_WITHDRAW = ethers.parseUnits('1', 18); // Sin mínimo (1 JHOAL técnico)
 // ================
 
 const provider = new ethers.JsonRpcProvider(RPC);
@@ -41,17 +41,17 @@ const pair = new ethers.Contract(PAIR_ADDRESS, PAIR_ABI, provider);
 // ==== BASE DE DATOS ====
 const db = new Database('faucet.db');
 
-// Tabla de usuarios (saldo interno)
 db.exec(`CREATE TABLE IF NOT EXISTS users_balance (
   user_id INTEGER PRIMARY KEY,
   balance REAL DEFAULT 0,
   total_claimed REAL DEFAULT 0,
   total_won REAL DEFAULT 0,
   total_lost REAL DEFAULT 0,
+  total_deposited REAL DEFAULT 0,
+  total_withdrawn REAL DEFAULT 0,
   last_claim INTEGER DEFAULT 0
 )`);
 
-// Tabla de apuestas
 db.exec(`CREATE TABLE IF NOT EXISTS bets (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id INTEGER,
@@ -62,7 +62,6 @@ db.exec(`CREATE TABLE IF NOT EXISTS bets (
   created_at INTEGER
 )`);
 
-// Tabla de retiros
 db.exec(`CREATE TABLE IF NOT EXISTS withdrawals (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id INTEGER,
@@ -72,17 +71,14 @@ db.exec(`CREATE TABLE IF NOT EXISTS withdrawals (
   created_at INTEGER
 )`);
 
-// Migración: si la tabla claims existe, migrar
-try {
-  const oldClaims = db.prepare('SELECT * FROM claims').all();
-  if (oldClaims.length > 0) {
-    for (const claim of oldClaims) {
-      db.prepare('INSERT OR IGNORE INTO users_balance (user_id, balance, last_claim) VALUES (?, ?, ?)').run(claim.user_id, 0, claim.last_claim);
-    }
-  }
-} catch (e) {
-  // Si no existe la tabla claims, no hay nada que migrar
-}
+db.exec(`CREATE TABLE IF NOT EXISTS deposits (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER,
+  wallet TEXT,
+  amount REAL,
+  tx_hash TEXT UNIQUE,
+  created_at INTEGER
+)`);
 
 function timeAgo(timestamp) {
   const seconds = Math.floor(Date.now() / 1000) - timestamp;
@@ -92,89 +88,57 @@ function timeAgo(timestamp) {
   return 'hace ' + Math.floor(seconds / 86400) + 'd';
 }
 
-// ==== FUNCIÓN: GIRAR RULETA ====
 function spinRoulette() {
   const random = Math.random() * 100;
-  
-  if (random < 40) {
-    return 0;      // 40% pierde todo
-  } else if (random < 85) {
-    return 1.1;    // 45% gana 1.1
-  } else if (random < 95) {
-    return 2;      // 10% gana 2
-  } else if (random < 98) {
-    return 4;      // 3% gana 4
-  } else if (random < 99.5) {
-    return 6;      // 1.5% gana 6
-  } else if (random < 99.9) {
-    return 8;      // 0.4% gana 8
-  } else {
-    return 10;     // 0.1% gana 10
-  }
+  if (random < 40) return 0;
+  else if (random < 85) return 1.1;
+  else if (random < 95) return 2;
+  else if (random < 98) return 4;
+  else if (random < 99.5) return 6;
+  else if (random < 99.9) return 8;
+  else return 10;
 }
 
-// ==== ENDPOINT: RECLAMAR (ahora va al saldo interno) ====
+// ==== ENDPOINT: RECLAMAR ====
 app.post('/claim', async (req, res) => {
   const { userId } = req.body;
-
-  if (!userId) {
-    return res.status(400).json({ error: 'Falta userId' });
-  }
+  if (!userId) return res.status(400).json({ error: 'Falta userId' });
 
   const now = Math.floor(Date.now() / 1000);
   const user = db.prepare('SELECT * FROM users_balance WHERE user_id = ?').get(userId);
 
   if (user && now - user.last_claim < COOLDOWN) {
     const restante = COOLDOWN - (now - user.last_claim);
-    const minutos = Math.floor(restante / 60);
-    const segundos = restante % 60;
     return res.status(429).json({
-      error: 'Espera ' + minutos + 'm ' + segundos + 's antes de reclamar otra vez'
+      error: 'Espera ' + Math.floor(restante / 60) + 'm ' + (restante % 60) + 's antes de reclamar otra vez'
     });
   }
 
   try {
-    // Sumar al saldo interno
     if (user) {
       db.prepare('UPDATE users_balance SET balance = balance + 1, total_claimed = total_claimed + 1, last_claim = ? WHERE user_id = ?').run(now, userId);
     } else {
       db.prepare('INSERT INTO users_balance (user_id, balance, total_claimed, last_claim) VALUES (?, 1, 1, ?)').run(userId, now);
     }
-
-    res.json({
-      success: true,
-      amount: 1,
-      message: '¡1 JHOAL añadido a tu saldo de juego!'
-    });
+    res.json({ success: true, amount: 1, message: '¡1 JHOAL añadido a tu saldo!' });
   } catch (error) {
-    console.error('Error claim:', error);
     res.status(500).json({ error: 'Error: ' + error.message });
   }
 });
 
-// ==== ENDPOINT: VER SALDO DEL JUEGO ====
+// ==== ENDPOINT: BALANCE DEL JUEGO ====
 app.get('/balance-game/:userId', (req, res) => {
   try {
-    const userId = req.params.userId;
-    const user = db.prepare('SELECT * FROM users_balance WHERE user_id = ?').get(userId);
-    
+    const user = db.prepare('SELECT * FROM users_balance WHERE user_id = ?').get(req.params.userId);
     if (!user) {
-      return res.json({
-        success: true,
-        balance: 0,
-        total_claimed: 0,
-        total_won: 0,
-        total_lost: 0
-      });
+      return res.json({ success: true, balance: 0, total_claimed: 0, total_won: 0, total_lost: 0 });
     }
-
     res.json({
       success: true,
       balance: user.balance,
       total_claimed: user.total_claimed,
       total_won: user.total_won,
-      total_lost: user.total_lost,
-      last_claim: user.last_claim
+      total_lost: user.total_lost
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -184,36 +148,24 @@ app.get('/balance-game/:userId', (req, res) => {
 // ==== ENDPOINT: APOSTAR ====
 app.post('/bet', async (req, res) => {
   const { userId, amount } = req.body;
-
-  if (!userId || !amount) {
-    return res.status(400).json({ error: 'Faltan datos' });
-  }
-
-  if (amount <= 0 || amount > 1000) {
-    return res.status(400).json({ error: 'Apuesta inválida (1-1000 JHOAL)' });
-  }
+  if (!userId || !amount) return res.status(400).json({ error: 'Faltan datos' });
+  if (amount <= 0 || amount > 1000) return res.status(400).json({ error: 'Apuesta inválida (1-1000)' });
 
   try {
     const user = db.prepare('SELECT * FROM users_balance WHERE user_id = ?').get(userId);
+    if (!user || user.balance < amount) return res.status(400).json({ error: 'Saldo insuficiente' });
 
-    if (!user || user.balance < amount) {
-      return res.status(400).json({ error: 'Saldo insuficiente' });
-    }
-
-    // Girar ruleta
     const multiplier = spinRoulette();
     const payout = amount * multiplier;
     const profit = payout - amount;
     const now = Math.floor(Date.now() / 1000);
 
-    // Actualizar saldo
     if (multiplier === 0) {
       db.prepare('UPDATE users_balance SET balance = balance - ?, total_lost = total_lost + ? WHERE user_id = ?').run(amount, amount, userId);
     } else {
       db.prepare('UPDATE users_balance SET balance = balance - ? + ?, total_won = total_won + ? WHERE user_id = ?').run(amount, payout, profit, userId);
     }
 
-    // Registrar apuesta
     db.prepare('INSERT INTO bets (user_id, amount, multiplier, payout, result, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
       userId, amount, multiplier, payout, multiplier === 0 ? 'lose' : 'win', now
     );
@@ -225,11 +177,9 @@ app.post('/bet', async (req, res) => {
       multiplier: multiplier,
       payout: payout,
       profit: profit,
-      newBalance: newUser.balance,
-      message: multiplier === 0 ? 'Perdiste todo' : '¡Ganaste ' + payout + ' JHOAL!'
+      newBalance: newUser.balance
     });
   } catch (error) {
-    console.error('Error bet:', error);
     res.status(500).json({ error: 'Error: ' + error.message });
   }
 });
@@ -237,36 +187,20 @@ app.post('/bet', async (req, res) => {
 // ==== ENDPOINT: RETIRAR ====
 app.post('/withdraw', async (req, res) => {
   const { userId, wallet: userWallet, amount } = req.body;
-
-  if (!userId || !userWallet || !amount) {
-    return res.status(400).json({ error: 'Faltan datos' });
-  }
-
-  if (!ethers.isAddress(userWallet)) {
-    return res.status(400).json({ error: 'Wallet inválida' });
-  }
-
-  if (amount <= 0) {
-    return res.status(400).json({ error: 'Cantidad inválida' });
-  }
+  if (!userId || !userWallet || !amount) return res.status(400).json({ error: 'Faltan datos' });
+  if (!ethers.isAddress(userWallet)) return res.status(400).json({ error: 'Wallet inválida' });
+  if (amount <= 0) return res.status(400).json({ error: 'Cantidad inválida' });
 
   try {
     const user = db.prepare('SELECT * FROM users_balance WHERE user_id = ?').get(userId);
+    if (!user || user.balance < amount) return res.status(400).json({ error: 'Saldo insuficiente' });
 
-    if (!user || user.balance < amount) {
-      return res.status(400).json({ error: 'Saldo insuficiente' });
-    }
-
-    // Enviar JHOAL on-chain
     const amountWei = ethers.parseUnits(amount.toString(), 18);
     const tx = await token.transfer(userWallet, amountWei);
-    
     console.log('Withdraw TX:', tx.hash);
 
-    // Restar del saldo
-    db.prepare('UPDATE users_balance SET balance = balance - ? WHERE user_id = ?').run(amount, userId);
+    db.prepare('UPDATE users_balance SET balance = balance - ?, total_withdrawn = total_withdrawn + ? WHERE user_id = ?').run(amount, amount, userId);
 
-    // Registrar retiro
     const now = Math.floor(Date.now() / 1000);
     db.prepare('INSERT INTO withdrawals (user_id, wallet, amount, tx_hash, created_at) VALUES (?, ?, ?, ?, ?)').run(
       userId, userWallet, amount, tx.hash, now
@@ -281,7 +215,6 @@ app.post('/withdraw', async (req, res) => {
       amount: amount
     });
   } catch (error) {
-    console.error('Error withdraw:', error);
     res.status(500).json({ error: 'Error: ' + error.message });
   }
 });
@@ -289,26 +222,105 @@ app.post('/withdraw', async (req, res) => {
 // ==== ENDPOINT: HISTORIAL DE APUESTAS ====
 app.get('/bet-history/:userId', (req, res) => {
   try {
-    const userId = req.params.userId;
-    const bets = db.prepare('SELECT * FROM bets WHERE user_id = ? ORDER BY created_at DESC LIMIT 20').all(userId);
+    const bets = db.prepare('SELECT * FROM bets WHERE user_id = ? ORDER BY created_at DESC LIMIT 10').all(req.params.userId);
     res.json({ success: true, bets: bets });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-// ==== ENDPOINT: BALANCE FAUCET ====
-app.get('/balance', async (req, res) => {
+// ==== ENDPOINT: INFO DE DEPÓSITO ====
+app.get('/deposit-info', (req, res) => {
+  res.json({
+    success: true,
+    depositWallet: wallet.address,
+    tokenAddress: TOKEN_ADDRESS,
+    minDeposit: 1
+  });
+});
+
+// ==== ENDPOINT: VERIFICAR DEPÓSITO ====
+app.post('/verify-deposit', async (req, res) => {
+  const { userId, txHash } = req.body;
+
+  if (!userId || !txHash) {
+    return res.status(400).json({ error: 'Faltan datos' });
+  }
+
+  if (!/^0x[a-fA-F0-9]{64}$/.test(txHash)) {
+    return res.status(400).json({ error: 'Hash de transacción inválido' });
+  }
+
   try {
-    const balance = await token.balanceOf(wallet.address);
-    const bnb = await provider.getBalance(wallet.address);
+    // Verificar que no se haya usado antes
+    const existing = db.prepare('SELECT * FROM deposits WHERE tx_hash = ?').get(txHash);
+    if (existing) {
+      return res.status(400).json({ error: 'Esta transacción ya fue usada' });
+    }
+
+    // Consultar Etherscan API V2 (chainid=56 para BSC)
+    const url = `https://api.etherscan.io/v2/api?chainid=56&module=account&action=tokentx&contractaddress=${TOKEN_ADDRESS}&address=${wallet.address}&page=1&offset=20&sort=desc&apikey=${BSCSCAN_API_KEY}`;
+    
+    const response = await fetch(url);
+    const data = await response.json();
+
+    if (!data.result || !Array.isArray(data.result)) {
+      return res.status(500).json({ error: 'Error al consultar Etherscan. Intenta más tarde.' });
+    }
+
+    // Buscar la transacción en la lista
+    const tx = data.result.find(t => t.hash.toLowerCase() === txHash.toLowerCase());
+
+    if (!tx) {
+      return res.status(400).json({ error: 'Transacción no encontrada. Espera 1-2 minutos y vuelve a intentar.' });
+    }
+
+    // Verificar que sea reciente (últimos 60 min)
+    const txTime = parseInt(tx.timeStamp);
+    const now = Math.floor(Date.now() / 1000);
+    if (now - txTime > 3600) {
+      return res.status(400).json({ error: 'Transacción muy antigua (más de 1 hora)' });
+    }
+
+    // Verificar que vaya a la wallet de la faucet
+    if (tx.to.toLowerCase() !== wallet.address.toLowerCase()) {
+      return res.status(400).json({ error: 'La transacción no fue enviada a la wallet correcta' });
+    }
+
+    // Verificar que sea del token correcto
+    if (tx.contractAddress.toLowerCase() !== TOKEN_ADDRESS.toLowerCase()) {
+      return res.status(400).json({ error: 'Token incorrecto' });
+    }
+
+    // Calcular el monto (formato JHOAL, 18 decimales)
+    const amount = parseFloat(tx.value) / 1e18;
+
+    if (amount < 1) {
+      return res.status(400).json({ error: 'El depósito mínimo es 1 JHOAL' });
+    }
+
+    // Registrar depósito
+    const now2 = Math.floor(Date.now() / 1000);
+    db.prepare('INSERT INTO deposits (user_id, wallet, amount, tx_hash, created_at) VALUES (?, ?, ?, ?, ?)').run(
+      userId, tx.from, amount, txHash, now2
+    );
+
+    // Sumar al saldo
+    const user = db.prepare('SELECT * FROM users_balance WHERE user_id = ?').get(userId);
+    if (user) {
+      db.prepare('UPDATE users_balance SET balance = balance + ?, total_deposited = total_deposited + ? WHERE user_id = ?').run(amount, amount, userId);
+    } else {
+      db.prepare('INSERT INTO users_balance (user_id, balance, total_deposited) VALUES (?, ?, ?)').run(userId, amount, amount);
+    }
+
     res.json({
-      wallet: wallet.address,
-      jhoal: ethers.formatUnits(balance, 18) + ' JHOAL',
-      bnb: ethers.formatEther(bnb) + ' BNB'
+      success: true,
+      amount: amount,
+      message: '¡Depositaste ' + amount.toFixed(2) + ' JHOAL!'
     });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
+  } catch (error) {
+    console.error('Error deposit:', error);
+    res.status(500).json({ error: 'Error: ' + error.message });
   }
 });
 
@@ -339,19 +351,16 @@ app.get('/price', async (req, res) => {
   }
 });
 
-// ==== ENDPOINT: ÚLTIMAS APUESTAS (público) ====
-app.get('/recent-bets', (req, res) => {
+// ==== ENDPOINT: BALANCE FAUCET ====
+app.get('/balance', async (req, res) => {
   try {
-    const bets = db.prepare('SELECT * FROM bets ORDER BY created_at DESC LIMIT 10').all();
-    const recent = bets.map(b => ({
-      userId: b.user_id,
-      amount: b.amount,
-      multiplier: b.multiplier,
-      payout: b.payout,
-      result: b.result,
-      ago: timeAgo(b.created_at)
-    }));
-    res.json({ success: true, bets: recent });
+    const balance = await token.balanceOf(wallet.address);
+    const bnb = await provider.getBalance(wallet.address);
+    res.json({
+      wallet: wallet.address,
+      jhoal: ethers.formatUnits(balance, 18) + ' JHOAL',
+      bnb: ethers.formatEther(bnb) + ' BNB'
+    });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -359,45 +368,36 @@ app.get('/recent-bets', (req, res) => {
 
 // ==== ENDPOINT: ROOT ====
 app.get('/', (req, res) => {
-  res.json({ status: 'Faucet JHOAL + Ruleta de Horus funcionando' });
+  res.json({ status: 'Faucet JHOAL + Dados de Horus funcionando' });
 });
 
 // ==== BOT DE TELEGRAM ====
 let bot = null;
-
 if (BOT_TOKEN) {
   bot = new TelegramBot(BOT_TOKEN, { polling: true });
   console.log('Bot de Telegram iniciado');
 
   bot.onText(/\/start/, (msg) => {
-    const chatId = msg.chat.id;
     const name = msg.from.first_name || 'guerrero';
-    const welcome = 
+    bot.sendMessage(msg.chat.id,
       '⚱ *JHOAL - La ofrenda del dios* 🦅\n\n' +
       '¡Bienvenido, ' + name + '!\n\n' +
       '💰 Reclama *1 JHOAL GRATIS* cada 30 minutos\n' +
-      '🎡 Juega en *La Ruleta de Horus*\n' +
+      '🎲 Juega en *Los Dados de Horus*\n' +
       '📊 Precio actual: *$0.00005 USD*\n\n' +
-      '👉 Toca "Abrir Faucet" para empezar.';
-    
-    bot.sendMessage(chatId, welcome, { parse_mode: 'Markdown' });
+      '👉 Toca "Abrir Faucet" para empezar.',
+      { parse_mode: 'Markdown' }
+    );
   });
 
   bot.onText(/\/faucet/, (msg) => {
-    const chatId = msg.chat.id;
-    const keyboard = {
-      inline_keyboard: [[
-        { text: '⚱ Abrir Faucet', web_app: { url: MINI_APP_URL } }
-      ]]
-    };
-    bot.sendMessage(chatId, '🚰 *Abrir Faucet*\n\nToca el botón para reclamar tu ofrenda.', {
+    bot.sendMessage(msg.chat.id, '🚰 *Abrir Faucet*', {
       parse_mode: 'Markdown',
-      reply_markup: keyboard
+      reply_markup: { inline_keyboard: [[{ text: '⚱ Abrir Faucet', web_app: { url: MINI_APP_URL } }]] }
     });
   });
 
   bot.onText(/\/price/, async (msg) => {
-    const chatId = msg.chat.id;
     try {
       const reserves = await pair.getReserves();
       const token0 = await pair.token0();
@@ -411,44 +411,28 @@ if (BOT_TOKEN) {
       }
       const jhoalAmount = parseFloat(ethers.formatUnits(jhoalReserve, 18));
       const usdtAmount = parseFloat(ethers.formatUnits(usdtReserve, 18));
-      const priceUsd = usdtAmount / jhoalAmount;
-      const jhoalPerUsdt = Math.round(jhoalAmount / usdtAmount);
-      
-      const message = 
-        '💰 *PRECIO JHOAL EN VIVO*\n\n' +
-        '💵 1 JHOAL = *$' + priceUsd.toFixed(8) + '*\n' +
-        '💎 1 USDT = *' + jhoalPerUsdt.toLocaleString() + ' JHOAL*\n\n' +
-        '📊 Liquidez: *$' + usdtAmount.toFixed(2) + '*';
-      
-      bot.sendMessage(chatId, message, { parse_mode: 'Markdown', disable_web_page_preview: true });
+      bot.sendMessage(msg.chat.id,
+        '💰 *PRECIO JHOAL*\n\n' +
+        '💵 1 JHOAL = *$' + (usdtAmount / jhoalAmount).toFixed(8) + '*\n' +
+        '💎 1 USDT = *' + Math.round(jhoalAmount / usdtAmount).toLocaleString() + ' JHOAL*',
+        { parse_mode: 'Markdown' }
+      );
     } catch (e) {
-      bot.sendMessage(chatId, '❌ Error al consultar el precio.');
+      bot.sendMessage(msg.chat.id, '❌ Error al consultar precio.');
     }
   });
 
   bot.onText(/\/help/, (msg) => {
-    const chatId = msg.chat.id;
-    const help = 
-      '🆘 *AYUDA - JHOAL FAUCET*\n\n' +
-      '*Comandos:*\n' +
-      '/start - Iniciar\n' +
-      '/faucet - Abrir faucet\n' +
-      '/price - Ver precio\n' +
-      '/help - Esta ayuda\n\n' +
-      '*La Ruleta de Horus* 🎡\n' +
-      'Reclama JHOAL y multiplícalos en la ruleta.\n' +
-      'Gana hasta x10 en cada giro.';
-    
-    bot.sendMessage(chatId, help, { parse_mode: 'Markdown' });
+    bot.sendMessage(msg.chat.id,
+      '🆘 *AYUDA*\n\n/start - Iniciar\n/faucet - Abrir faucet\n/price - Precio\n/help - Esta ayuda',
+      { parse_mode: 'Markdown' }
+    );
   });
-
-} else {
-  console.log('BOT_TOKEN no configurado. El bot no está activo.');
 }
 
 // ==== INICIAR SERVIDOR ====
 app.listen(process.env.PORT || 3000, () => {
-  console.log('Faucet JHOAL + Ruleta de Horus corriendo en puerto', process.env.PORT || 3000);
+  console.log('Faucet JHOAL + Dados de Horus corriendo en puerto', process.env.PORT || 3000);
   console.log('Wallet:', wallet.address);
-  console.log('Bot:', BOT_TOKEN ? 'SÍ' : 'NO');
+  console.log('BscScan API:', BSCSCAN_API_KEY ? 'SÍ' : 'NO');
 });
