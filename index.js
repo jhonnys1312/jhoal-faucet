@@ -57,7 +57,6 @@ const PLANT_LEVELS = {
 
 const MAX_PLANTS = 12;
 
-// Estados: dry (seca), growing (creciendo), ready (lista), withering (marchitándose), rotten (podrida)
 function getPlantStatus(plant) {
   if (plant.status === 'dry' || !plant.last_watered) {
     return { status: 'dry', value: 0, minutesLeft: 0, progress: 0 };
@@ -67,28 +66,13 @@ function getPlantStatus(plant) {
   const level = PLANT_LEVELS[plant.level];
 
   if (elapsed < 25) {
-    return {
-      status: 'growing',
-      value: 0,
-      minutesLeft: Math.ceil(25 - elapsed),
-      progress: Math.floor((elapsed / 25) * 100)
-    };
+    return { status: 'growing', value: 0, minutesLeft: Math.ceil(25 - elapsed), progress: Math.floor((elapsed / 25) * 100) };
   } else if (elapsed <= 35) {
-    return {
-      status: 'ready',
-      value: level.fruitValue,
-      minutesLeft: Math.ceil(35 - elapsed),
-      progress: 100
-    };
+    return { status: 'ready', value: level.fruitValue, minutesLeft: Math.ceil(35 - elapsed), progress: 100 };
   } else if (elapsed <= 60) {
     const withering = (elapsed - 35) / 25;
     const value = level.fruitValue * (1 - withering);
-    return {
-      status: 'withering',
-      value: Math.max(0, value),
-      minutesLeft: Math.ceil(60 - elapsed),
-      progress: 100
-    };
+    return { status: 'withering', value: Math.max(0, value), minutesLeft: Math.ceil(60 - elapsed), progress: 100 };
   } else {
     return { status: 'rotten', value: 0, minutesLeft: 0, progress: 0 };
   }
@@ -155,20 +139,13 @@ app.post('/claim', async (req, res) => {
 
     if (user.last_claim && now - user.last_claim < COOLDOWN) {
       const restante = COOLDOWN - (now - user.last_claim);
-      return res.status(429).json({
-        error: 'Espera ' + Math.floor(restante / 60) + 'm ' + (restante % 60) + 's antes de reclamar otra vez'
-      });
+      return res.status(429).json({ error: 'Espera ' + Math.floor(restante / 60) + 'm ' + (restante % 60) + 's antes de reclamar otra vez' });
     }
 
     const newBalance = parseFloat(user.balance) + 1;
     const newClaimed = parseFloat(user.total_claimed || 0) + 1;
 
-    await supabase.from('users_balance').update({
-      balance: newBalance,
-      total_claimed: newClaimed,
-      last_claim: now
-    }).eq('user_id', userId);
-
+    await supabase.from('users_balance').update({ balance: newBalance, total_claimed: newClaimed, last_claim: now }).eq('user_id', userId);
     await addHistory(userId, 'faucet', 1, 'Reclamo del faucet', null, null);
 
     res.json({ success: true, amount: 1, message: '¡1 JHOAL añadido a tu saldo!' });
@@ -182,9 +159,7 @@ app.post('/claim', async (req, res) => {
 app.get('/balance-game/:userId', async (req, res) => {
   try {
     const user = await getUser(req.params.userId);
-    if (!user) {
-      return res.json({ success: true, balance: 0, total_claimed: 0, total_won: 0, total_lost: 0, last_claim: 0 });
-    }
+    if (!user) return res.json({ success: true, balance: 0, total_claimed: 0, total_won: 0, total_lost: 0, last_claim: 0 });
     res.json({
       success: true,
       balance: parseFloat(user.balance),
@@ -224,20 +199,8 @@ app.post('/bet', async (req, res) => {
       newLost = parseFloat(user.total_lost || 0);
     }
 
-    await supabase.from('users_balance').update({
-      balance: newBalance,
-      total_won: newWon,
-      total_lost: newLost
-    }).eq('user_id', userId);
-
-    await supabase.from('bets').insert({
-      user_id: userId,
-      amount: amount,
-      multiplier: multiplier,
-      payout: payout,
-      result: multiplier === 0 ? 'lose' : 'win',
-      created_at: now
-    });
+    await supabase.from('users_balance').update({ balance: newBalance, total_won: newWon, total_lost: newLost }).eq('user_id', userId);
+    await supabase.from('bets').insert({ user_id: userId, amount: amount, multiplier: multiplier, payout: payout, result: multiplier === 0 ? 'lose' : 'win', created_at: now });
 
     if (multiplier === 0) {
       await addHistory(userId, 'dice_lose', -amount, 'Perdiste en los dados (x0)', null, null);
@@ -245,13 +208,7 @@ app.post('/bet', async (req, res) => {
       await addHistory(userId, 'dice_win', profit, 'Ganaste x' + multiplier + ' en los dados', null, null);
     }
 
-    res.json({
-      success: true,
-      multiplier: multiplier,
-      payout: payout,
-      profit: profit,
-      newBalance: newBalance
-    });
+    res.json({ success: true, multiplier: multiplier, payout: payout, profit: profit, newBalance: newBalance });
   } catch (error) {
     console.error('Error bet:', error);
     res.status(500).json({ error: 'Error: ' + error.message });
@@ -286,29 +243,12 @@ app.post('/withdraw', async (req, res) => {
     const newBalance = parseFloat(user.balance) - amount;
     const newWithdrawn = parseFloat(user.total_withdrawn || 0) + amount;
 
-    await supabase.from('users_balance').update({
-      balance: newBalance,
-      total_withdrawn: newWithdrawn
-    }).eq('user_id', userId);
-
-    await supabase.from('withdrawals').insert({
-      user_id: userId,
-      wallet: userWallet,
-      amount: amount,
-      tx_hash: tx.hash,
-      created_at: Math.floor(Date.now() / 1000)
-    });
-
+    await supabase.from('users_balance').update({ balance: newBalance, total_withdrawn: newWithdrawn }).eq('user_id', userId);
+    await supabase.from('withdrawals').insert({ user_id: userId, wallet: userWallet, amount: amount, tx_hash: tx.hash, created_at: Math.floor(Date.now() / 1000) });
     await addHistory(userId, 'withdraw', -amount, 'Retiro a wallet', null, tx.hash);
-
     await tx.wait();
 
-    res.json({
-      success: true,
-      txHash: tx.hash,
-      explorer: 'https://bscscan.com/tx/' + tx.hash,
-      amount: amount
-    });
+    res.json({ success: true, txHash: tx.hash, explorer: 'https://bscscan.com/tx/' + tx.hash, amount: amount });
   } catch (error) {
     console.error('Error withdraw:', error);
     res.status(500).json({ error: 'Error: ' + error.message });
@@ -317,18 +257,12 @@ app.post('/withdraw', async (req, res) => {
 
 // ==== ENDPOINT: INFO DE DEPÓSITO ====
 app.get('/deposit-info', (req, res) => {
-  res.json({
-    success: true,
-    depositWallet: wallet.address,
-    tokenAddress: TOKEN_ADDRESS,
-    minDeposit: 1
-  });
+  res.json({ success: true, depositWallet: wallet.address, tokenAddress: TOKEN_ADDRESS, minDeposit: 1 });
 });
 
 // ==== ENDPOINT: VERIFICAR DEPÓSITO ====
 app.post('/verify-deposit', async (req, res) => {
   const { userId, txHash } = req.body;
-
   if (!userId || !txHash) return res.status(400).json({ error: 'Faltan datos' });
   if (!/^0x[a-fA-F0-9]{64}$/.test(txHash)) return res.status(400).json({ error: 'Hash inválido' });
 
@@ -362,42 +296,25 @@ app.post('/verify-deposit', async (req, res) => {
 
     const block = await provider.getBlock(receipt.blockNumber);
     const now = Math.floor(Date.now() / 1000);
-    if (block && now - block.timestamp > 3600) {
-      return res.status(400).json({ error: 'Transacción muy antigua (más de 1 hora)' });
-    }
+    if (block && now - block.timestamp > 3600) return res.status(400).json({ error: 'Transacción muy antigua (más de 1 hora)' });
 
-    await supabase.from('deposits').insert({
-      user_id: userId,
-      wallet: decoded.args.from,
-      amount: amount,
-      tx_hash: txHash,
-      created_at: now
-    });
+    await supabase.from('deposits').insert({ user_id: userId, wallet: decoded.args.from, amount: amount, tx_hash: txHash, created_at: now });
 
     const user = await ensureUser(userId);
     const newBalance = parseFloat(user.balance) + amount;
     const newDeposited = parseFloat(user.total_deposited || 0) + amount;
 
-    await supabase.from('users_balance').update({
-      balance: newBalance,
-      total_deposited: newDeposited
-    }).eq('user_id', userId);
-
+    await supabase.from('users_balance').update({ balance: newBalance, total_deposited: newDeposited }).eq('user_id', userId);
     await addHistory(userId, 'deposit', amount, 'Depósito de JHOAL', null, txHash);
 
-    res.json({
-      success: true,
-      amount: amount,
-      message: '¡Depositaste ' + amount.toFixed(2) + ' JHOAL!'
-    });
+    res.json({ success: true, amount: amount, message: '¡Depositaste ' + amount.toFixed(2) + ' JHOAL!' });
   } catch (error) {
     console.error('Error deposit:', error);
     res.status(500).json({ error: 'Error al verificar: ' + error.message });
   }
 });
-// ==== ENDPOINTS: HUERTO DE HORUS ====
 
-// Comprar planta
+// ==== HUERTO: COMPRAR ====
 app.post('/buy-plant', async (req, res) => {
   const { userId, level } = req.body;
   if (!userId || !level) return res.status(400).json({ error: 'Faltan datos' });
@@ -406,25 +323,16 @@ app.post('/buy-plant', async (req, res) => {
   try {
     const user = await ensureUser(userId);
     const { count } = await supabase.from('plants').select('*', { count: 'exact', head: true }).eq('user_id', userId);
-
     if (count >= MAX_PLANTS) return res.status(400).json({ error: 'Máximo ' + MAX_PLANTS + ' plantas por usuario' });
 
     const plantInfo = PLANT_LEVELS[level];
-    if (parseFloat(user.balance) < plantInfo.price) {
-      return res.status(400).json({ error: 'Saldo insuficiente. Necesitás ' + plantInfo.price + ' JHOAL' });
-    }
+    if (parseFloat(user.balance) < plantInfo.price) return res.status(400).json({ error: 'Saldo insuficiente. Necesitás ' + plantInfo.price + ' JHOAL' });
 
     const now = Math.floor(Date.now() / 1000);
     const newBalance = parseFloat(user.balance) - plantInfo.price;
 
     await supabase.from('users_balance').update({ balance: newBalance }).eq('user_id', userId);
-    await supabase.from('plants').insert({
-      user_id: userId,
-      level: level,
-      status: 'dry',
-      created_at: now
-    });
-
+    await supabase.from('plants').insert({ user_id: userId, level: level, status: 'dry', created_at: now });
     await addHistory(userId, 'plant_buy', -plantInfo.price, 'Compraste planta ' + plantInfo.name, null, null);
 
     res.json({ success: true, message: '¡Compraste una planta ' + plantInfo.name + '!' });
@@ -434,7 +342,7 @@ app.post('/buy-plant', async (req, res) => {
   }
 });
 
-// Regar planta
+// ==== HUERTO: REGAR ====
 app.post('/water-plant', async (req, res) => {
   const { userId, plantId } = req.body;
   if (!userId || !plantId) return res.status(400).json({ error: 'Faltan datos' });
@@ -444,23 +352,17 @@ app.post('/water-plant', async (req, res) => {
     if (!plant) return res.status(400).json({ error: 'Planta no encontrada' });
 
     const status = getPlantStatus(plant);
-    if (status.status !== 'dry' && status.status !== 'rotten') {
-      return res.status(400).json({ error: 'La planta todavía tiene fruto o está creciendo' });
-    }
+    if (status.status !== 'dry' && status.status !== 'rotten') return res.status(400).json({ error: 'La planta todavía tiene fruto o está creciendo' });
 
     const user = await ensureUser(userId);
     const level = PLANT_LEVELS[plant.level];
-
-    if (parseFloat(user.balance) < level.waterCost) {
-      return res.status(400).json({ error: 'Saldo insuficiente. Necesitás ' + level.waterCost + ' JHOAL' });
-    }
+    if (parseFloat(user.balance) < level.waterCost) return res.status(400).json({ error: 'Saldo insuficiente. Necesitás ' + level.waterCost + ' JHOAL' });
 
     const now = Math.floor(Date.now() / 1000);
     const newBalance = parseFloat(user.balance) - level.waterCost;
 
     await supabase.from('users_balance').update({ balance: newBalance }).eq('user_id', userId);
     await supabase.from('plants').update({ last_watered: now, status: 'growing' }).eq('id', plantId);
-
     await addHistory(userId, 'plant_water', -level.waterCost, 'Regaste ' + level.name, null, null);
 
     res.json({ success: true, message: '¡Regaste tu planta! Lista en 25 minutos.' });
@@ -470,7 +372,7 @@ app.post('/water-plant', async (req, res) => {
   }
 });
 
-// Cosechar
+// ==== HUERTO: COSECHAR ====
 app.post('/harvest', async (req, res) => {
   const { userId, plantId } = req.body;
   if (!userId || !plantId) return res.status(400).json({ error: 'Faltan datos' });
@@ -480,9 +382,7 @@ app.post('/harvest', async (req, res) => {
     if (!plant) return res.status(400).json({ error: 'Planta no encontrada' });
 
     const status = getPlantStatus(plant);
-    if (status.status !== 'ready' && status.status !== 'withering') {
-      return res.status(400).json({ error: 'Todavía no podés cosechar esta planta' });
-    }
+    if (status.status !== 'ready' && status.status !== 'withering') return res.status(400).json({ error: 'Todavía no podés cosechar esta planta' });
 
     const value = status.value;
     if (value <= 0) return res.status(400).json({ error: 'El fruto está podrido' });
@@ -504,7 +404,7 @@ app.post('/harvest', async (req, res) => {
   }
 });
 
-// Vender planta
+// ==== HUERTO: VENDER ====
 app.post('/sell-plant', async (req, res) => {
   const { userId, plantId } = req.body;
   if (!userId || !plantId) return res.status(400).json({ error: 'Faltan datos' });
@@ -521,7 +421,6 @@ app.post('/sell-plant', async (req, res) => {
 
     await supabase.from('users_balance').update({ balance: newBalance }).eq('user_id', userId);
     await supabase.from('plants').delete().eq('id', plantId);
-
     await addHistory(userId, 'plant_sell', sellValue, 'Vendiste ' + level.name, null, null);
 
     res.json({ success: true, value: sellValue, message: '¡Vendiste por ' + sellValue + ' JHOAL!' });
@@ -531,7 +430,7 @@ app.post('/sell-plant', async (req, res) => {
   }
 });
 
-// Ver mis plantas
+// ==== HUERTO: MIS PLANTAS ====
 app.get('/my-plants/:userId', async (req, res) => {
   try {
     const userId = req.params.userId;
@@ -541,35 +440,22 @@ app.get('/my-plants/:userId', async (req, res) => {
       const status = getPlantStatus(p);
       const level = PLANT_LEVELS[p.level];
       return {
-        id: p.id,
-        level: p.level,
-        levelName: level.name,
-        emoji: level.emoji,
-        status: status.status,
-        value: status.value,
-        minutesLeft: status.minutesLeft || 0,
-        progress: status.progress || 0,
-        waterCost: level.waterCost,
-        fruitValue: level.fruitValue,
-        sellPrice: level.sellPrice,
+        id: p.id, level: p.level, levelName: level.name, emoji: level.emoji,
+        status: status.status, value: status.value,
+        minutesLeft: status.minutesLeft || 0, progress: status.progress || 0,
+        waterCost: level.waterCost, fruitValue: level.fruitValue, sellPrice: level.sellPrice,
         lastWatered: p.last_watered
       };
     });
 
-    res.json({
-      success: true,
-      plants: plantsWithStatus,
-      count: plantsWithStatus.length,
-      maxPlants: MAX_PLANTS,
-      plantLevels: PLANT_LEVELS
-    });
+    res.json({ success: true, plants: plantsWithStatus, count: plantsWithStatus.length, maxPlants: MAX_PLANTS, plantLevels: PLANT_LEVELS });
   } catch (error) {
     console.error('Error my-plants:', error);
     res.status(500).json({ error: 'Error: ' + error.message });
   }
 });
 
-// ==== ENDPOINT: HISTORIAL COMPLETO ====
+// ==== HISTORIAL ====
 app.get('/history/:userId', async (req, res) => {
   try {
     const userId = req.params.userId;
@@ -580,17 +466,9 @@ app.get('/history/:userId', async (req, res) => {
     if (type && type !== 'all') query = query.eq('type', type);
 
     const { data: history } = await query;
-
     const { data: allHistory } = await supabase.from('history').select('type, amount').eq('user_id', userId);
 
-    let summary = {
-      faucet: 0,
-      dice: 0,
-      deposit: 0,
-      withdraw: 0,
-      garden: 0,
-      total: 0
-    };
+    let summary = { faucet: 0, dice: 0, deposit: 0, withdraw: 0, garden: 0, total: 0 };
 
     (allHistory || []).forEach(function(h) {
       const amount = parseFloat(h.amount) || 0;
@@ -602,18 +480,14 @@ app.get('/history/:userId', async (req, res) => {
       summary.total += amount;
     });
 
-    res.json({
-      success: true,
-      history: history || [],
-      summary: summary
-    });
+    res.json({ success: true, history: history || [], summary: summary });
   } catch (error) {
     console.error('Error history:', error);
     res.status(500).json({ error: 'Error: ' + error.message });
   }
 });
 
-// ==== ENDPOINT: PRECIO ====
+// ==== PRECIO ====
 app.get('/price', async (req, res) => {
   try {
     const reserves = await pair.getReserves();
@@ -628,34 +502,24 @@ app.get('/price', async (req, res) => {
     }
     const jhoalAmount = parseFloat(ethers.formatUnits(jhoalReserve, 18));
     const usdtAmount = parseFloat(ethers.formatUnits(usdtReserve, 18));
-    res.json({
-      success: true,
-      priceUsd: usdtAmount / jhoalAmount,
-      jhoalPerUsdt: jhoalAmount / usdtAmount,
-      jhoalReserve: jhoalAmount,
-      usdtReserve: usdtAmount
-    });
+    res.json({ success: true, priceUsd: usdtAmount / jhoalAmount, jhoalPerUsdt: jhoalAmount / usdtAmount, jhoalReserve: jhoalAmount, usdtReserve: usdtAmount });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-// ==== ENDPOINT: BALANCE FAUCET ====
+// ==== BALANCE FAUCET ====
 app.get('/balance', async (req, res) => {
   try {
     const balance = await token.balanceOf(wallet.address);
     const bnb = await provider.getBalance(wallet.address);
-    res.json({
-      wallet: wallet.address,
-      jhoal: ethers.formatUnits(balance, 18) + ' JHOAL',
-      bnb: ethers.formatEther(bnb) + ' BNB'
-    });
+    res.json({ wallet: wallet.address, jhoal: ethers.formatUnits(balance, 18) + ' JHOAL', bnb: ethers.formatEther(bnb) + ' BNB' });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-// ==== ENDPOINT: ROOT ====
+// ==== ROOT ====
 app.get('/', (req, res) => {
   res.json({ status: 'Faucet JHOAL + Dados + Huerto + Historial funcionando' });
 });
@@ -739,6 +603,28 @@ if (SUPPORT_BOT_TOKEN && SUPPORT_CHAT_ID) {
       'Te vamos a responder a la brevedad.',
       { parse_mode: 'Markdown' }
     );
+  });
+
+  // ==== COMANDO /reply (solo admin) ====
+  supportBot.onText(/\/reply\s+(\d+)\s+([\s\S]+)/, async (msg, match) => {
+    const fromId = msg.from.id;
+    const targetId = match[1];
+    const replyText = match[2].trim();
+
+    // Verificar que sea el admin
+    if (String(fromId) !== String(SUPPORT_CHAT_ID)) {
+      return supportBot.sendMessage(msg.chat.id, '❌ No tenés permiso para usar este comando.');
+    }
+
+    try {
+      await supportBot.sendMessage(targetId,
+        '📩 *RESPUESTA DE SOPORTE:*\n\n' + replyText + '\n\n💬 Para responder, escribí de nuevo.',
+        { parse_mode: 'Markdown' }
+      );
+      supportBot.sendMessage(msg.chat.id, '✅ Respuesta enviada al usuario ' + targetId);
+    } catch (err) {
+      supportBot.sendMessage(msg.chat.id, '❌ Error al enviar: ' + err.message);
+    }
   });
 
   supportBot.on('message', (msg) => {
