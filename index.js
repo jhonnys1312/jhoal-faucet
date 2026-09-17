@@ -442,3 +442,9 @@ if (BOT_TOKEN) {
     );
   });
 }
+
+// ==== INICIAR SERVIDOR ====
+app.listen(process.env.PORT || 3000, () => {
+  console.log('Faucet JHOAL + Dados de Horus corriendo en puerto', process.env.PORT || 3000);
+  console.log('Wallet:', wallet.address);
+});
