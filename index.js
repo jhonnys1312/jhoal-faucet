@@ -238,7 +238,7 @@ app.get('/deposit-info', (req, res) => {
   });
 });
 
-// ==== ENDPOINT: VERIFICAR DEPÓSITO (ethers.js directo, sin APIs externas) ====
+// ==== ENDPOINT: VERIFICAR DEPÓSITO (ethers.js directo) ====
 app.post('/verify-deposit', async (req, res) => {
   const { userId, txHash } = req.body;
 
@@ -273,11 +273,6 @@ app.post('/verify-deposit', async (req, res) => {
       return res.status(400).json({ error: 'La transacción falló' });
     }
 
-    // Verificar que vaya a la wallet de la faucet
-    if (tx.to.toLowerCase() !== wallet.address.toLowerCase()) {
-      return res.status(400).json({ error: 'La transacción no fue enviada a la wallet correcta' });
-    }
-
     // Buscar el evento Transfer del token JHOAL
     const transferTopic = ethers.id('Transfer(address,address,uint256)');
     const transferLog = receipt.logs.find(function(log) {
@@ -305,7 +300,7 @@ app.post('/verify-deposit', async (req, res) => {
       return res.status(400).json({ error: 'El depósito mínimo es 1 JHOAL' });
     }
 
-    // Verificar antigüedad
+    // Verificar antigüedad (última hora)
     const block = await provider.getBlock(receipt.blockNumber);
     const now = Math.floor(Date.now() / 1000);
     if (block && now - block.timestamp > 3600) {
