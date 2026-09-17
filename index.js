@@ -84,6 +84,16 @@ db.exec(`CREATE TABLE IF NOT EXISTS deposits (
   created_at INTEGER
 )`);
 
+db.exec(`CREATE TABLE IF NOT EXISTS plants (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER,
+  level TEXT,
+  planted_at INTEGER,
+  last_watered INTEGER,
+  status TEXT DEFAULT 'dry',
+  created_at INTEGER
+)`);
+
 function timeAgo(timestamp) {
   const seconds = Math.floor(Date.now() / 1000) - timestamp;
   if (seconds < 60) return 'hace ' + seconds + 's';
@@ -101,6 +111,52 @@ function spinRoulette() {
   else if (random < 99.3) return 6;
   else if (random < 99.8) return 8;
   else return 10;
+}
+
+// ==== HUERTO DE HORUS ====
+const PLANT_LEVELS = {
+  basic: { name: 'Básica', emoji: '🌱', price: 1, waterCost: 0.1, fruitValue: 0.5, growTime: 25, witherTime: 25 },
+  medium: { name: 'Media', emoji: '🌿', price: 5, waterCost: 0.5, fruitValue: 2.5, growTime: 25, witherTime: 25 },
+  premium: { name: 'Premium', emoji: '🌳', price: 25, waterCost: 2.5, fruitValue: 12.5, growTime: 25, witherTime: 25 },
+  pro: { name: 'Pro', emoji: '🌴', price: 100, waterCost: 10, fruitValue: 50, growTime: 25, witherTime: 25 }
+};
+
+const MAX_PLANTS = 12;
+
+function getPlantStatus(plant) {
+  if (plant.status === 'dry' || !plant.last_watered) {
+    return { status: 'dry', value: 0, minutesLeft: 0, progress: 0 };
+  }
+  const now = Math.floor(Date.now() / 1000);
+  const elapsed = (now - plant.last_watered) / 60;
+  const level = PLANT_LEVELS[plant.level];
+
+  if (elapsed < 25) {
+    return {
+      status: 'growing',
+      value: 0,
+      minutesLeft: Math.ceil(25 - elapsed),
+      progress: Math.floor((elapsed / 25) * 100)
+    };
+  } else if (elapsed <= 35) {
+    return {
+      status: 'ready',
+      value: level.fruitValue,
+      minutesLeft: Math.ceil(35 - elapsed),
+      progress: 100
+    };
+  } else if (elapsed <= 60) {
+    const withering = (elapsed - 35) / 25;
+    const value = level.fruitValue * (1 - withering);
+    return {
+      status: 'withering',
+      value: Math.max(0, value),
+      minutesLeft: Math.ceil(60 - elapsed),
+      progress: 100
+    };
+  } else {
+    return { status: 'rotten', value: 0, minutesLeft: 0, progress: 0 };
+  }
 }
 
 // ==== ENDPOINT: RECLAMAR ====
@@ -130,7 +186,7 @@ app.post('/claim', async (req, res) => {
   }
 });
 
-// ==== ENDPOINT: BALANCE DEL JUEGO (con last_claim para sincronizar) ====
+// ==== ENDPOINT: BALANCE DEL JUEGO ====
 app.get('/balance-game/:userId', (req, res) => {
   try {
     const user = db.prepare('SELECT * FROM users_balance WHERE user_id = ?').get(req.params.userId);
@@ -150,7 +206,7 @@ app.get('/balance-game/:userId', (req, res) => {
   }
 });
 
-// ==== ENDPOINT: APOSTAR (mínimo 0.1 JHOAL) ====
+// ==== ENDPOINT: APOSTAR ====
 app.post('/bet', async (req, res) => {
   const { userId, amount } = req.body;
   if (!userId || !amount) return res.status(400).json({ error: 'Faltan datos' });
@@ -244,7 +300,7 @@ app.get('/deposit-info', (req, res) => {
   });
 });
 
-// ==== ENDPOINT: VERIFICAR DEPÓSITO (ethers.js directo) ====
+// ==== ENDPOINT: VERIFICAR DEPÓSITO ====
 app.post('/verify-deposit', async (req, res) => {
   const { userId, txHash } = req.body;
 
@@ -328,6 +384,134 @@ app.post('/verify-deposit', async (req, res) => {
   }
 });
 
+// ==== ENDPOINTS: HUERTO DE HORUS ====
+
+// Comprar planta
+app.post('/buy-plant', async (req, res) => {
+  const { userId, level } = req.body;
+  
+  if (!userId || !level) return res.status(400).json({ error: 'Faltan datos' });
+  if (!PLANT_LEVELS[level]) return res.status(400).json({ error: 'Nivel inválido' });
+  
+  try {
+    const user = db.prepare('SELECT * FROM users_balance WHERE user_id = ?').get(userId);
+    if (!user) return res.status(400).json({ error: 'Usuario no existe' });
+    
+    const plantCount = db.prepare('SELECT COUNT(*) as count FROM plants WHERE user_id = ?').get(userId);
+    if (plantCount.count >= MAX_PLANTS) {
+      return res.status(400).json({ error: 'Máximo ' + MAX_PLANTS + ' plantas por usuario' });
+    }
+    
+    const plantInfo = PLANT_LEVELS[level];
+    if (user.balance < plantInfo.price) {
+      return res.status(400).json({ error: 'Saldo insuficiente. Necesitás ' + plantInfo.price + ' JHOAL' });
+    }
+    
+    const now = Math.floor(Date.now() / 1000);
+    db.prepare('UPDATE users_balance SET balance = balance - ? WHERE user_id = ?').run(plantInfo.price, userId);
+    db.prepare('INSERT INTO plants (user_id, level, status, created_at) VALUES (?, ?, ?, ?)').run(userId, level, 'dry', now);
+    
+    res.json({ success: true, message: '¡Compraste una planta ' + plantInfo.name + '!' });
+  } catch (error) {
+    res.status(500).json({ error: 'Error: ' + error.message });
+  }
+});
+
+// Regar planta
+app.post('/water-plant', async (req, res) => {
+  const { userId, plantId } = req.body;
+  
+  if (!userId || !plantId) return res.status(400).json({ error: 'Faltan datos' });
+  
+  try {
+    const plant = db.prepare('SELECT * FROM plants WHERE id = ? AND user_id = ?').get(plantId, userId);
+    if (!plant) return res.status(400).json({ error: 'Planta no encontrada' });
+    
+    const status = getPlantStatus(plant);
+    if (status.status !== 'dry' && status.status !== 'rotten') {
+      return res.status(400).json({ error: 'La planta todavía tiene fruto o está creciendo' });
+    }
+    
+    const user = db.prepare('SELECT * FROM users_balance WHERE user_id = ?').get(userId);
+    const level = PLANT_LEVELS[plant.level];
+    
+    if (user.balance < level.waterCost) {
+      return res.status(400).json({ error: 'Saldo insuficiente. Necesitás ' + level.waterCost + ' JHOAL' });
+    }
+    
+    const now = Math.floor(Date.now() / 1000);
+    db.prepare('UPDATE users_balance SET balance = balance - ? WHERE user_id = ?').run(level.waterCost, userId);
+    db.prepare('UPDATE plants SET last_watered = ?, status = ? WHERE id = ?').run(now, 'growing', plantId);
+    
+    res.json({ success: true, message: '¡Regaste tu planta! Lista en 25 minutos.' });
+  } catch (error) {
+    res.status(500).json({ error: 'Error: ' + error.message });
+  }
+});
+
+// Cosechar
+app.post('/harvest', async (req, res) => {
+  const { userId, plantId } = req.body;
+  
+  if (!userId || !plantId) return res.status(400).json({ error: 'Faltan datos' });
+  
+  try {
+    const plant = db.prepare('SELECT * FROM plants WHERE id = ? AND user_id = ?').get(plantId, userId);
+    if (!plant) return res.status(400).json({ error: 'Planta no encontrada' });
+    
+    const status = getPlantStatus(plant);
+    if (status.status !== 'ready' && status.status !== 'withering') {
+      return res.status(400).json({ error: 'Todavía no podés cosechar esta planta' });
+    }
+    
+    const value = status.value;
+    if (value <= 0) return res.status(400).json({ error: 'El fruto está podrido' });
+    
+    db.prepare('UPDATE users_balance SET balance = balance + ?, total_won = total_won + ? WHERE user_id = ?').run(value, value, userId);
+    db.prepare('UPDATE plants SET status = ?, last_watered = NULL WHERE id = ?').run('dry', plantId);
+    
+    res.json({ success: true, value: value, message: '¡Cosechaste ' + value.toFixed(2) + ' JHOAL!' });
+  } catch (error) {
+    res.status(500).json({ error: 'Error: ' + error.message });
+  }
+});
+
+// Ver mis plantas
+app.get('/my-plants/:userId', (req, res) => {
+  try {
+    const userId = req.params.userId;
+    const plants = db.prepare('SELECT * FROM plants WHERE user_id = ? ORDER BY created_at ASC').all(userId);
+    
+    const plantsWithStatus = plants.map(function(p) {
+      const status = getPlantStatus(p);
+      const level = PLANT_LEVELS[p.level];
+      return {
+        id: p.id,
+        level: p.level,
+        levelName: level.name,
+        emoji: level.emoji,
+        status: status.status,
+        value: status.value,
+        minutesLeft: status.minutesLeft || 0,
+        progress: status.progress || 0,
+        waterCost: level.waterCost,
+        fruitValue: level.fruitValue,
+        lastWatered: p.last_watered
+      };
+    });
+    
+    res.json({
+      success: true,
+      plants: plantsWithStatus,
+      count: plants.length,
+      maxPlants: MAX_PLANTS,
+      plantLevels: PLANT_LEVELS
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Error: ' + error.message });
+  }
+});
+
 // ==== ENDPOINT: PRECIO ====
 app.get('/price', async (req, res) => {
   try {
@@ -372,10 +556,10 @@ app.get('/balance', async (req, res) => {
 
 // ==== ENDPOINT: ROOT ====
 app.get('/', (req, res) => {
-  res.json({ status: 'Faucet JHOAL + Dados de Horus funcionando' });
+  res.json({ status: 'Faucet JHOAL + Dados de Horus + Huerto funcionando' });
 });
 
-// ==== BOT PRINCIPAL DE TELEGRAM ====
+// ==== BOT PRINCIPAL ====
 let bot = null;
 if (BOT_TOKEN) {
   bot = new TelegramBot(BOT_TOKEN, { polling: true });
@@ -388,6 +572,7 @@ if (BOT_TOKEN) {
       '¡Bienvenido, ' + name + '!\n\n' +
       '💰 Reclama *1 JHOAL GRATIS* cada 30 minutos\n' +
       '🎲 Juega en *Los Dados de Horus*\n' +
+      '🌱 Planta en el *Huerto de Horus*\n' +
       '📊 Precio actual: *$0.00005 USD*\n\n' +
       '👉 Toca "Abrir Faucet" para empezar.',
       { parse_mode: 'Markdown' }
@@ -434,7 +619,7 @@ if (BOT_TOKEN) {
   });
 }
 
-// ==== BOT DE SOPORTE (recibe mensajes y los reenvía a ti) ====
+// ==== BOT DE SOPORTE ====
 if (SUPPORT_BOT_TOKEN && SUPPORT_CHAT_ID) {
   const supportBot = new TelegramBot(SUPPORT_BOT_TOKEN, { polling: true });
   console.log('Bot de soporte iniciado');
@@ -487,7 +672,7 @@ if (SUPPORT_BOT_TOKEN && SUPPORT_CHAT_ID) {
 
 // ==== INICIAR SERVIDOR ====
 app.listen(process.env.PORT || 3000, () => {
-  console.log('Faucet JHOAL + Dados de Horus corriendo en puerto', process.env.PORT || 3000);
+  console.log('Faucet JHOAL + Dados + Huerto corriendo en puerto', process.env.PORT || 3000);
   console.log('Wallet:', wallet.address);
   console.log('Bot principal:', BOT_TOKEN ? 'SÍ' : 'NO');
   console.log('Bot de soporte:', SUPPORT_BOT_TOKEN ? 'SÍ' : 'NO');
