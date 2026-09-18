@@ -139,7 +139,7 @@ function getPlantStatus(plant) {
     return { status: 'ready', value: level.fruitValue, minutesLeft: Math.ceil(35 - elapsed), progress: 100, canRefund: false };
   } else if (elapsed <= 60) {
     const withering = (elapsed - 35) / 25;
-    const value = level.fruitValue * (1 - withering);
+    const value = level.fruitValue * (1 - withering * 0.1);
     return { status: 'withering', value: Math.max(0, value), minutesLeft: Math.ceil(60 - elapsed), progress: 100, canRefund: false };
   } else {
     return { status: 'rotten', value: 0, minutesLeft: 0, progress: 0, canRefund: true };
