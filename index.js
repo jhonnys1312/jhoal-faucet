@@ -156,9 +156,10 @@ async function refundPlant(userId, plantId) {
       created_at: Math.floor(Date.now() / 1000)
     });
 
-    await supabase.from('plants').update({ status: 'refunded', last_watered: null }).eq('id', plantId);
+    // La planta vuelve a estado "dry" para que se pueda regar de nuevo
+    await supabase.from('plants').update({ status: 'dry', last_watered: null }).eq('id', plantId);
 
-    return { success: true, amount: refundAmount, message: '¡Recibiste ' + refundAmount.toFixed(2) + ' JHOAL de reembolso!' };
+    return { success: true, amount: refundAmount, message: '¡Recibiste ' + refundAmount.toFixed(2) + ' JHOAL de reembolso! Plantá de nuevo cuando quieras.' };
   } catch (e) {
     console.error('Error refund:', e);
     return { success: false, error: e.message };
@@ -389,7 +390,7 @@ app.post('/water-plant', async (req, res) => {
     if (!plant) return res.status(400).json({ error: 'Planta no encontrada' });
 
     const status = getPlantStatus(plant);
-    if (status.status !== 'dry' && status.status !== 'rotten' && status.status !== 'refunded') return res.status(400).json({ error: 'La planta todavía tiene fruto o está creciendo' });
+    if (status.status !== 'dry' && status.status !== 'rotten') return res.status(400).json({ error: 'La planta todavía tiene fruto o está creciendo' });
 
     const user = await ensureUser(userId);
     const level = PLANT_LEVELS[plant.level];
