@@ -3,6 +3,7 @@ import { ethers } from 'ethers';
 import { createClient } from '@supabase/supabase-js';
 import TelegramBot from 'node-telegram-bot-api';
 import cors from 'cors';
+import crypto from 'crypto';
 import 'dotenv/config';
 
 const app = express();
@@ -47,6 +48,70 @@ const pair = new ethers.Contract(PAIR_ADDRESS, PAIR_ABI, provider);
 // ==== SUPABASE ====
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
+// ==== VALIDACIÓN INITDATA ====
+// Verifica que el initData venga firmado por Telegram con el BOT_TOKEN.
+// Devuelve el userId real si es válido, o null si no lo es.
+function validateInitData(initData) {
+  if (!initData || !BOT_TOKEN) return null;
+  try {
+    const params = new URLSearchParams(initData);
+    const hash = params.get('hash');
+    if (!hash) return null;
+    params.delete('hash');
+
+    const dataCheckArr = [];
+    for (const [key, value] of params.entries()) {
+      dataCheckArr.push(key + '=' + value);
+    }
+    dataCheckArr.sort();
+    const dataCheckString = dataCheckArr.join('\n');
+
+    const secretKey = crypto
+      .createHmac('sha256', 'WebAppData')
+      .update(BOT_TOKEN)
+      .digest();
+
+    const calculatedHash = crypto
+      .createHmac('sha256', secretKey)
+      .update(dataCheckString)
+      .digest('hex');
+
+    if (calculatedHash !== hash) return null;
+
+    // Verificar que no sea muy viejo (24 horas)
+    const authDate = parseInt(params.get('auth_date') || '0');
+    const now = Math.floor(Date.now() / 1000);
+    if (now - authDate > 86400) return null;
+
+    const userJson = params.get('user');
+    if (!userJson) return null;
+    const userObj = JSON.parse(userJson);
+    return userObj.id ? String(userObj.id) : null;
+  } catch (e) {
+    console.error('Error validateInitData:', e);
+    return null;
+  }
+}
+
+// Middleware: exige que el initData sea válido y que el userId coincida.
+// En producción activamos esto para evitar que alguien se haga pasar por otro.
+function requireAuth(req, res, next) {
+  const initData = req.body.initData || req.headers['x-init-data'];
+  const verifiedUserId = validateInitData(initData);
+
+  if (!verifiedUserId) {
+    return res.status(401).json({ error: 'No autorizado: initData inválido o expirado' });
+  }
+
+  const claimedUserId = req.body.userId || req.params.userId;
+  if (claimedUserId && String(claimedUserId) !== String(verifiedUserId)) {
+    return res.status(401).json({ error: 'No autorizado: userId no coincide' });
+  }
+
+  req.userId = verifiedUserId;
+  next();
+}
+
 // ==== HUERTO DE HORUS ====
 const PLANT_LEVELS = {
   basic: { name: 'Básica', emoji: '🌱', price: 10, waterCost: 1, fruitValue: 1.5, sellPrice: 9 },
@@ -90,14 +155,17 @@ function timeAgo(timestamp) {
   return 'hace ' + Math.floor(seconds / 86400) + 'd';
 }
 
+// ==== DADOS: dificultad bajada ====
+// Antes: x0 38% | x1.1 47% | x2 10% | x4 3% | x6 1.3% | x8 0.5% | x10 0.2%
+// Ahora: x0 25% | x1.1 50% | x2 15% | x4 5%  | x6 3%   | x8 1%   | x10 1%
 function spinRoulette() {
   const random = Math.random() * 100;
-  if (random < 38) return 0;
-  else if (random < 85) return 1.1;
-  else if (random < 95) return 2;
-  else if (random < 98) return 4;
-  else if (random < 99.3) return 6;
-  else if (random < 99.8) return 8;
+  if (random < 25) return 0;
+  else if (random < 75) return 1.1;
+  else if (random < 90) return 2;
+  else if (random < 95) return 4;
+  else if (random < 98) return 6;
+  else if (random < 99) return 8;
   else return 10;
 }
 
@@ -156,7 +224,6 @@ async function refundPlant(userId, plantId) {
       created_at: Math.floor(Date.now() / 1000)
     });
 
-    // La planta vuelve a estado "dry" para que se pueda regar de nuevo
     await supabase.from('plants').update({ status: 'dry', last_watered: null }).eq('id', plantId);
 
     return { success: true, amount: refundAmount, message: '¡Recibiste ' + refundAmount.toFixed(2) + ' JHOAL de reembolso! Plantá de nuevo cuando quieras.' };
@@ -166,11 +233,9 @@ async function refundPlant(userId, plantId) {
   }
 }
 
-// ==== ENDPOINT: RECLAMAR ====
-app.post('/claim', async (req, res) => {
-  const { userId } = req.body;
-  if (!userId) return res.status(400).json({ error: 'Falta userId' });
-
+// ==== ENDPOINT: RECLAMAR (protegido) ====
+app.post('/claim', requireAuth, async (req, res) => {
+  const userId = req.userId;
   try {
     const user = await ensureUser(userId);
     const now = Math.floor(Date.now() / 1000);
@@ -193,10 +258,10 @@ app.post('/claim', async (req, res) => {
   }
 });
 
-// ==== ENDPOINT: BALANCE ====
-app.get('/balance-game/:userId', async (req, res) => {
+// ==== ENDPOINT: BALANCE (protegido) ====
+app.get('/balance-game/:userId', requireAuth, async (req, res) => {
   try {
-    const user = await getUser(req.params.userId);
+    const user = await getUser(req.userId);
     if (!user) return res.json({ success: true, balance: 0, total_claimed: 0, total_won: 0, total_lost: 0, last_claim: 0 });
     res.json({
       success: true,
@@ -211,10 +276,11 @@ app.get('/balance-game/:userId', async (req, res) => {
   }
 });
 
-// ==== ENDPOINT: APOSTAR ====
-app.post('/bet', async (req, res) => {
-  const { userId, amount } = req.body;
-  if (!userId || !amount) return res.status(400).json({ error: 'Faltan datos' });
+// ==== ENDPOINT: APOSTAR (protegido) ====
+app.post('/bet', requireAuth, async (req, res) => {
+  const userId = req.userId;
+  const { amount } = req.body;
+  if (!amount) return res.status(400).json({ error: 'Faltan datos' });
   if (amount < MIN_BET || amount > MAX_BET) return res.status(400).json({ error: 'Apuesta inválida (' + MIN_BET + '-' + MAX_BET + ')' });
 
   try {
@@ -253,20 +319,21 @@ app.post('/bet', async (req, res) => {
   }
 });
 
-// ==== ENDPOINT: HISTORIAL DE APUESTAS ====
-app.get('/bet-history/:userId', async (req, res) => {
+// ==== ENDPOINT: HISTORIAL DE APUESTAS (protegido) ====
+app.get('/bet-history/:userId', requireAuth, async (req, res) => {
   try {
-    const { data } = await supabase.from('bets').select('*').eq('user_id', req.params.userId).order('created_at', { ascending: false }).limit(10);
+    const { data } = await supabase.from('bets').select('*').eq('user_id', req.userId).order('created_at', { ascending: false }).limit(10);
     res.json({ success: true, bets: data || [] });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-// ==== ENDPOINT: RETIRAR ====
-app.post('/withdraw', async (req, res) => {
-  const { userId, wallet: userWallet, amount } = req.body;
-  if (!userId || !userWallet || !amount) return res.status(400).json({ error: 'Faltan datos' });
+// ==== ENDPOINT: RETIRAR (protegido) ====
+app.post('/withdraw', requireAuth, async (req, res) => {
+  const userId = req.userId;
+  const { wallet: userWallet, amount } = req.body;
+  if (!userWallet || !amount) return res.status(400).json({ error: 'Faltan datos' });
   if (!ethers.isAddress(userWallet)) return res.status(400).json({ error: 'Wallet inválida' });
   if (amount <= 0) return res.status(400).json({ error: 'Cantidad inválida' });
 
@@ -293,15 +360,16 @@ app.post('/withdraw', async (req, res) => {
   }
 });
 
-// ==== ENDPOINT: INFO DE DEPÓSITO ====
+// ==== ENDPOINT: INFO DE DEPÓSITO (público) ====
 app.get('/deposit-info', (req, res) => {
   res.json({ success: true, depositWallet: wallet.address, tokenAddress: TOKEN_ADDRESS, minDeposit: 1 });
 });
 
-// ==== ENDPOINT: VERIFICAR DEPÓSITO ====
-app.post('/verify-deposit', async (req, res) => {
-  const { userId, txHash } = req.body;
-  if (!userId || !txHash) return res.status(400).json({ error: 'Faltan datos' });
+// ==== ENDPOINT: VERIFICAR DEPÓSITO (protegido) ====
+app.post('/verify-deposit', requireAuth, async (req, res) => {
+  const userId = req.userId;
+  const { txHash } = req.body;
+  if (!txHash) return res.status(400).json({ error: 'Faltan datos' });
   if (!/^0x[a-fA-F0-9]{64}$/.test(txHash)) return res.status(400).json({ error: 'Hash inválido' });
 
   try {
@@ -352,10 +420,11 @@ app.post('/verify-deposit', async (req, res) => {
   }
 });
 
-// ==== HUERTO: COMPRAR ====
-app.post('/buy-plant', async (req, res) => {
-  const { userId, level } = req.body;
-  if (!userId || !level) return res.status(400).json({ error: 'Faltan datos' });
+// ==== HUERTO: COMPRAR (protegido) ====
+app.post('/buy-plant', requireAuth, async (req, res) => {
+  const userId = req.userId;
+  const { level } = req.body;
+  if (!level) return res.status(400).json({ error: 'Faltan datos' });
   if (!PLANT_LEVELS[level]) return res.status(400).json({ error: 'Nivel inválido' });
 
   try {
@@ -380,10 +449,11 @@ app.post('/buy-plant', async (req, res) => {
   }
 });
 
-// ==== HUERTO: REGAR ====
-app.post('/water-plant', async (req, res) => {
-  const { userId, plantId } = req.body;
-  if (!userId || !plantId) return res.status(400).json({ error: 'Faltan datos' });
+// ==== HUERTO: REGAR (protegido) ====
+app.post('/water-plant', requireAuth, async (req, res) => {
+  const userId = req.userId;
+  const { plantId } = req.body;
+  if (!plantId) return res.status(400).json({ error: 'Faltan datos' });
 
   try {
     const { data: plant } = await supabase.from('plants').select('*').eq('id', plantId).eq('user_id', userId).maybeSingle();
@@ -410,10 +480,11 @@ app.post('/water-plant', async (req, res) => {
   }
 });
 
-// ==== HUERTO: COSECHAR ====
-app.post('/harvest', async (req, res) => {
-  const { userId, plantId } = req.body;
-  if (!userId || !plantId) return res.status(400).json({ error: 'Faltan datos' });
+// ==== HUERTO: COSECHAR (protegido) ====
+app.post('/harvest', requireAuth, async (req, res) => {
+  const userId = req.userId;
+  const { plantId } = req.body;
+  if (!plantId) return res.status(400).json({ error: 'Faltan datos' });
 
   try {
     const { data: plant } = await supabase.from('plants').select('*').eq('id', plantId).eq('user_id', userId).maybeSingle();
@@ -442,10 +513,11 @@ app.post('/harvest', async (req, res) => {
   }
 });
 
-// ==== HUERTO: VENDER ====
-app.post('/sell-plant', async (req, res) => {
-  const { userId, plantId } = req.body;
-  if (!userId || !plantId) return res.status(400).json({ error: 'Faltan datos' });
+// ==== HUERTO: VENDER (protegido) ====
+app.post('/sell-plant', requireAuth, async (req, res) => {
+  const userId = req.userId;
+  const { plantId } = req.body;
+  if (!plantId) return res.status(400).json({ error: 'Faltan datos' });
 
   try {
     const { data: plant } = await supabase.from('plants').select('*').eq('id', plantId).eq('user_id', userId).maybeSingle();
@@ -468,10 +540,11 @@ app.post('/sell-plant', async (req, res) => {
   }
 });
 
-// ==== HUERTO: RECLAMAR DEVOLUCIÓN ====
-app.post('/refund-plant', async (req, res) => {
-  const { userId, plantId } = req.body;
-  if (!userId || !plantId) return res.status(400).json({ error: 'Faltan datos' });
+// ==== HUERTO: RECLAMAR DEVOLUCIÓN (protegido) ====
+app.post('/refund-plant', requireAuth, async (req, res) => {
+  const userId = req.userId;
+  const { plantId } = req.body;
+  if (!plantId) return res.status(400).json({ error: 'Faltan datos' });
 
   const result = await refundPlant(userId, plantId);
   if (result.success) {
@@ -481,10 +554,10 @@ app.post('/refund-plant', async (req, res) => {
   }
 });
 
-// ==== HUERTO: MIS PLANTAS ====
-app.get('/my-plants/:userId', async (req, res) => {
+// ==== HUERTO: MIS PLANTAS (protegido) ====
+app.get('/my-plants/:userId', requireAuth, async (req, res) => {
   try {
-    const userId = req.params.userId;
+    const userId = req.userId;
     const { data: plants } = await supabase.from('plants').select('*').eq('user_id', userId).order('created_at', { ascending: true });
 
     const plantsWithStatus = (plants || []).map(function(p) {
@@ -508,10 +581,10 @@ app.get('/my-plants/:userId', async (req, res) => {
   }
 });
 
-// ==== HISTORIAL ====
-app.get('/history/:userId', async (req, res) => {
+// ==== HISTORIAL (protegido) ====
+app.get('/history/:userId', requireAuth, async (req, res) => {
   try {
-    const userId = req.params.userId;
+    const userId = req.userId;
     const limit = parseInt(req.query.limit) || 50;
     const type = req.query.type;
 
@@ -540,7 +613,7 @@ app.get('/history/:userId', async (req, res) => {
   }
 });
 
-// ==== PRECIO ====
+// ==== PRECIO (público) ====
 app.get('/price', async (req, res) => {
   try {
     const reserves = await pair.getReserves();
@@ -561,7 +634,7 @@ app.get('/price', async (req, res) => {
   }
 });
 
-// ==== BALANCE FAUCET ====
+// ==== BALANCE FAUCET (público) ====
 app.get('/balance', async (req, res) => {
   try {
     const balance = await token.balanceOf(wallet.address);
@@ -572,7 +645,7 @@ app.get('/balance', async (req, res) => {
   }
 });
 
-// ==== ROOT ====
+// ==== ROOT (público) ====
 app.get('/', (req, res) => {
   res.json({ status: 'Faucet JHOAL + Dados + Huerto + Historial funcionando' });
 });
@@ -754,4 +827,5 @@ app.listen(process.env.PORT || 3000, () => {
   console.log('Bot principal:', BOT_TOKEN ? 'SÍ' : 'NO');
   console.log('Bot de soporte:', SUPPORT_BOT_TOKEN ? 'SÍ' : 'NO');
   console.log('Supabase:', SUPABASE_URL ? 'SÍ' : 'NO');
+  console.log('Validación initData:', BOT_TOKEN ? 'ACTIVADA' : 'DESACTIVADA (falta BOT_TOKEN)');
 });
