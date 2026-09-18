@@ -49,10 +49,10 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 // ==== HUERTO DE HORUS ====
 const PLANT_LEVELS = {
-  basic: { name: 'Básica', emoji: '🌱', price: 10, waterCost: 1, fruitValue: 1.5, sellPrice: 8 },
-  medium: { name: 'Media', emoji: '🌿', price: 50, waterCost: 5, fruitValue: 7.5, sellPrice: 40 },
-  premium: { name: 'Premium', emoji: '🌳', price: 250, waterCost: 25, fruitValue: 37.5, sellPrice: 200 },
-  pro: { name: 'Pro', emoji: '🌴', price: 1000, waterCost: 100, fruitValue: 150, sellPrice: 800 }
+  basic: { name: 'Básica', emoji: '🌱', price: 10, waterCost: 1, fruitValue: 1.5, sellPrice: 9 },
+  medium: { name: 'Media', emoji: '🌿', price: 50, waterCost: 5, fruitValue: 7.5, sellPrice: 45 },
+  premium: { name: 'Premium', emoji: '🌳', price: 250, waterCost: 25, fruitValue: 37.5, sellPrice: 225 },
+  pro: { name: 'Pro', emoji: '🌴', price: 1000, waterCost: 100, fruitValue: 150, sellPrice: 900 }
 };
 
 const MAX_PLANTS = 12;
@@ -140,7 +140,7 @@ async function refundPlant(userId, plantId) {
     if (status.status !== 'rotten') return { success: false, error: 'La planta todavía no está podrida' };
 
     const level = PLANT_LEVELS[plant.level];
-    const refundAmount = level.waterCost * 0.8;
+    const refundAmount = level.waterCost * 0.9;
 
     const user = await ensureUser(userId);
     const newBalance = parseFloat(user.balance) + refundAmount;
@@ -497,7 +497,7 @@ app.get('/my-plants/:userId', async (req, res) => {
         waterCost: level.waterCost, fruitValue: level.fruitValue, sellPrice: level.sellPrice,
         lastWatered: p.last_watered,
         canRefund: status.canRefund || false,
-        refundAmount: status.canRefund ? (level.waterCost * 0.8) : 0
+        refundAmount: status.canRefund ? (level.waterCost * 0.9) : 0
       };
     });
 
