@@ -108,6 +108,54 @@ function activateMoon() {
   moonState.endsAt = now + MOON_DURATION_MIN * 60;
   moonState.eventsToday += 1;
   console.log('🌕 LUNA LLENA ACTIVADA hasta', new Date(moonState.endsAt * 1000).toISOString());
+  
+  // 🔔 Notificar a todos los usuarios por Telegram
+  notificarLunaLlena();
+}
+
+// 🔔 Envía notificación a todos los usuarios con chat_id registrado
+async function notificarLunaLlena() {
+  if (!bot) {
+    console.log('No hay bot configurado, no se puede notificar');
+    return;
+  }
+
+  try {
+    const { data: usuarios } = await supabase
+      .from('users_balance')
+      .select('chat_id')
+      .not('chat_id', 'is', null);
+
+    if (!usuarios || usuarios.length === 0) {
+      console.log('Sin usuarios con chat_id registrado');
+      return;
+    }
+
+    console.log('🌕 Notificando a', usuarios.length, 'usuarios');
+
+    for (const u of usuarios) {
+      try {
+        await bot.sendMessage(
+          u.chat_id,
+          '🌕 *¡LUNA LLENA ACTIVA!*\n\n' +
+          'Las plantas crecen *90% más rápido* durante los próximos *10 minutos*.\n\n' +
+          '👉 Abre el Huerto y riega ahora para aprovechar.',
+          {
+            parse_mode: 'Markdown',
+            reply_markup: {
+              inline_keyboard: [[
+                { text: '🌱 Abrir Huerto', web_app: { url: MINI_APP_URL } }
+              ]]
+            }
+          }
+        );
+      } catch (e) {
+        // Si el usuario bloqueó el bot, ignorar
+      }
+    }
+  } catch (e) {
+    console.error('Error notificando Luna Llena:', e);
+  }
 }
 
 function deactivateMoon() {
@@ -378,8 +426,27 @@ app.get('/moon-status', (req, res) => {
   });
 });
 
-// ==== ENDPOINT: RECLAMAR (protegido) ====
-app.post('/claim', requireAuth, async (req, res) => {
+// ==== ENDPOINT: REGISTRAR CHAT_ID (para notificaciones) ====
+app.post('/register-user', requireAuth, async (req, res) => {
+  const userId = req.userId;
+  const { chatId } = req.body;
+  
+  if (!chatId) {
+    return res.json({ success: true, message: 'Sin chatId' });
+  }
+  
+  try {
+    const user = await ensureUser(userId);
+    await supabase.from('users_balance')
+      .update({ chat_id: chatId })
+      .eq('user_id', userId);
+    
+    res.json({ success: true });
+  } catch (e) {
+    console.error('Error register-user:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
   const userId = req.userId;
   try {
     const user = await ensureUser(userId);
