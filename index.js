@@ -26,7 +26,13 @@ const AMOUNT = ethers.parseUnits('1', 18);
 const COOLDOWN = 30 * 60;
 const MIN_BET = 0.1;
 const MAX_BET = 1000;
-// ================
+
+// ==== LUNA LLENA ====
+const MOON_GROWTH_MULTIPLIER = 1.9;   // 25 min → ~13.2 min
+const MOON_DURATION_MIN = 10;          // 10 minutos
+const MOON_MIN_PER_DAY = 1;            // mínimo 1 por día
+const MOON_MAX_PER_DAY = 5;            // máximo 5 por día
+// ====================
 
 const provider = new ethers.JsonRpcProvider(RPC);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
@@ -48,9 +54,104 @@ const pair = new ethers.Contract(PAIR_ADDRESS, PAIR_ABI, provider);
 // ==== SUPABASE ====
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
+// ==== ESTADO GLOBAL LUNA LLENA ====
+// Se mantiene en memoria y se sincroniza con Supabase si la tabla existe.
+const moonState = {
+  active: false,
+  startedAt: 0,       // unix seconds
+  endsAt: 0,          // unix seconds
+  nextEventAt: 0,     // cuándo programar el próximo
+  eventsToday: 0,     // cuántos eventos ya ocurrieron hoy
+  todayKey: ''        // "YYYY-MM-DD" para reset diario
+};
+
+function todayKeyUTC() {
+  const d = new Date();
+  return d.getUTCFullYear() + '-' + String(d.getUTCMonth() + 1).padStart(2, '0') + '-' + String(d.getUTCDate()).padStart(2, '0');
+}
+
+function randInt(min, max) {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+// Programa el próximo evento a una hora aleatoria dentro de las próximas 24h.
+// Distribuye los eventos para que no se solapen y para que respeten el máximo diario.
+function scheduleNextMoon() {
+  const now = Math.floor(Date.now() / 1000);
+  const key = todayKeyUTC();
+  if (moonState.todayKey !== key) {
+    moonState.todayKey = key;
+    moonState.eventsToday = 0;
+  }
+
+  // Si ya alcanzamos el máximo diario, esperamos a mañana
+  if (moonState.eventsToday >= MOON_MAX_PER_DAY) {
+    const tomorrow = new Date();
+    tomorrow.setUTCHours(24, 0, 0, 0);
+    moonState.nextEventAt = Math.floor(tomorrow.getTime() / 1000) + randInt(0, 3600);
+    return;
+  }
+
+  // Si todavía no llegamos al mínimo diario, forzamos que ocurra pronto
+  const remainingMin = MOON_MIN_PER_DAY - moonState.eventsToday;
+  const hoursLeftToday = 24 - new Date().getUTCHours();
+
+  let delay;
+  if (remainingMin > 0 && hoursLeftToday <= remainingMin) {
+    // Forzar evento pronto para cumplir el mínimo
+    delay = randInt(60, 1800); // 1-30 min
+  } else {
+    // Distribuir aleatoriamente: entre 30 min y 5 horas
+    delay = randInt(1800, 5 * 3600);
+  }
+
+  moonState.nextEventAt = now + delay;
+}
+
+// Activa la luna llena
+function activateMoon() {
+  const now = Math.floor(Date.now() / 1000);
+  moonState.active = true;
+  moonState.startedAt = now;
+  moonState.endsAt = now + MOON_DURATION_MIN * 60;
+  moonState.eventsToday += 1;
+  console.log('🌕 LUNA LLENA ACTIVADA hasta', new Date(moonState.endsAt * 1000).toISOString());
+}
+
+// Desactiva la luna llena
+function deactivateMoon() {
+  moonState.active = false;
+  moonState.startedAt = 0;
+  moonState.endsAt = 0;
+  console.log('🌑 Luna llena terminada');
+  scheduleNextMoon();
+}
+
+// Chequeo periódico del estado
+function tickMoon() {
+  const now = Math.floor(Date.now() / 1000);
+  const key = todayKeyUTC();
+  if (moonState.todayKey !== key) {
+    moonState.todayKey = key;
+    moonState.eventsToday = 0;
+  }
+
+  if (moonState.active && now >= moonState.endsAt) {
+    deactivateMoon();
+    return;
+  }
+
+  if (!moonState.active && moonState.nextEventAt > 0 && now >= moonState.nextEventAt) {
+    activateMoon();
+  }
+}
+
+// Inicializar
+moonState.todayKey = todayKeyUTC();
+scheduleNextMoon();
+setInterval(tickMoon, 30 * 1000); // chequeo cada 30s
+
 // ==== VALIDACIÓN INITDATA ====
-// Verifica que el initData venga firmado por Telegram con el BOT_TOKEN.
-// Devuelve el userId real si es válido, o null si no lo es.
 function validateInitData(initData) {
   if (!initData || !BOT_TOKEN) return null;
   try {
@@ -78,7 +179,6 @@ function validateInitData(initData) {
 
     if (calculatedHash !== hash) return null;
 
-    // Verificar que no sea muy viejo (24 horas)
     const authDate = parseInt(params.get('auth_date') || '0');
     const now = Math.floor(Date.now() / 1000);
     if (now - authDate > 86400) return null;
@@ -93,8 +193,6 @@ function validateInitData(initData) {
   }
 }
 
-// Middleware: exige que el initData sea válido y que el userId coincida.
-// En producción activamos esto para evitar que alguien se haga pasar por otro.
 function requireAuth(req, res, next) {
   const initData = req.body.initData || req.headers['x-init-data'];
   const verifiedUserId = validateInitData(initData);
@@ -121,6 +219,9 @@ const PLANT_LEVELS = {
 };
 
 const MAX_PLANTS = 12;
+const GROW_TIME_MIN = 25;      // minutos base de crecimiento
+const PERFECT_WINDOW = 35;     // hasta los 35 min se puede cosechar al 100%
+const ROT_TIME = 60;           // a los 60 min se pudre
 
 function getPlantStatus(plant) {
   if (plant.status === 'refunded') {
@@ -129,20 +230,52 @@ function getPlantStatus(plant) {
   if (plant.status === 'dry' || !plant.last_watered) {
     return { status: 'dry', value: 0, minutesLeft: 0, progress: 0, canRefund: false };
   }
+
   const now = Math.floor(Date.now() / 1000);
-  const elapsed = (now - plant.last_watered) / 60;
   const level = PLANT_LEVELS[plant.level];
 
-  if (elapsed < 25) {
-    return { status: 'growing', value: 0, minutesLeft: Math.ceil(25 - elapsed), progress: Math.floor((elapsed / 25) * 100), canRefund: false };
-  } else if (elapsed <= 35) {
-    return { status: 'ready', value: level.fruitValue, minutesLeft: Math.ceil(35 - elapsed), progress: 100, canRefund: false };
-  } else if (elapsed <= 60) {
-    const withering = (elapsed - 35) / 25;
+  // ¿La planta se regó durante Luna Llena?
+  // Guardamos el multiplicador aplicado en el momento del riego (moon_multiplier).
+  const moonMult = parseFloat(plant.moon_multiplier || 1) || 1;
+  const effectiveGrowTime = GROW_TIME_MIN / moonMult; // minutos reales de crecimiento
+
+  const elapsed = (now - plant.last_watered) / 60;
+
+  if (elapsed < effectiveGrowTime) {
+    const progress = Math.floor((elapsed / effectiveGrowTime) * 100);
+    return {
+      status: 'growing',
+      value: 0,
+      minutesLeft: Math.ceil(effectiveGrowTime - elapsed),
+      progress: Math.min(progress, 99),
+      canRefund: false,
+      moonBoost: moonMult > 1
+    };
+  }
+
+  // Momento exacto en que quedó lista (según el multiplicador aplicado al regar)
+  const readyAt = plant.last_watered + effectiveGrowTime * 60;
+  const elapsedSinceReady = (now - readyAt) / 60;
+
+  if (elapsedSinceReady <= (PERFECT_WINDOW - GROW_TIME_MIN)) {
+    // Ventana de "perfecto" original: 25-35 min = 10 min de margen
+    // Ajustamos para que con luna llena también sean 10 min de margen
+    return { status: 'ready', value: level.fruitValue, minutesLeft: Math.ceil((PERFECT_WINDOW - GROW_TIME_MIN) - elapsedSinceReady), progress: 100, canRefund: false, moonBoost: moonMult > 1 };
+  } else if (elapsedSinceReady <= (ROT_TIME - GROW_TIME_MIN)) {
+    // Marchitamiento
+    const witheringTotal = ROT_TIME - PERFECT_WINDOW; // 25 min
+    const withering = elapsedSinceReady / witheringTotal;
     const value = level.fruitValue * (1 - withering * 0.1);
-    return { status: 'withering', value: Math.max(0, value), minutesLeft: Math.ceil(60 - elapsed), progress: 100, canRefund: false };
+    return {
+      status: 'withering',
+      value: Math.max(0, value),
+      minutesLeft: Math.ceil((ROT_TIME - GROW_TIME_MIN) - elapsedSinceReady),
+      progress: 100,
+      canRefund: false,
+      moonBoost: moonMult > 1
+    };
   } else {
-    return { status: 'rotten', value: 0, minutesLeft: 0, progress: 0, canRefund: true };
+    return { status: 'rotten', value: 0, minutesLeft: 0, progress: 0, canRefund: true, moonBoost: moonMult > 1 };
   }
 }
 
@@ -155,9 +288,6 @@ function timeAgo(timestamp) {
   return 'hace ' + Math.floor(seconds / 86400) + 'd';
 }
 
-// ==== DADOS: dificultad bajada ====
-// Antes: x0 38% | x1.1 47% | x2 10% | x4 3% | x6 1.3% | x8 0.5% | x10 0.2%
-// Ahora: x0 25% | x1.1 50% | x2 15% | x4 5%  | x6 3%   | x8 1%   | x10 1%
 function spinRoulette() {
   const random = Math.random() * 100;
   if (random < 25) return 0;
@@ -224,7 +354,7 @@ async function refundPlant(userId, plantId) {
       created_at: Math.floor(Date.now() / 1000)
     });
 
-    await supabase.from('plants').update({ status: 'dry', last_watered: null }).eq('id', plantId);
+    await supabase.from('plants').update({ status: 'dry', last_watered: null, moon_multiplier: 1 }).eq('id', plantId);
 
     return { success: true, amount: refundAmount, message: '¡Recibiste ' + refundAmount.toFixed(2) + ' JHOAL de reembolso! Plantá de nuevo cuando quieras.' };
   } catch (e) {
@@ -232,6 +362,21 @@ async function refundPlant(userId, plantId) {
     return { success: false, error: e.message };
   }
 }
+
+// ==== ENDPOINT: MOON STATUS (público) ====
+app.get('/moon-status', (req, res) => {
+  const now = Math.floor(Date.now() / 1000);
+  res.json({
+    success: true,
+    active: moonState.active,
+    startedAt: moonState.startedAt,
+    endsAt: moonState.endsAt,
+    secondsLeft: moonState.active ? Math.max(0, moonState.endsAt - now) : 0,
+    multiplier: MOON_GROWTH_MULTIPLIER,
+    durationMinutes: MOON_DURATION_MIN,
+    eventsToday: moonState.eventsToday
+  });
+});
 
 // ==== ENDPOINT: RECLAMAR (protegido) ====
 app.post('/claim', requireAuth, async (req, res) => {
@@ -439,7 +584,7 @@ app.post('/buy-plant', requireAuth, async (req, res) => {
     const newBalance = parseFloat(user.balance) - plantInfo.price;
 
     await supabase.from('users_balance').update({ balance: newBalance }).eq('user_id', userId);
-    await supabase.from('plants').insert({ user_id: userId, level: level, status: 'dry', created_at: now });
+    await supabase.from('plants').insert({ user_id: userId, level: level, status: 'dry', created_at: now, moon_multiplier: 1 });
     await addHistory(userId, 'plant_buy', -plantInfo.price, 'Compraste planta ' + plantInfo.name, null, null);
 
     res.json({ success: true, message: '¡Compraste una planta ' + plantInfo.name + '!' });
@@ -469,11 +614,26 @@ app.post('/water-plant', requireAuth, async (req, res) => {
     const now = Math.floor(Date.now() / 1000);
     const newBalance = parseFloat(user.balance) - level.waterCost;
 
-    await supabase.from('users_balance').update({ balance: newBalance }).eq('user_id', userId);
-    await supabase.from('plants').update({ last_watered: now, status: 'growing' }).eq('id', plantId);
-    await addHistory(userId, 'plant_water', -level.waterCost, 'Regaste ' + level.name, null, null);
+    // 🔥 Si la Luna Llena está activa, guardamos el multiplicador en la planta.
+    const moonMult = moonState.active ? MOON_GROWTH_MULTIPLIER : 1;
+    const effectiveGrowTime = Math.round((GROW_TIME_MIN / moonMult) * 10) / 10;
 
-    res.json({ success: true, message: '¡Regaste tu planta! Lista en 25 minutos.' });
+    await supabase.from('users_balance').update({ balance: newBalance }).eq('user_id', userId);
+    await supabase.from('plants').update({
+      last_watered: now,
+      status: 'growing',
+      moon_multiplier: moonMult
+    }).eq('id', plantId);
+
+    const moonMsg = moonMult > 1 ? ' 🌕 ¡Luna Llena activa! Crecerá en ~' + effectiveGrowTime + ' min.' : '';
+    await addHistory(userId, 'plant_water', -level.waterCost, 'Regaste ' + level.name + (moonMult > 1 ? ' (Luna Llena 🌕)' : ''), null, null);
+
+    res.json({
+      success: true,
+      message: '¡Regaste tu planta! Lista en ' + effectiveGrowTime + ' minutos.' + moonMsg,
+      moonActive: moonMult > 1,
+      growTimeMinutes: effectiveGrowTime
+    });
   } catch (error) {
     console.error('Error water-plant:', error);
     res.status(500).json({ error: 'Error: ' + error.message });
@@ -501,7 +661,7 @@ app.post('/harvest', requireAuth, async (req, res) => {
     const newWon = parseFloat(user.total_won || 0) + value;
 
     await supabase.from('users_balance').update({ balance: newBalance, total_won: newWon }).eq('user_id', userId);
-    await supabase.from('plants').update({ status: 'dry', last_watered: null }).eq('id', plantId);
+    await supabase.from('plants').update({ status: 'dry', last_watered: null, moon_multiplier: 1 }).eq('id', plantId);
 
     const level = PLANT_LEVELS[plant.level];
     await addHistory(userId, 'plant_harvest', value, 'Cosechaste ' + level.name, null, null);
@@ -570,11 +730,23 @@ app.get('/my-plants/:userId', requireAuth, async (req, res) => {
         waterCost: level.waterCost, fruitValue: level.fruitValue, sellPrice: level.sellPrice,
         lastWatered: p.last_watered,
         canRefund: status.canRefund || false,
-        refundAmount: status.canRefund ? (level.waterCost * 0.9) : 0
+        refundAmount: status.canRefund ? (level.waterCost * 0.9) : 0,
+        moonBoost: status.moonBoost || false
       };
     });
 
-    res.json({ success: true, plants: plantsWithStatus, count: plantsWithStatus.length, maxPlants: MAX_PLANTS, plantLevels: PLANT_LEVELS });
+    res.json({
+      success: true,
+      plants: plantsWithStatus,
+      count: plantsWithStatus.length,
+      maxPlants: MAX_PLANTS,
+      plantLevels: PLANT_LEVELS,
+      moon: {
+        active: moonState.active,
+        endsAt: moonState.endsAt,
+        multiplier: MOON_GROWTH_MULTIPLIER
+      }
+    });
   } catch (error) {
     console.error('Error my-plants:', error);
     res.status(500).json({ error: 'Error: ' + error.message });
@@ -647,7 +819,7 @@ app.get('/balance', async (req, res) => {
 
 // ==== ROOT (público) ====
 app.get('/', (req, res) => {
-  res.json({ status: 'Faucet JHOAL + Dados + Huerto + Historial funcionando' });
+  res.json({ status: 'Faucet JHOAL + Dados + Huerto + Luna Llena funcionando' });
 });
 
 // ==== BOT PRINCIPAL ====
@@ -664,6 +836,7 @@ if (BOT_TOKEN) {
       '💰 Reclama *1 JHOAL GRATIS* cada 30 minutos\n' +
       '🎲 Juega en *Los Dados de Horus*\n' +
       '🌱 Planta en el *Huerto de Horus*\n' +
+      '🌕 Atento a la *Luna Llena*\n' +
       '📜 Mirá tu *Historial*\n' +
       '📊 Precio actual: *$0.00005 USD*\n\n' +
       '👉 Toca "Abrir Faucet" para empezar.',
@@ -822,10 +995,11 @@ if (SUPPORT_BOT_TOKEN && SUPPORT_CHAT_ID) {
 
 // ==== INICIAR SERVIDOR ====
 app.listen(process.env.PORT || 3000, () => {
-  console.log('Faucet JHOAL + Dados + Huerto + Historial corriendo en puerto', process.env.PORT || 3000);
+  console.log('Faucet JHOAL + Dados + Huerto + Luna Llena corriendo en puerto', process.env.PORT || 3000);
   console.log('Wallet:', wallet.address);
   console.log('Bot principal:', BOT_TOKEN ? 'SÍ' : 'NO');
   console.log('Bot de soporte:', SUPPORT_BOT_TOKEN ? 'SÍ' : 'NO');
   console.log('Supabase:', SUPABASE_URL ? 'SÍ' : 'NO');
   console.log('Validación initData:', BOT_TOKEN ? 'ACTIVADA' : 'DESACTIVADA (falta BOT_TOKEN)');
+  console.log('🌕 Luna Llena: 1-' + MOON_MAX_PER_DAY + ' eventos/día, ' + MOON_DURATION_MIN + ' min c/u, x' + MOON_GROWTH_MULTIPLIER + ' crecimiento');
 });
