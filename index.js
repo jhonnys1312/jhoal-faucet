@@ -888,12 +888,6 @@ app.get('/balance', async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
-// ⚠️ TEMPORAL: solo para probar la notificación de Luna Llena
-app.get('/test-luna', async (req, res) => {
-  console.log('🌕 Forzando Luna Llena para prueba...');
-  activateMoon();
-  res.json({ success: true, message: 'Luna Llena forzada. Revisa tu Telegram.' });
-});
 
 // ==== ROOT (público) ====
 app.get('/', (req, res) => {
