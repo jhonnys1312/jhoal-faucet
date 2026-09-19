@@ -28,8 +28,8 @@ const MIN_BET = 0.1;
 const MAX_BET = 1000;
 
 // ==== LUNA LLENA ====
-const MOON_GROWTH_MULTIPLIER = 1.8;   // 80% más rápido (25 min → ~13.9 min)
-const MOON_DURATION_MIN = 10;          // 10 minutos
+const MOON_GROWTH_MULTIPLIER = 1.9;   // 90% más rápido (25 min → ~13.2 min)
+const MOON_DURATION_MIN = 10;          // 10 minutos por evento
 const MOON_MIN_PER_DAY = 1;            // mínimo 1 por día
 const MOON_MAX_PER_DAY = 5;            // máximo 5 por día
 // ====================
@@ -54,7 +54,7 @@ const pair = new ethers.Contract(PAIR_ADDRESS, PAIR_ABI, provider);
 // ==== SUPABASE ====
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-// ==== ESTADO GLOBAL LUNA LLENA ====
+// ==== ESTADO LUNA LLENA (en memoria) ====
 const moonState = {
   active: false,
   startedAt: 0,
@@ -183,7 +183,7 @@ function validateInitData(initData) {
 }
 
 function requireAuth(req, res, next) {
-  const initData = req.body.initData || req.headers['x-init-data'];
+  const initData = req.body.initData || req.headers['x-init-data'] || req.query.initData;
   const verifiedUserId = validateInitData(initData);
 
   if (!verifiedUserId) {
@@ -212,26 +212,25 @@ const GROW_TIME_MIN = 25;
 const PERFECT_WINDOW = 35;
 const ROT_TIME = 60;
 
-// 🔑 FIX: getPlantStatus trata 'refunded' como 'dry' para no atascar filas legacy
 function getPlantStatus(plant) {
-  if (plant.status === 'dry' || plant.status === 'refunded' || !plant.last_watered) {
-    return {
-      status: 'dry',
-      value: 0,
-      minutesLeft: 0,
-      progress: 0,
-      canRefund: false,
-      moonBoost: false
-    };
+  if (plant.status === 'refunded') {
+    return { status: 'refunded', value: 0, minutesLeft: 0, progress: 0, canRefund: false };
+  }
+  if (plant.status === 'dry' || !plant.last_watered) {
+    return { status: 'dry', value: 0, minutesLeft: 0, progress: 0, canRefund: false };
   }
 
   const now = Math.floor(Date.now() / 1000);
   const level = PLANT_LEVELS[plant.level];
 
+  // 🌕 Si la planta se regó durante Luna Llena, su tiempo de crecimiento
+  // fue 1.9x más rápido. Guardamos ese multiplicador en moon_multiplier.
   const moonMult = parseFloat(plant.moon_multiplier || 1) || 1;
   const effectiveGrowTime = GROW_TIME_MIN / moonMult;
+
   const elapsed = (now - plant.last_watered) / 60;
 
+  // 1) Creciendo
   if (elapsed < effectiveGrowTime) {
     const progress = Math.floor((elapsed / effectiveGrowTime) * 100);
     return {
@@ -244,41 +243,40 @@ function getPlantStatus(plant) {
     };
   }
 
-  const readyAt = plant.last_watered + effectiveGrowTime * 60;
-  const elapsedSinceReady = (now - readyAt) / 60;
-  const perfectWindow = PERFECT_WINDOW - GROW_TIME_MIN; // 10 min
-  const rotWindow = ROT_TIME - GROW_TIME_MIN;            // 25 min
+  // 2) Desde que quedó lista hasta el final de la ventana perfecta (35 min)
+  const elapsedSinceReady = elapsed - effectiveGrowTime;
+  const perfectDuration = PERFECT_WINDOW - GROW_TIME_MIN; // 10 minutos
 
-  if (elapsedSinceReady <= perfectWindow) {
+  if (elapsedSinceReady <= perfectDuration) {
     return {
       status: 'ready',
       value: level.fruitValue,
-      minutesLeft: Math.ceil(perfectWindow - elapsedSinceReady),
+      minutesLeft: Math.ceil(perfectDuration - elapsedSinceReady),
       progress: 100,
       canRefund: false,
       moonBoost: moonMult > 1
     };
-  } else if (elapsedSinceReady <= rotWindow) {
-    const withering = elapsedSinceReady / rotWindow;
+  }
+
+  // 3) Marchitándose hasta los 60 min
+  const witheringTotal = ROT_TIME - PERFECT_WINDOW; // 25 minutos
+  const witheringElapsed = elapsedSinceReady - perfectDuration;
+
+  if (witheringElapsed <= witheringTotal) {
+    const withering = witheringElapsed / witheringTotal;
     const value = level.fruitValue * (1 - withering * 0.1);
     return {
       status: 'withering',
       value: Math.max(0, value),
-      minutesLeft: Math.ceil(rotWindow - elapsedSinceReady),
+      minutesLeft: Math.ceil(witheringTotal - witheringElapsed),
       progress: 100,
       canRefund: false,
       moonBoost: moonMult > 1
     };
-  } else {
-    return {
-      status: 'rotten',
-      value: 0,
-      minutesLeft: 0,
-      progress: 0,
-      canRefund: true,
-      moonBoost: moonMult > 1
-    };
   }
+
+  // 4) Podrida
+  return { status: 'rotten', value: 0, minutesLeft: 0, progress: 0, canRefund: true, moonBoost: moonMult > 1 };
 }
 
 // ==== HELPERS ====
@@ -331,34 +329,21 @@ async function addHistory(userId, type, amount, description, metadata, txHash) {
   }
 }
 
-// 🔑 FIX: refundPlant con verificación del update + logging
 async function refundPlant(userId, plantId) {
   try {
-    const { data: plant } = await supabase
-      .from('plants')
-      .select('*')
-      .eq('id', plantId)
-      .eq('user_id', userId)
-      .maybeSingle();
+    const { data: plant } = await supabase.from('plants').select('*').eq('id', plantId).eq('user_id', userId).maybeSingle();
     if (!plant) return { success: false, error: 'Planta no encontrada' };
 
     const status = getPlantStatus(plant);
-    if (status.status !== 'rotten') {
-      return { success: false, error: 'La planta todavía no está podrida' };
-    }
+    if (status.status !== 'rotten') return { success: false, error: 'La planta todavía no está podrida' };
 
     const level = PLANT_LEVELS[plant.level];
     const refundAmount = level.waterCost * 0.9;
 
-    // 1) Acreditar saldo
     const user = await ensureUser(userId);
     const newBalance = parseFloat(user.balance) + refundAmount;
-    await supabase
-      .from('users_balance')
-      .update({ balance: newBalance })
-      .eq('user_id', userId);
+    await supabase.from('users_balance').update({ balance: newBalance }).eq('user_id', userId);
 
-    // 2) Registrar historial
     await supabase.from('history').insert({
       user_id: userId,
       type: 'plant_refund',
@@ -369,37 +354,9 @@ async function refundPlant(userId, plantId) {
       created_at: Math.floor(Date.now() / 1000)
     });
 
-    // 3) 🔑 ACTUALIZAR PLANTA Y VERIFICAR que se aplicó
-    const { data: updated, error: updateErr } = await supabase
-      .from('plants')
-      .update({
-        status: 'dry',
-        last_watered: null,
-        moon_multiplier: 1
-      })
-      .eq('id', plantId)
-      .eq('user_id', userId)
-      .select()
-      .maybeSingle();
+    await supabase.from('plants').update({ status: 'dry', last_watered: null, moon_multiplier: 1 }).eq('id', plantId).eq('user_id', userId);
 
-    if (updateErr) {
-      console.error('❌ Error actualizando planta tras refund:', updateErr);
-      return { success: false, error: 'No se pudo actualizar la planta. Contactá a soporte.' };
-    }
-
-    if (!updated) {
-      console.error('❌ El update no devolvió fila. plantId:', plantId, 'userId:', userId);
-      return { success: false, error: 'No se pudo actualizar la planta (sin coincidencia)' };
-    }
-
-    console.log('✅ Refund OK - Planta', plantId, 'antes:', plant.status, '→ después:', updated.status, '| last_watered:', updated.last_watered);
-
-    return {
-      success: true,
-      amount: refundAmount,
-      plantStatus: updated.status,
-      message: '¡Recibiste ' + refundAmount.toFixed(2) + ' JHOAL de reembolso! Plantá de nuevo cuando quieras.'
-    };
+    return { success: true, amount: refundAmount, message: '¡Recibiste ' + refundAmount.toFixed(2) + ' JHOAL de reembolso! Plantá de nuevo cuando quieras.' };
   } catch (e) {
     console.error('Error refund:', e);
     return { success: false, error: e.message };
@@ -657,6 +614,8 @@ app.post('/water-plant', requireAuth, async (req, res) => {
     const now = Math.floor(Date.now() / 1000);
     const newBalance = parseFloat(user.balance) - level.waterCost;
 
+    // 🌕 Si la Luna Llena está activa, guardamos el multiplicador en la planta.
+    // Así, aunque la luna termine, esa planta sigue creciendo al ritmo iniciado.
     const moonMult = moonState.active ? MOON_GROWTH_MULTIPLIER : 1;
     const effectiveGrowTime = Math.round((GROW_TIME_MIN / moonMult) * 10) / 10;
 
@@ -703,27 +662,12 @@ app.post('/harvest', requireAuth, async (req, res) => {
     const newWon = parseFloat(user.total_won || 0) + value;
 
     await supabase.from('users_balance').update({ balance: newBalance, total_won: newWon }).eq('user_id', userId);
-
-    const { error: updateErr } = await supabase
-      .from('plants')
-      .update({ status: 'dry', last_watered: null, moon_multiplier: 1 })
-      .eq('id', plantId)
-      .eq('user_id', userId);
-
-    if (updateErr) {
-      console.error('Error reseteando planta tras harvest:', updateErr);
-    }
+    await supabase.from('plants').update({ status: 'dry', last_watered: null, moon_multiplier: 1 }).eq('id', plantId).eq('user_id', userId);
 
     const level = PLANT_LEVELS[plant.level];
     await addHistory(userId, 'plant_harvest', value, 'Cosechaste ' + level.name, null, null);
 
-    res.json({
-      success: true,
-      value: value,
-      message: '¡Cosechaste ' + value.toFixed(2) + ' JHOAL!',
-      newBalance: newBalance,
-      plantStatus: 'dry'
-    });
+    res.json({ success: true, value: value, message: '¡Cosechaste ' + value.toFixed(2) + ' JHOAL!' });
   } catch (error) {
     console.error('Error harvest:', error);
     res.status(500).json({ error: 'Error: ' + error.message });
@@ -765,59 +709,17 @@ app.post('/refund-plant', requireAuth, async (req, res) => {
 
   const result = await refundPlant(userId, plantId);
   if (result.success) {
-    res.json({
-      success: true,
-      amount: result.amount,
-      plantStatus: result.plantStatus,
-      message: result.message
-    });
+    res.json({ success: true, amount: result.amount, message: result.message });
   } else {
     res.status(400).json({ error: result.error });
   }
 });
 
 // ==== HUERTO: MIS PLANTAS (protegido) ====
-// 🔑 FIX: auto-fix de plantas atascadas (con status 'growing' pero ya pasadas de rotición)
 app.get('/my-plants/:userId', requireAuth, async (req, res) => {
   try {
     const userId = req.userId;
-    const { data: plants } = await supabase
-      .from('plants')
-      .select('*')
-      .eq('user_id', userId)
-      .order('created_at', { ascending: true });
-
-    // Auto-fix: plantas con status 'growing' pero que ya pasaron el tiempo de pudrición
-    const nowSec = Math.floor(Date.now() / 1000);
-    const fixedIds = [];
-
-    for (const p of (plants || [])) {
-      if (p.status === 'growing' && p.last_watered) {
-        const mult = parseFloat(p.moon_multiplier || 1) || 1;
-        const growTime = GROW_TIME_MIN / mult;
-        const elapsed = (nowSec - p.last_watered) / 60;
-        if (elapsed > ROT_TIME) {
-          fixedIds.push(p.id);
-        }
-      }
-    }
-
-    if (fixedIds.length > 0) {
-      console.log('🔧 Auto-fix: forzando a dry las plantas:', fixedIds);
-      await supabase
-        .from('plants')
-        .update({ status: 'dry', last_watered: null, moon_multiplier: 1 })
-        .in('id', fixedIds)
-        .eq('user_id', userId);
-
-      for (const p of plants) {
-        if (fixedIds.includes(p.id)) {
-          p.status = 'dry';
-          p.last_watered = null;
-          p.moon_multiplier = 1;
-        }
-      }
-    }
+    const { data: plants } = await supabase.from('plants').select('*').eq('user_id', userId).order('created_at', { ascending: true });
 
     const plantsWithStatus = (plants || []).map(function(p) {
       const status = getPlantStatus(p);
@@ -918,7 +820,7 @@ app.get('/balance', async (req, res) => {
 
 // ==== ROOT (público) ====
 app.get('/', (req, res) => {
-  res.json({ status: 'Faucet JHOAL + Dados + Huerto + Luna Llena funcionando' });
+  res.json({ status: 'Faucet JHOAL + Dados + Huerto + Historial + Luna Llena funcionando' });
 });
 
 // ==== BOT PRINCIPAL ====
@@ -1094,7 +996,7 @@ if (SUPPORT_BOT_TOKEN && SUPPORT_CHAT_ID) {
 
 // ==== INICIAR SERVIDOR ====
 app.listen(process.env.PORT || 3000, () => {
-  console.log('Faucet JHOAL + Dados + Huerto + Luna Llena corriendo en puerto', process.env.PORT || 3000);
+  console.log('Faucet JHOAL + Dados + Huerto + Historial + Luna Llena corriendo en puerto', process.env.PORT || 3000);
   console.log('Wallet:', wallet.address);
   console.log('Bot principal:', BOT_TOKEN ? 'SÍ' : 'NO');
   console.log('Bot de soporte:', SUPPORT_BOT_TOKEN ? 'SÍ' : 'NO');
