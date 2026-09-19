@@ -447,6 +447,10 @@ app.post('/register-user', requireAuth, async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+
+
+// ==== ENDPOINT: RECLAMAR (protegido) ====
+app.post('/claim', requireAuth, async (req, res) => {
   const userId = req.userId;
   try {
     const user = await ensureUser(userId);
