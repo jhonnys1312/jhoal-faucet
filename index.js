@@ -28,7 +28,7 @@ const MIN_BET = 0.1;
 const MAX_BET = 1000;
 
 // ==== LUNA LLENA ====
-const MOON_GROWTH_MULTIPLIER = 1.9;   // 25 min → ~13.2 min
+const MOON_GROWTH_MULTIPLIER = 1.8;   // 80% más rápido (25 min → ~13.9 min)
 const MOON_DURATION_MIN = 10;          // 10 minutos
 const MOON_MIN_PER_DAY = 1;            // mínimo 1 por día
 const MOON_MAX_PER_DAY = 5;            // máximo 5 por día
@@ -55,14 +55,13 @@ const pair = new ethers.Contract(PAIR_ADDRESS, PAIR_ABI, provider);
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 // ==== ESTADO GLOBAL LUNA LLENA ====
-// Se mantiene en memoria y se sincroniza con Supabase si la tabla existe.
 const moonState = {
   active: false,
-  startedAt: 0,       // unix seconds
-  endsAt: 0,          // unix seconds
-  nextEventAt: 0,     // cuándo programar el próximo
-  eventsToday: 0,     // cuántos eventos ya ocurrieron hoy
-  todayKey: ''        // "YYYY-MM-DD" para reset diario
+  startedAt: 0,
+  endsAt: 0,
+  nextEventAt: 0,
+  eventsToday: 0,
+  todayKey: ''
 };
 
 function todayKeyUTC() {
@@ -74,8 +73,6 @@ function randInt(min, max) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
-// Programa el próximo evento a una hora aleatoria dentro de las próximas 24h.
-// Distribuye los eventos para que no se solapen y para que respeten el máximo diario.
 function scheduleNextMoon() {
   const now = Math.floor(Date.now() / 1000);
   const key = todayKeyUTC();
@@ -84,7 +81,6 @@ function scheduleNextMoon() {
     moonState.eventsToday = 0;
   }
 
-  // Si ya alcanzamos el máximo diario, esperamos a mañana
   if (moonState.eventsToday >= MOON_MAX_PER_DAY) {
     const tomorrow = new Date();
     tomorrow.setUTCHours(24, 0, 0, 0);
@@ -92,23 +88,19 @@ function scheduleNextMoon() {
     return;
   }
 
-  // Si todavía no llegamos al mínimo diario, forzamos que ocurra pronto
   const remainingMin = MOON_MIN_PER_DAY - moonState.eventsToday;
   const hoursLeftToday = 24 - new Date().getUTCHours();
 
   let delay;
   if (remainingMin > 0 && hoursLeftToday <= remainingMin) {
-    // Forzar evento pronto para cumplir el mínimo
-    delay = randInt(60, 1800); // 1-30 min
+    delay = randInt(60, 1800);
   } else {
-    // Distribuir aleatoriamente: entre 30 min y 5 horas
     delay = randInt(1800, 5 * 3600);
   }
 
   moonState.nextEventAt = now + delay;
 }
 
-// Activa la luna llena
 function activateMoon() {
   const now = Math.floor(Date.now() / 1000);
   moonState.active = true;
@@ -118,7 +110,6 @@ function activateMoon() {
   console.log('🌕 LUNA LLENA ACTIVADA hasta', new Date(moonState.endsAt * 1000).toISOString());
 }
 
-// Desactiva la luna llena
 function deactivateMoon() {
   moonState.active = false;
   moonState.startedAt = 0;
@@ -127,7 +118,6 @@ function deactivateMoon() {
   scheduleNextMoon();
 }
 
-// Chequeo periódico del estado
 function tickMoon() {
   const now = Math.floor(Date.now() / 1000);
   const key = todayKeyUTC();
@@ -146,10 +136,9 @@ function tickMoon() {
   }
 }
 
-// Inicializar
 moonState.todayKey = todayKeyUTC();
 scheduleNextMoon();
-setInterval(tickMoon, 30 * 1000); // chequeo cada 30s
+setInterval(tickMoon, 30 * 1000);
 
 // ==== VALIDACIÓN INITDATA ====
 function validateInitData(initData) {
@@ -219,9 +208,9 @@ const PLANT_LEVELS = {
 };
 
 const MAX_PLANTS = 12;
-const GROW_TIME_MIN = 25;      // minutos base de crecimiento
-const PERFECT_WINDOW = 35;     // hasta los 35 min se puede cosechar al 100%
-const ROT_TIME = 60;           // a los 60 min se pudre
+const GROW_TIME_MIN = 25;
+const PERFECT_WINDOW = 35;
+const ROT_TIME = 60;
 
 function getPlantStatus(plant) {
   if (plant.status === 'refunded') {
@@ -234,10 +223,8 @@ function getPlantStatus(plant) {
   const now = Math.floor(Date.now() / 1000);
   const level = PLANT_LEVELS[plant.level];
 
-  // ¿La planta se regó durante Luna Llena?
-  // Guardamos el multiplicador aplicado en el momento del riego (moon_multiplier).
   const moonMult = parseFloat(plant.moon_multiplier || 1) || 1;
-  const effectiveGrowTime = GROW_TIME_MIN / moonMult; // minutos reales de crecimiento
+  const effectiveGrowTime = GROW_TIME_MIN / moonMult;
 
   const elapsed = (now - plant.last_watered) / 60;
 
@@ -253,17 +240,13 @@ function getPlantStatus(plant) {
     };
   }
 
-  // Momento exacto en que quedó lista (según el multiplicador aplicado al regar)
   const readyAt = plant.last_watered + effectiveGrowTime * 60;
   const elapsedSinceReady = (now - readyAt) / 60;
 
   if (elapsedSinceReady <= (PERFECT_WINDOW - GROW_TIME_MIN)) {
-    // Ventana de "perfecto" original: 25-35 min = 10 min de margen
-    // Ajustamos para que con luna llena también sean 10 min de margen
     return { status: 'ready', value: level.fruitValue, minutesLeft: Math.ceil((PERFECT_WINDOW - GROW_TIME_MIN) - elapsedSinceReady), progress: 100, canRefund: false, moonBoost: moonMult > 1 };
   } else if (elapsedSinceReady <= (ROT_TIME - GROW_TIME_MIN)) {
-    // Marchitamiento
-    const witheringTotal = ROT_TIME - PERFECT_WINDOW; // 25 min
+    const witheringTotal = ROT_TIME - PERFECT_WINDOW;
     const withering = elapsedSinceReady / witheringTotal;
     const value = level.fruitValue * (1 - withering * 0.1);
     return {
@@ -354,7 +337,7 @@ async function refundPlant(userId, plantId) {
       created_at: Math.floor(Date.now() / 1000)
     });
 
-    await supabase.from('plants').update({ status: 'dry', last_watered: null, moon_multiplier: 1 }).eq('id', plantId);
+    await supabase.from('plants').update({ status: 'dry', last_watered: null, moon_multiplier: 1 }).eq('id', plantId).eq('user_id', userId);
 
     return { success: true, amount: refundAmount, message: '¡Recibiste ' + refundAmount.toFixed(2) + ' JHOAL de reembolso! Plantá de nuevo cuando quieras.' };
   } catch (e) {
@@ -614,7 +597,6 @@ app.post('/water-plant', requireAuth, async (req, res) => {
     const now = Math.floor(Date.now() / 1000);
     const newBalance = parseFloat(user.balance) - level.waterCost;
 
-    // 🔥 Si la Luna Llena está activa, guardamos el multiplicador en la planta.
     const moonMult = moonState.active ? MOON_GROWTH_MULTIPLIER : 1;
     const effectiveGrowTime = Math.round((GROW_TIME_MIN / moonMult) * 10) / 10;
 
@@ -623,7 +605,7 @@ app.post('/water-plant', requireAuth, async (req, res) => {
       last_watered: now,
       status: 'growing',
       moon_multiplier: moonMult
-    }).eq('id', plantId);
+    }).eq('id', plantId).eq('user_id', userId);
 
     const moonMsg = moonMult > 1 ? ' 🌕 ¡Luna Llena activa! Crecerá en ~' + effectiveGrowTime + ' min.' : '';
     await addHistory(userId, 'plant_water', -level.waterCost, 'Regaste ' + level.name + (moonMult > 1 ? ' (Luna Llena 🌕)' : ''), null, null);
@@ -660,13 +642,32 @@ app.post('/harvest', requireAuth, async (req, res) => {
     const newBalance = parseFloat(user.balance) + value;
     const newWon = parseFloat(user.total_won || 0) + value;
 
+    // 1) Acreditar el saldo
     await supabase.from('users_balance').update({ balance: newBalance, total_won: newWon }).eq('user_id', userId);
-    await supabase.from('plants').update({ status: 'dry', last_watered: null, moon_multiplier: 1 }).eq('id', plantId);
 
+    // 2) Resetear la planta a "dry" (con el filtro user_id)
+    const { error: updateErr } = await supabase
+      .from('plants')
+      .update({ status: 'dry', last_watered: null, moon_multiplier: 1 })
+      .eq('id', plantId)
+      .eq('user_id', userId);
+
+    if (updateErr) {
+      console.error('Error reseteando planta:', updateErr);
+    }
+
+    // 3) Registrar en historial
     const level = PLANT_LEVELS[plant.level];
     await addHistory(userId, 'plant_harvest', value, 'Cosechaste ' + level.name, null, null);
 
-    res.json({ success: true, value: value, message: '¡Cosechaste ' + value.toFixed(2) + ' JHOAL!' });
+    // 4) Devolver estado actualizado
+    res.json({
+      success: true,
+      value: value,
+      message: '¡Cosechaste ' + value.toFixed(2) + ' JHOAL!',
+      newBalance: newBalance,
+      plantStatus: 'dry'
+    });
   } catch (error) {
     console.error('Error harvest:', error);
     res.status(500).json({ error: 'Error: ' + error.message });
@@ -690,7 +691,7 @@ app.post('/sell-plant', requireAuth, async (req, res) => {
     const newBalance = parseFloat(user.balance) + sellValue;
 
     await supabase.from('users_balance').update({ balance: newBalance }).eq('user_id', userId);
-    await supabase.from('plants').delete().eq('id', plantId);
+    await supabase.from('plants').delete().eq('id', plantId).eq('user_id', userId);
     await addHistory(userId, 'plant_sell', sellValue, 'Vendiste ' + level.name, null, null);
 
     res.json({ success: true, value: sellValue, message: '¡Vendiste por ' + sellValue + ' JHOAL!' });
