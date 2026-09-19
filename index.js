@@ -290,13 +290,13 @@ function timeAgo(timestamp) {
 
 function spinRoulette() {
   const random = Math.random() * 100;
-  if (random < 25) return 0;
-  else if (random < 75) return 1.1;
-  else if (random < 90) return 2;
-  else if (random < 95) return 4;
-  else if (random < 98) return 6;
-  else if (random < 99) return 8;
-  else return 10;
+  if (random < 33) return 0;          // 33% pierde
+  else if (random < 78) return 1.1;    // 45% x1.1
+  else if (random < 90) return 2;      // 12% x2
+  else if (random < 95) return 4;      // 5% x4
+  else if (random < 98) return 6;      // 3% x6
+  else if (random < 99) return 8;      // 1% x8
+  else return 10;                       // 1% x10
 }
 
 async function getUser(userId) {
