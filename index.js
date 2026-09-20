@@ -360,10 +360,10 @@ async function checkDeposits() {
           u.wallet_balance = newWalletBalance;
 
           await addHistory(
-            u.user_id,
-            'deposit',
-            amount,
-            'Depósito detectado automáticamente',
+  u.user_id,
+  'deposit',
+  amount,
+  '💵 Depósito a wallet personal',
             null,
             txHash
           );
@@ -739,7 +739,7 @@ app.post('/move-to-game', requireAuth, async (req, res) => {
       .update({ wallet_balance: newWalletBalance, balance: newGameBalance })
       .eq('user_id', userId);
     
-    await addHistory(userId, 'deposit', amount, 'Movido al saldo del juego', null, tx.hash);
+    await addHistory(userId, 'deposit_game', amount, '🎮 Movido al saldo del juego'
     
     res.json({ 
       success: true, 
