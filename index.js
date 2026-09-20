@@ -30,12 +30,10 @@ const MIN_BET = 0.1;
 const MAX_BET = 1000;
 
 // ==== MONITOR DE DEPÓSITOS ====
-// Bloque desde donde el monitor empieza a escanear (bloque actual de BSC - 5000)
-// Ajustalo si necesitás escanear más atrás
 const MONITOR_START_BLOCK = 122925000;
-const BATCH_SIZE = 50;          // Máximo de bloques por consulta (límite del RPC)
-const BLOCKS_PER_CYCLE = 500;   // Bloques a revisar por ciclo
-const BATCH_DELAY_MS = 200;     // Pausa entre lotes
+const BATCH_SIZE = 50;
+const BLOCKS_PER_CYCLE = 500;
+const BATCH_DELAY_MS = 200;
 
 // ==== LUNA LLENA ====
 const MOON_GROWTH_MULTIPLIER = 1.9;
@@ -63,11 +61,11 @@ const pair = new ethers.Contract(PAIR_ADDRESS, PAIR_ABI, provider);
 // ==== SUPABASE ====
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-// ==== ENCRIPTACIÓN DE PRIVATE KEYS ====
+// ==== ENCRIPTACIÓN ====
 const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY;
 
 if (!ENCRYPTION_KEY) {
-  console.warn('⚠️ ENCRYPTION_KEY no está configurada. Las private keys no se podrán encriptar.');
+  console.warn('⚠️ ENCRYPTION_KEY no está configurada.');
 }
 
 function encryptPrivateKey(pk) {
@@ -147,26 +145,18 @@ function activateMoon() {
   moonState.endsAt = now + MOON_DURATION_MIN * 60;
   moonState.eventsToday += 1;
   console.log('🌕 LUNA LLENA ACTIVADA hasta', new Date(moonState.endsAt * 1000).toISOString());
-  
   notificarLunaLlena();
 }
 
 async function notificarLunaLlena() {
-  if (!bot) {
-    console.log('No hay bot configurado, no se puede notificar');
-    return;
-  }
-
+  if (!bot) return;
   try {
     const { data: usuarios } = await supabase
       .from('users_balance')
       .select('chat_id')
       .not('chat_id', 'is', null);
 
-    if (!usuarios || usuarios.length === 0) {
-      console.log('Sin usuarios con chat_id registrado');
-      return;
-    }
+    if (!usuarios || usuarios.length === 0) return;
 
     console.log('🌕 Notificando a', usuarios.length, 'usuarios');
 
@@ -186,9 +176,7 @@ async function notificarLunaLlena() {
             }
           }
         );
-      } catch (e) {
-        // Si el usuario bloqueó el bot, ignorar
-      }
+      } catch (e) {}
     }
   } catch (e) {
     console.error('Error notificando Luna Llena:', e);
@@ -226,7 +214,7 @@ scheduleNextMoon();
 setInterval(tickMoon, 30 * 1000);
 
 // ================================================================
-// ==== MONITOR DE DEPÓSITOS A WALLETS PERSONALES (CORREGIDO) ====
+// ==== MONITOR DE DEPÓSITOS ====
 // ================================================================
 const ifaceTransfer = new ethers.Interface([
   'event Transfer(address indexed from, address indexed to, uint256 value)'
@@ -266,7 +254,6 @@ async function checkDeposits() {
 
     for (const u of users) {
       try {
-        // Si last_deposit_block es 0 o null, empezar desde MONITOR_START_BLOCK
         let fromBlock;
         if (!u.last_deposit_block || u.last_deposit_block === 0) {
           fromBlock = MONITOR_START_BLOCK;
@@ -274,16 +261,12 @@ async function checkDeposits() {
           fromBlock = u.last_deposit_block + 1;
         }
 
-        if (fromBlock > toBlock) {
-          continue; // Ya está al día
-        }
+        if (fromBlock > toBlock) continue;
 
-        // Limitar a BLOCKS_PER_CYCLE por vuelta
         const maxToBlock = Math.min(fromBlock + BLOCKS_PER_CYCLE, toBlock);
 
         console.log(`🔍 Wallet ${u.deposit_address} → bloques ${fromBlock}-${maxToBlock}`);
 
-        // Dividir en lotes de BATCH_SIZE bloques
         const allLogs = [];
         let batchStart = fromBlock;
 
@@ -311,14 +294,11 @@ async function checkDeposits() {
           await new Promise(r => setTimeout(r, BATCH_DELAY_MS));
         }
 
-        // Actualizar last_deposit_block al final del rango revisado
         await supabase.from('users_balance')
           .update({ last_deposit_block: maxToBlock })
           .eq('user_id', u.user_id);
 
-        if (allLogs.length === 0) {
-          continue;
-        }
+        if (allLogs.length === 0) continue;
 
         console.log(`📥 ${allLogs.length} transferencia(s) detectada(s) para user ${u.user_id}`);
 
@@ -360,10 +340,10 @@ async function checkDeposits() {
           u.wallet_balance = newWalletBalance;
 
           await addHistory(
-  u.user_id,
-  'deposit',
-  amount,
-  '💵 Depósito a wallet personal',
+            u.user_id,
+            'deposit',
+            amount,
+            '💵 Depósito a wallet personal',
             null,
             txHash
           );
@@ -448,7 +428,7 @@ function requireAuth(req, res, next) {
   next();
 }
 
-// ==== HUERTO DE HORUS ====
+// ==== HUERTO ====
 const PLANT_LEVELS = {
   basic: { name: 'Básica', emoji: '🌱', price: 10, waterCost: 1, fruitValue: 1.5, sellPrice: 9 },
   medium: { name: 'Media', emoji: '🌿', price: 50, waterCost: 5, fruitValue: 7.5, sellPrice: 45 },
@@ -599,14 +579,14 @@ async function refundPlant(userId, plantId) {
 
     await supabase.from('plants').update({ status: 'dry', last_watered: null, moon_multiplier: 1 }).eq('id', plantId).eq('user_id', userId);
 
-    return { success: true, amount: refundAmount, message: '¡Recibiste ' + refundAmount.toFixed(2) + ' JHOAL de reembolso! Plantá de nuevo cuando quieras.' };
+    return { success: true, amount: refundAmount, message: '¡Recibiste ' + refundAmount.toFixed(2) + ' JHOAL de reembolso!' };
   } catch (e) {
     console.error('Error refund:', e);
     return { success: false, error: e.message };
   }
 }
 
-// ==== ENDPOINT: MOON STATUS (público) ====
+// ==== ENDPOINTS ====
 app.get('/moon-status', (req, res) => {
   const now = Math.floor(Date.now() / 1000);
   res.json({
@@ -621,17 +601,14 @@ app.get('/moon-status', (req, res) => {
   });
 });
 
-// ==== ENDPOINT: REGISTRAR CHAT_ID ====
 app.post('/register-user', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { chatId } = req.body;
   
-  if (!chatId) {
-    return res.json({ success: true, message: 'Sin chatId' });
-  }
+  if (!chatId) return res.json({ success: true, message: 'Sin chatId' });
   
   try {
-    const user = await ensureUser(userId);
+    await ensureUser(userId);
     await supabase.from('users_balance')
       .update({ chat_id: chatId })
       .eq('user_id', userId);
@@ -643,7 +620,6 @@ app.post('/register-user', requireAuth, async (req, res) => {
   }
 });
 
-// ==== ENDPOINT: MI WALLET DE DEPÓSITO ====
 app.post('/my-deposit-wallet', requireAuth, async (req, res) => {
   const userId = req.userId;
   try {
@@ -683,7 +659,6 @@ app.post('/my-deposit-wallet', requireAuth, async (req, res) => {
   }
 });
 
-// ==== ENDPOINT: MOVER DE WALLET AL JUEGO ====
 app.post('/move-to-game', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { amount } = req.body;
@@ -736,15 +711,14 @@ app.post('/move-to-game', requireAuth, async (req, res) => {
     const newGameBalance = parseFloat(user.balance) + amount;
     
     await supabase.from('users_balance')
-  .update({ wallet_balance: newWalletBalance, balance: newGameBalance })
-  .eq('user_id', userId);
-
-await addHistory(userId, 'deposit_game', amount, '🎮 Movido al saldo del juego', null, tx.hash);
-
-res.json({ 
-  success: true, 
-  txHash: tx.hash,
-  ...
+      .update({ wallet_balance: newWalletBalance, balance: newGameBalance })
+      .eq('user_id', userId);
+    
+    await addHistory(userId, 'deposit_game', amount, '🎮 Movido al saldo del juego', null, tx.hash);
+    
+    res.json({ 
+      success: true, 
+      txHash: tx.hash,
       newWalletBalance: newWalletBalance,
       newGameBalance: newGameBalance,
       explorer: 'https://bscscan.com/tx/' + tx.hash
@@ -755,7 +729,6 @@ res.json({
   }
 });
 
-// ==== ENDPOINT: RECLAMAR ====
 app.post('/claim', requireAuth, async (req, res) => {
   const userId = req.userId;
   try {
@@ -780,7 +753,6 @@ app.post('/claim', requireAuth, async (req, res) => {
   }
 });
 
-// ==== ENDPOINT: BALANCE ====
 app.get('/balance-game/:userId', requireAuth, async (req, res) => {
   try {
     const user = await getUser(req.userId);
@@ -799,7 +771,6 @@ app.get('/balance-game/:userId', requireAuth, async (req, res) => {
   }
 });
 
-// ==== ENDPOINT: APOSTAR ====
 app.post('/bet', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { amount } = req.body;
@@ -842,7 +813,6 @@ app.post('/bet', requireAuth, async (req, res) => {
   }
 });
 
-// ==== ENDPOINT: HISTORIAL DE APUESTAS ====
 app.get('/bet-history/:userId', requireAuth, async (req, res) => {
   try {
     const { data } = await supabase.from('bets').select('*').eq('user_id', req.userId).order('created_at', { ascending: false }).limit(10);
@@ -852,7 +822,6 @@ app.get('/bet-history/:userId', requireAuth, async (req, res) => {
   }
 });
 
-// ==== ENDPOINT: RETIRAR ====
 app.post('/withdraw', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { wallet: userWallet, amount } = req.body;
@@ -883,12 +852,10 @@ app.post('/withdraw', requireAuth, async (req, res) => {
   }
 });
 
-// ==== ENDPOINT: INFO DE DEPÓSITO ====
 app.get('/deposit-info', (req, res) => {
   res.json({ success: true, depositWallet: wallet.address, tokenAddress: TOKEN_ADDRESS, minDeposit: 1 });
 });
 
-// ==== HUERTO: COMPRAR ====
 app.post('/buy-plant', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { level } = req.body;
@@ -917,7 +884,6 @@ app.post('/buy-plant', requireAuth, async (req, res) => {
   }
 });
 
-// ==== HUERTO: REGAR ====
 app.post('/water-plant', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { plantId } = req.body;
@@ -947,7 +913,7 @@ app.post('/water-plant', requireAuth, async (req, res) => {
       moon_multiplier: moonMult
     }).eq('id', plantId).eq('user_id', userId);
 
-    const moonMsg = moonMult > 1 ? ' 🌕 ¡Luna Llena activa! Crecerá en ~' + effectiveGrowTime + ' min.' : '';
+    const moonMsg = moonMult > 1 ? ' 🌕 ¡Luna Llena activa!' : '';
     await addHistory(userId, 'plant_water', -level.waterCost, 'Regaste ' + level.name + (moonMult > 1 ? ' (Luna Llena 🌕)' : ''), null, null);
 
     res.json({
@@ -962,7 +928,6 @@ app.post('/water-plant', requireAuth, async (req, res) => {
   }
 });
 
-// ==== HUERTO: COSECHAR ====
 app.post('/harvest', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { plantId } = req.body;
@@ -995,7 +960,6 @@ app.post('/harvest', requireAuth, async (req, res) => {
   }
 });
 
-// ==== HUERTO: VENDER ====
 app.post('/sell-plant', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { plantId } = req.body;
@@ -1022,7 +986,6 @@ app.post('/sell-plant', requireAuth, async (req, res) => {
   }
 });
 
-// ==== HUERTO: RECLAMAR DEVOLUCIÓN ====
 app.post('/refund-plant', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { plantId } = req.body;
@@ -1036,7 +999,6 @@ app.post('/refund-plant', requireAuth, async (req, res) => {
   }
 });
 
-// ==== HUERTO: MIS PLANTAS ====
 app.get('/my-plants/:userId', requireAuth, async (req, res) => {
   try {
     const userId = req.userId;
@@ -1075,7 +1037,6 @@ app.get('/my-plants/:userId', requireAuth, async (req, res) => {
   }
 });
 
-// ==== HISTORIAL ====
 app.get('/history/:userId', requireAuth, async (req, res) => {
   try {
     const userId = req.userId;
@@ -1094,7 +1055,7 @@ app.get('/history/:userId', requireAuth, async (req, res) => {
       const amount = parseFloat(h.amount) || 0;
       if (h.type === 'faucet') summary.faucet += amount;
       else if (h.type === 'dice_win' || h.type === 'dice_lose') summary.dice += amount;
-      else if (h.type === 'deposit') summary.deposit += amount;
+      else if (h.type === 'deposit' || h.type === 'deposit_game') summary.deposit += amount;
       else if (h.type === 'withdraw') summary.withdraw += amount;
       else if (h.type && h.type.startsWith('plant_')) summary.garden += amount;
       summary.total += amount;
@@ -1107,7 +1068,6 @@ app.get('/history/:userId', requireAuth, async (req, res) => {
   }
 });
 
-// ==== PRECIO ====
 app.get('/price', async (req, res) => {
   try {
     const reserves = await pair.getReserves();
@@ -1128,7 +1088,6 @@ app.get('/price', async (req, res) => {
   }
 });
 
-// ==== BALANCE FAUCET ====
 app.get('/balance', async (req, res) => {
   try {
     const balance = await token.balanceOf(wallet.address);
@@ -1139,7 +1098,6 @@ app.get('/balance', async (req, res) => {
   }
 });
 
-// ==== ROOT ====
 app.get('/', (req, res) => {
   res.json({ status: 'Faucet JHOAL + Dados + Huerto + Historial + Luna Llena funcionando' });
 });
@@ -1236,26 +1194,6 @@ if (SUPPORT_BOT_TOKEN && SUPPORT_CHAT_ID) {
     );
   });
 
-  supportBot.onText(/\/reply\s+(\d+)\s+([\s\S]+)/, async (msg, match) => {
-    const fromId = msg.from.id;
-    const targetId = match[1];
-    const replyText = match[2].trim();
-
-    if (String(fromId) !== String(SUPPORT_CHAT_ID)) {
-      return supportBot.sendMessage(msg.chat.id, '❌ No tenés permiso para usar este comando.');
-    }
-
-    try {
-      await supportBot.sendMessage(targetId,
-        '📩 *RESPUESTA DE SOPORTE:*\n\n' + replyText + '\n\n💬 Para responder, escribí de nuevo.',
-        { parse_mode: 'Markdown' }
-      );
-      supportBot.sendMessage(msg.chat.id, '✅ Respuesta enviada al usuario ' + targetId);
-    } catch (err) {
-      supportBot.sendMessage(msg.chat.id, '❌ Error al enviar: ' + err.message);
-    }
-  });
-
   supportBot.on('message', (msg) => {
     const chatId = msg.chat.id;
     const text = msg.text;
@@ -1275,62 +1213,21 @@ if (SUPPORT_BOT_TOKEN && SUPPORT_CHAT_ID) {
     try {
       if (msg.text) {
         supportBot.sendMessage(SUPPORT_CHAT_ID, header + '💬 Mensaje:\n' + msg.text, { parse_mode: 'Markdown' });
-        supportBot.sendMessage(chatId, '✅ *Mensaje recibido*\n\nTu consulta fue enviada al equipo de soporte.', { parse_mode: 'Markdown' });
-      }
-      else if (msg.photo) {
-        const photo = msg.photo[msg.photo.length - 1];
-        supportBot.sendPhoto(SUPPORT_CHAT_ID, photo.file_id, {
-          caption: header + '📷 Foto' + (msg.caption ? ':\n' + msg.caption : ''),
-          parse_mode: 'Markdown'
-        });
-        supportBot.sendMessage(chatId, '✅ *Foto recibida*\n\nFue enviada al equipo de soporte.', { parse_mode: 'Markdown' });
-      }
-      else if (msg.video) {
-        supportBot.sendVideo(SUPPORT_CHAT_ID, msg.video.file_id, {
-          caption: header + '🎥 Video' + (msg.caption ? ':\n' + msg.caption : ''),
-          parse_mode: 'Markdown'
-        });
-        supportBot.sendMessage(chatId, '✅ *Video recibido*\n\nFue enviado al equipo de soporte.', { parse_mode: 'Markdown' });
-      }
-      else if (msg.audio || msg.voice) {
-        const audioId = (msg.audio && msg.audio.file_id) || (msg.voice && msg.voice.file_id);
-        supportBot.sendAudio(SUPPORT_CHAT_ID, audioId, {
-          caption: header + '🎵 Audio',
-          parse_mode: 'Markdown'
-        });
-        supportBot.sendMessage(chatId, '✅ *Audio recibido*\n\nFue enviado al equipo de soporte.', { parse_mode: 'Markdown' });
-      }
-      else if (msg.document) {
-        supportBot.sendDocument(SUPPORT_CHAT_ID, msg.document.file_id, {
-          caption: header + '📎 Documento' + (msg.caption ? ':\n' + msg.caption : ''),
-          parse_mode: 'Markdown'
-        });
-        supportBot.sendMessage(chatId, '✅ *Documento recibido*\n\nFue enviado al equipo de soporte.', { parse_mode: 'Markdown' });
-      }
-      else if (msg.sticker) {
-        supportBot.sendMessage(SUPPORT_CHAT_ID, header + '🎨 Sticker', { parse_mode: 'Markdown' });
-        supportBot.sendSticker(SUPPORT_CHAT_ID, msg.sticker.file_id);
-        supportBot.sendMessage(chatId, '✅ *Sticker recibido*', { parse_mode: 'Markdown' });
-      }
-      else {
-        supportBot.sendMessage(SUPPORT_CHAT_ID, header + '📎 Mensaje tipo desconocido', { parse_mode: 'Markdown' });
-        supportBot.sendMessage(chatId, '✅ *Mensaje recibido*');
+        supportBot.sendMessage(chatId, '✅ *Mensaje recibido*', { parse_mode: 'Markdown' });
       }
     } catch (err) {
       console.error('Error enviando a soporte:', err);
-      supportBot.sendMessage(chatId, '❌ Error al enviar tu mensaje. Intenta de nuevo.');
     }
   });
 }
 
 // ==== INICIAR SERVIDOR ====
 app.listen(process.env.PORT || 3000, () => {
-  console.log('Faucet JHOAL + Dados + Huerto + Historial + Luna Llena corriendo en puerto', process.env.PORT || 3000);
+  console.log('Faucet JHOAL corriendo en puerto', process.env.PORT || 3000);
   console.log('Wallet:', wallet.address);
   console.log('Bot principal:', BOT_TOKEN ? 'SÍ' : 'NO');
   console.log('Bot de soporte:', SUPPORT_BOT_TOKEN ? 'SÍ' : 'NO');
   console.log('Supabase:', SUPABASE_URL ? 'SÍ' : 'NO');
-  console.log('Validación initData:', BOT_TOKEN ? 'ACTIVADA' : 'DESACTIVADA (falta BOT_TOKEN)');
-  console.log('🌕 Luna Llena: 1-' + MOON_MAX_PER_DAY + ' eventos/día, ' + MOON_DURATION_MIN + ' min c/u, x' + MOON_GROWTH_MULTIPLIER + ' crecimiento');
-  console.log('💾 Monitor de depósitos: ACTIVADO (cada 60s, lotes de ' + BATCH_SIZE + ' bloques)');
+  console.log('🌕 Luna Llena: x' + MOON_GROWTH_MULTIPLIER);
+  console.log('💾 Monitor de depósitos: ACTIVADO');
 });
