@@ -11,7 +11,6 @@ app.use(cors());
 app.use(express.json());
 
 // ==== CONFIG ====
-const RPC = 'https://rpc.ankr.com/bsc';
 const PRIVATE_KEY = process.env.PRIVATE_KEY;
 const TOKEN_ADDRESS = process.env.TOKEN_ADDRESS;
 const PAIR_ADDRESS = '0x70163906f11E7a05eb37Dce319602e7ffc4865e5';
@@ -27,34 +26,66 @@ const COOLDOWN = 30 * 60;
 const MIN_BET = 0.1;
 const MAX_BET = 1000;
 
+// ==== RPCs CON FALLBACK AUTOMÁTICO ====
+const RPC_LIST = [
+  'https://bsc-dataseed1.bnbchain.org',
+  'https://bsc-dataseed2.bnbchain.org',
+  'https://bsc-dataseed3.bnbchain.org',
+  'https://bsc-dataseed4.bnbchain.org',
+  'https://bsc-dataseed1.defibit.io/',
+  'https://bsc-dataseed1.ninicoin.io/',
+  'https://binance.llamarpc.com',
+  'https://bsc.drpc.org'
+];
+
+let currentProvider = null;
+let currentRpcIndex = 0;
+
+// Prueba cada RPC hasta encontrar uno que funcione
+async function findWorkingProvider() {
+  for (let i = 0; i < RPC_LIST.length; i++) {
+    const idx = (currentRpcIndex + i) % RPC_LIST.length;
+    const rpc = RPC_LIST[idx];
+    try {
+      const testProvider = new ethers.JsonRpcProvider(rpc);
+      const blockNumber = await testProvider.getBlockNumber();
+      console.log(`✅ RPC OK: ${rpc} (bloque ${blockNumber})`);
+      currentRpcIndex = idx;
+      return testProvider;
+    } catch (e) {
+      console.log(`❌ RPC falló: ${rpc} - ${e.message}`);
+    }
+  }
+  throw new Error('❌ Ningún RPC funciona');
+}
+
+// Obtener provider (con fallback)
+async function getProvider() {
+  if (currentProvider) {
+    try {
+      // Probar que el provider siga vivo
+      await currentProvider.getBlockNumber();
+      return currentProvider;
+    } catch (e) {
+      console.log('⚠️ Provider actual falló, buscando otro...');
+      currentProvider = null;
+    }
+  }
+  currentProvider = await findWorkingProvider();
+  return currentProvider;
+}
+
 // ==== MONITOR DE DEPÓSITOS ====
 const MONITOR_START_BLOCK = 122925000;
 const BATCH_SIZE = 50;
 const BLOCKS_PER_CYCLE = 500;
-const BATCH_DELAY_MS = 200;
+const BATCH_DELAY_MS = 300;
 
 // ==== LUNA LLENA ====
 const MOON_GROWTH_MULTIPLIER = 1.9;
 const MOON_DURATION_MIN = 10;
 const MOON_MIN_PER_DAY = 1;
 const MOON_MAX_PER_DAY = 5;
-
-const provider = new ethers.JsonRpcProvider(RPC);
-const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
-
-const ABI = [
-  'function transfer(address to, uint256 amount) returns (bool)',
-  'function balanceOf(address account) view returns (uint256)',
-  'function decimals() view returns (uint8)',
-  'function symbol() view returns (string)'
-];
-const token = new ethers.Contract(TOKEN_ADDRESS, ABI, wallet);
-
-const PAIR_ABI = [
-  'function getReserves() view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast)',
-  'function token0() view returns (address)'
-];
-const pair = new ethers.Contract(PAIR_ADDRESS, PAIR_ABI, provider);
 
 // ==== SUPABASE ====
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
@@ -63,7 +94,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY;
 
 if (!ENCRYPTION_KEY) {
-  console.warn('⚠️ ENCRYPTION_KEY no está configurada. Las private keys no se podrán encriptar.');
+  console.warn('⚠️ ENCRYPTION_KEY no está configurada.');
 }
 
 function encryptPrivateKey(pk) {
@@ -143,26 +174,18 @@ function activateMoon() {
   moonState.endsAt = now + MOON_DURATION_MIN * 60;
   moonState.eventsToday += 1;
   console.log('🌕 LUNA LLENA ACTIVADA hasta', new Date(moonState.endsAt * 1000).toISOString());
-  
   notificarLunaLlena();
 }
 
 async function notificarLunaLlena() {
-  if (!bot) {
-    console.log('No hay bot configurado, no se puede notificar');
-    return;
-  }
-
+  if (!bot) return;
   try {
     const { data: usuarios } = await supabase
       .from('users_balance')
       .select('chat_id')
       .not('chat_id', 'is', null);
 
-    if (!usuarios || usuarios.length === 0) {
-      console.log('Sin usuarios con chat_id registrado');
-      return;
-    }
+    if (!usuarios || usuarios.length === 0) return;
 
     console.log('🌕 Notificando a', usuarios.length, 'usuarios');
 
@@ -182,9 +205,7 @@ async function notificarLunaLlena() {
             }
           }
         );
-      } catch (e) {
-        // Si el usuario bloqueó el bot, ignorar
-      }
+      } catch (e) {}
     }
   } catch (e) {
     console.error('Error notificando Luna Llena:', e);
@@ -239,6 +260,7 @@ async function checkDeposits() {
   monitorRunning = true;
 
   try {
+    const provider = await getProvider();
     const currentBlock = await provider.getBlockNumber();
 
     const { data: users, error } = await supabase
@@ -296,6 +318,9 @@ async function checkDeposits() {
             allLogs.push(...batchLogs);
           } catch (batchErr) {
             console.error(`Error en lote ${batchStart}-${batchEnd}:`, batchErr.message);
+            // Rotar provider
+            currentProvider = null;
+            break;
           }
 
           batchStart = batchEnd + 1;
@@ -363,10 +388,12 @@ async function checkDeposits() {
 
       } catch (e) {
         console.error(`Error revisando wallet ${u.deposit_address}:`, e.message);
+        currentProvider = null;
       }
     }
   } catch (e) {
     console.error('Error checkDeposits:', e);
+    currentProvider = null;
   }
 
   monitorRunning = false;
@@ -614,12 +641,10 @@ app.post('/register-user', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { chatId } = req.body;
   
-  if (!chatId) {
-    return res.json({ success: true, message: 'Sin chatId' });
-  }
+  if (!chatId) return res.json({ success: true, message: 'Sin chatId' });
   
   try {
-    const user = await ensureUser(userId);
+    await ensureUser(userId);
     await supabase.from('users_balance')
       .update({ chat_id: chatId })
       .eq('user_id', userId);
@@ -691,7 +716,11 @@ app.post('/move-to-game', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'Saldo insuficiente en wallet' });
     }
     
-    const realBalanceWei = await token.balanceOf(user.deposit_address);
+    const provider = await getProvider();
+    const tokenContract = new ethers.Contract(TOKEN_ADDRESS, ABI, provider);
+    const walletContract = new ethers.Contract(TOKEN_ADDRESS, ABI, new ethers.Wallet(PRIVATE_KEY, provider));
+    
+    const realBalanceWei = await tokenContract.balanceOf(user.deposit_address);
     const realBalance = parseFloat(ethers.formatUnits(realBalanceWei, 18));
     
     if (realBalance < amount) {
@@ -703,7 +732,7 @@ app.post('/move-to-game', requireAuth, async (req, res) => {
     
     if (bnbBalance < bnbNeeded) {
       console.log('⛽ Enviando BNB para gas a', user.deposit_address);
-      const bnbTx = await wallet.sendTransaction({
+      const bnbTx = await walletContract.runner.sendTransaction({
         to: user.deposit_address,
         value: bnbNeeded
       });
@@ -715,7 +744,7 @@ app.post('/move-to-game', requireAuth, async (req, res) => {
     const userToken = new ethers.Contract(TOKEN_ADDRESS, ABI, userSigner);
     
     const amountWei = ethers.parseUnits(amount.toString(), 18);
-    const tx = await userToken.transfer(wallet.address, amountWei);
+    const tx = await userToken.transfer(walletContract.runner.address, amountWei);
     console.log('📤 Mover al juego TX:', tx.hash);
     
     await tx.wait();
@@ -851,8 +880,12 @@ app.post('/withdraw', requireAuth, async (req, res) => {
     const user = await ensureUser(userId);
     if (parseFloat(user.balance) < amount) return res.status(400).json({ error: 'Saldo insuficiente' });
 
+    const provider = await getProvider();
+    const signer = new ethers.Wallet(PRIVATE_KEY, provider);
+    const tokenContract = new ethers.Contract(TOKEN_ADDRESS, ABI, signer);
+
     const amountWei = ethers.parseUnits(amount.toString(), 18);
-    const tx = await token.transfer(userWallet, amountWei);
+    const tx = await tokenContract.transfer(userWallet, amountWei);
     console.log('Withdraw TX:', tx.hash);
 
     const newBalance = parseFloat(user.balance) - amount;
@@ -871,8 +904,14 @@ app.post('/withdraw', requireAuth, async (req, res) => {
 });
 
 // ==== ENDPOINT: INFO DE DEPÓSITO ====
-app.get('/deposit-info', (req, res) => {
-  res.json({ success: true, depositWallet: wallet.address, tokenAddress: TOKEN_ADDRESS, minDeposit: 1 });
+app.get('/deposit-info', async (req, res) => {
+  try {
+    const provider = await getProvider();
+    const signer = new ethers.Wallet(PRIVATE_KEY, provider);
+    res.json({ success: true, depositWallet: signer.address, tokenAddress: TOKEN_ADDRESS, minDeposit: 1 });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // ==== HUERTO: COMPRAR ====
@@ -1097,8 +1136,10 @@ app.get('/history/:userId', requireAuth, async (req, res) => {
 // ==== PRECIO ====
 app.get('/price', async (req, res) => {
   try {
-    const reserves = await pair.getReserves();
-    const token0 = await pair.token0();
+    const provider = await getProvider();
+    const pairContract = new ethers.Contract(PAIR_ADDRESS, PAIR_ABI, provider);
+    const reserves = await pairContract.getReserves();
+    const token0 = await pairContract.token0();
     let jhoalReserve, usdtReserve;
     if (token0.toLowerCase() === TOKEN_ADDRESS.toLowerCase()) {
       jhoalReserve = reserves.reserve0;
@@ -1118,9 +1159,12 @@ app.get('/price', async (req, res) => {
 // ==== BALANCE FAUCET ====
 app.get('/balance', async (req, res) => {
   try {
-    const balance = await token.balanceOf(wallet.address);
-    const bnb = await provider.getBalance(wallet.address);
-    res.json({ wallet: wallet.address, jhoal: ethers.formatUnits(balance, 18) + ' JHOAL', bnb: ethers.formatEther(bnb) + ' BNB' });
+    const provider = await getProvider();
+    const signer = new ethers.Wallet(PRIVATE_KEY, provider);
+    const tokenContract = new ethers.Contract(TOKEN_ADDRESS, ABI, provider);
+    const balance = await tokenContract.balanceOf(signer.address);
+    const bnb = await provider.getBalance(signer.address);
+    res.json({ wallet: signer.address, jhoal: ethers.formatUnits(balance, 18) + ' JHOAL', bnb: ethers.formatEther(bnb) + ' BNB' });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -1140,8 +1184,6 @@ if (BOT_TOKEN) {
   bot.on('polling_error', (error) => {
     if (error.code === 'ETELEGRAM' && error.message.includes('409')) {
       console.log('⚠️ Conflicto de polling - verificar instancias duplicadas');
-    } else {
-      console.log('⚠️ Polling error:', error.code);
     }
   });
 
@@ -1154,8 +1196,7 @@ if (BOT_TOKEN) {
       '🎲 Juega en *Los Dados de Horus*\n' +
       '🌱 Planta en el *Huerto de Horus*\n' +
       '🌕 Atento a la *Luna Llena*\n' +
-      '📜 Mirá tu *Historial*\n' +
-      '📊 Precio actual: *$0.00005 USD*\n\n' +
+      '📜 Mirá tu *Historial*\n\n' +
       '👉 Toca "Abrir Faucet" para empezar.',
       { parse_mode: 'Markdown' }
     );
@@ -1167,38 +1208,6 @@ if (BOT_TOKEN) {
       reply_markup: { inline_keyboard: [[{ text: '⚱ Abrir Faucet', web_app: { url: MINI_APP_URL } }]] }
     });
   });
-
-  bot.onText(/\/price/, async (msg) => {
-    try {
-      const reserves = await pair.getReserves();
-      const token0 = await pair.token0();
-      let jhoalReserve, usdtReserve;
-      if (token0.toLowerCase() === TOKEN_ADDRESS.toLowerCase()) {
-        jhoalReserve = reserves.reserve0;
-        usdtReserve = reserves.reserve1;
-      } else {
-        jhoalReserve = reserves.reserve1;
-        usdtReserve = reserves.reserve0;
-      }
-      const jhoalAmount = parseFloat(ethers.formatUnits(jhoalReserve, 18));
-      const usdtAmount = parseFloat(ethers.formatUnits(usdtReserve, 18));
-      bot.sendMessage(msg.chat.id,
-        '💰 *PRECIO JHOAL*\n\n' +
-        '💵 1 JHOAL = *$' + (usdtAmount / jhoalAmount).toFixed(8) + '*\n' +
-        '💎 1 USDT = *' + Math.round(jhoalAmount / usdtAmount).toLocaleString() + ' JHOAL*',
-        { parse_mode: 'Markdown' }
-      );
-    } catch (e) {
-      bot.sendMessage(msg.chat.id, '❌ Error al consultar precio.');
-    }
-  });
-
-  bot.onText(/\/help/, (msg) => {
-    bot.sendMessage(msg.chat.id,
-      '🆘 *AYUDA*\n\n/start - Iniciar\n/faucet - Abrir faucet\n/price - Precio\n/help - Esta ayuda\n\n📩 Soporte: @' + SUPPORT_USERNAME,
-      { parse_mode: 'Markdown' }
-    );
-  });
 }
 
 // ==== BOT DE SOPORTE ====
@@ -1206,118 +1215,27 @@ if (SUPPORT_BOT_TOKEN && SUPPORT_CHAT_ID) {
   const supportBot = new TelegramBot(SUPPORT_BOT_TOKEN, { polling: true });
   console.log('Bot de soporte iniciado');
 
-  supportBot.onText(/\/start/, (msg) => {
-    const chatId = msg.chat.id;
-    const name = msg.from.first_name || 'usuario';
-    supportBot.sendMessage(chatId,
-      '🆘 *SOPORTE JHOAL*\n\n' +
-      '¡Hola, ' + name + '!\n\n' +
-      'Podés enviarme:\n' +
-      '📝 Texto\n' +
-      '📷 Fotos\n' +
-      '🎥 Videos\n' +
-      '🎵 Audios\n' +
-      '📎 Documentos\n\n' +
-      'Te vamos a responder a la brevedad.',
-      { parse_mode: 'Markdown' }
-    );
-  });
-
-  supportBot.onText(/\/reply\s+(\d+)\s+([\s\S]+)/, async (msg, match) => {
-    const fromId = msg.from.id;
-    const targetId = match[1];
-    const replyText = match[2].trim();
-
-    if (String(fromId) !== String(SUPPORT_CHAT_ID)) {
-      return supportBot.sendMessage(msg.chat.id, '❌ No tenés permiso para usar este comando.');
-    }
-
-    try {
-      await supportBot.sendMessage(targetId,
-        '📩 *RESPUESTA DE SOPORTE:*\n\n' + replyText + '\n\n💬 Para responder, escribí de nuevo.',
-        { parse_mode: 'Markdown' }
-      );
-      supportBot.sendMessage(msg.chat.id, '✅ Respuesta enviada al usuario ' + targetId);
-    } catch (err) {
-      supportBot.sendMessage(msg.chat.id, '❌ Error al enviar: ' + err.message);
-    }
-  });
-
   supportBot.on('message', (msg) => {
     const chatId = msg.chat.id;
     const text = msg.text;
-
     if (text && text.startsWith('/')) return;
 
     const userName = msg.from.first_name || 'Usuario';
-    const userUsername = msg.from.username ? '@' + msg.from.username : 'sin username';
-    const userId = msg.from.id;
-
-    const header =
-      '📩 *NUEVO MENSAJE DE SOPORTE*\n\n' +
-      '👤 De: ' + userName + '\n' +
-      '🔗 Username: ' + userUsername + '\n' +
-      '🆔 ID: `' + userId + '`\n\n';
-
+    const header = '📩 *SOPORTE*\n\n👤 ' + userName + '\n🆔 `' + msg.from.id + '`\n\n';
+    
     try {
       if (msg.text) {
-        supportBot.sendMessage(SUPPORT_CHAT_ID, header + '💬 Mensaje:\n' + msg.text, { parse_mode: 'Markdown' });
-        supportBot.sendMessage(chatId, '✅ *Mensaje recibido*\n\nTu consulta fue enviada al equipo de soporte.', { parse_mode: 'Markdown' });
+        supportBot.sendMessage(SUPPORT_CHAT_ID, header + '💬 ' + msg.text, { parse_mode: 'Markdown' });
+        supportBot.sendMessage(chatId, '✅ Mensaje enviado');
       }
-      else if (msg.photo) {
-        const photo = msg.photo[msg.photo.length - 1];
-        supportBot.sendPhoto(SUPPORT_CHAT_ID, photo.file_id, {
-          caption: header + '📷 Foto' + (msg.caption ? ':\n' + msg.caption : ''),
-          parse_mode: 'Markdown'
-        });
-        supportBot.sendMessage(chatId, '✅ *Foto recibida*\n\nFue enviada al equipo de soporte.', { parse_mode: 'Markdown' });
-      }
-      else if (msg.video) {
-        supportBot.sendVideo(SUPPORT_CHAT_ID, msg.video.file_id, {
-          caption: header + '🎥 Video' + (msg.caption ? ':\n' + msg.caption : ''),
-          parse_mode: 'Markdown'
-        });
-        supportBot.sendMessage(chatId, '✅ *Video recibido*\n\nFue enviado al equipo de soporte.', { parse_mode: 'Markdown' });
-      }
-      else if (msg.audio || msg.voice) {
-        const audioId = (msg.audio && msg.audio.file_id) || (msg.voice && msg.voice.file_id);
-        supportBot.sendAudio(SUPPORT_CHAT_ID, audioId, {
-          caption: header + '🎵 Audio',
-          parse_mode: 'Markdown'
-        });
-        supportBot.sendMessage(chatId, '✅ *Audio recibido*\n\nFue enviado al equipo de soporte.', { parse_mode: 'Markdown' });
-      }
-      else if (msg.document) {
-        supportBot.sendDocument(SUPPORT_CHAT_ID, msg.document.file_id, {
-          caption: header + '📎 Documento' + (msg.caption ? ':\n' + msg.caption : ''),
-          parse_mode: 'Markdown'
-        });
-        supportBot.sendMessage(chatId, '✅ *Documento recibido*\n\nFue enviado al equipo de soporte.', { parse_mode: 'Markdown' });
-      }
-      else if (msg.sticker) {
-        supportBot.sendMessage(SUPPORT_CHAT_ID, header + '🎨 Sticker', { parse_mode: 'Markdown' });
-        supportBot.sendSticker(SUPPORT_CHAT_ID, msg.sticker.file_id);
-        supportBot.sendMessage(chatId, '✅ *Sticker recibido*', { parse_mode: 'Markdown' });
-      }
-      else {
-        supportBot.sendMessage(SUPPORT_CHAT_ID, header + '📎 Mensaje tipo desconocido', { parse_mode: 'Markdown' });
-        supportBot.sendMessage(chatId, '✅ *Mensaje recibido*');
-      }
-    } catch (err) {
-      console.error('Error enviando a soporte:', err);
-      supportBot.sendMessage(chatId, '❌ Error al enviar tu mensaje. Intenta de nuevo.');
-    }
+    } catch (err) {}
   });
 }
 
 // ==== INICIAR SERVIDOR ====
 app.listen(process.env.PORT || 3000, () => {
-  console.log('Faucet JHOAL + Dados + Huerto + Historial + Luna Llena corriendo en puerto', process.env.PORT || 3000);
-  console.log('Wallet:', wallet.address);
-  console.log('Bot principal:', BOT_TOKEN ? 'SÍ' : 'NO');
-  console.log('Bot de soporte:', SUPPORT_BOT_TOKEN ? 'SÍ' : 'NO');
-  console.log('Supabase:', SUPABASE_URL ? 'SÍ' : 'NO');
-  console.log('Validación initData:', BOT_TOKEN ? 'ACTIVADA' : 'DESACTIVADA (falta BOT_TOKEN)');
-  console.log('🌕 Luna Llena: 1-' + MOON_MAX_PER_DAY + ' eventos/día, ' + MOON_DURATION_MIN + ' min c/u, x' + MOON_GROWTH_MULTIPLIER + ' crecimiento');
-  console.log('💾 Monitor de depósitos: ACTIVADO (cada 60s)');
+  console.log('Faucet JHOAL corriendo en puerto', process.env.PORT || 3000);
+  console.log('🌕 Luna Llena: x' + MOON_GROWTH_MULTIPLIER);
+  console.log('💾 Monitor de depósitos: ACTIVADO');
+  console.log('🔄 RPCs con fallback: ' + RPC_LIST.length + ' disponibles');
 });
