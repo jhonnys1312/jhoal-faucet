@@ -31,9 +31,9 @@ const MAX_BET = 1000;
 
 // ==== MONITOR DE DEPÓSITOS ====
 const MONITOR_START_BLOCK = 122925000;
-const BATCH_SIZE = 50;
-const BLOCKS_PER_CYCLE = 500;
-const BATCH_DELAY_MS = 200;
+const BATCH_SIZE = 100;
+const BLOCKS_PER_CYCLE = 2000;
+const BATCH_DELAY_MS = 100;
 
 // ==== LUNA LLENA ====
 const MOON_GROWTH_MULTIPLIER = 1.9;
@@ -642,7 +642,7 @@ app.post('/my-deposit-wallet', requireAuth, async (req, res) => {
         deposit_address: newWallet.address,
         deposit_private_key: encryptedKey,
         wallet_balance: 0,
-        last_deposit_block: 0
+        last_deposit_block: await getProvider().then(p => p.getBlockNumber()).then(b => b - 10)
       })
       .eq('user_id', userId);
     
