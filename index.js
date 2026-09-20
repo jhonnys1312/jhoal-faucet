@@ -714,7 +714,7 @@ app.post('/move-to-game', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'La wallet no tiene fondos suficientes' });
     }
     
-    const bnbNeeded = ethers.parseEther('0.000005');
+    const bnbNeeded = ethers.parseEther('0.000002');
     const bnbBalance = await provider.getBalance(user.deposit_address);
     
     if (bnbBalance < bnbNeeded) {
