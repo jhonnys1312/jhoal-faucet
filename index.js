@@ -26,22 +26,21 @@ const COOLDOWN = 30 * 60;
 const MIN_BET = 0.1;
 const MAX_BET = 1000;
 
-// ==== RPCs CON FALLBACK AUTOMÁTICO ====
+// ==== RPCs CON FALLBACK ====
 const RPC_LIST = [
-  'https://bsc-dataseed1.bnbchain.org',
+  'https://binance.llamarpc.com',
+  'https://bsc.drpc.org',
+  'https://bsc-dataseed1.defibit.io/',
+  'https://bsc-dataseed1.ninicoin.io/',
   'https://bsc-dataseed2.bnbchain.org',
   'https://bsc-dataseed3.bnbchain.org',
   'https://bsc-dataseed4.bnbchain.org',
-  'https://bsc-dataseed1.defibit.io/',
-  'https://bsc-dataseed1.ninicoin.io/',
-  'https://binance.llamarpc.com',
-  'https://bsc.drpc.org'
+  'https://bsc-dataseed1.bnbchain.org'
 ];
 
 let currentProvider = null;
 let currentRpcIndex = 0;
 
-// Prueba cada RPC hasta encontrar uno que funcione
 async function findWorkingProvider() {
   for (let i = 0; i < RPC_LIST.length; i++) {
     const idx = (currentRpcIndex + i) % RPC_LIST.length;
@@ -59,16 +58,15 @@ async function findWorkingProvider() {
   throw new Error('❌ Ningún RPC funciona');
 }
 
-// Obtener provider (con fallback)
 async function getProvider() {
   if (currentProvider) {
     try {
-      // Probar que el provider siga vivo
       await currentProvider.getBlockNumber();
       return currentProvider;
     } catch (e) {
       console.log('⚠️ Provider actual falló, buscando otro...');
       currentProvider = null;
+      currentRpcIndex = (currentRpcIndex + 1) % RPC_LIST.length;
     }
   }
   currentProvider = await findWorkingProvider();
@@ -90,7 +88,7 @@ const MOON_MAX_PER_DAY = 5;
 // ==== SUPABASE ====
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-// ==== ENCRIPTACIÓN DE PRIVATE KEYS ====
+// ==== ENCRIPTACIÓN ====
 const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY;
 
 if (!ENCRYPTION_KEY) {
@@ -243,7 +241,7 @@ scheduleNextMoon();
 setInterval(tickMoon, 30 * 1000);
 
 // ================================================================
-// ==== MONITOR DE DEPÓSITOS A WALLETS PERSONALES ====
+// ==== MONITOR DE DEPÓSITOS ====
 // ================================================================
 const ifaceTransfer = new ethers.Interface([
   'event Transfer(address indexed from, address indexed to, uint256 value)'
@@ -253,14 +251,11 @@ const TRANSFER_TOPIC = ethers.id('Transfer(address,address,uint256)');
 let monitorRunning = false;
 
 async function checkDeposits() {
-  if (monitorRunning) {
-    console.log('⏭️ Monitor ya corriendo, saltando...');
-    return;
-  }
+  if (monitorRunning) return;
   monitorRunning = true;
 
   try {
-    const provider = await getProvider();
+    let provider = await getProvider();
     const currentBlock = await provider.getBlockNumber();
 
     const { data: users, error } = await supabase
@@ -268,13 +263,7 @@ async function checkDeposits() {
       .select('user_id, deposit_address, wallet_balance, last_deposit_block')
       .not('deposit_address', 'is', null);
 
-    if (error) {
-      console.error('Error obteniendo usuarios:', error);
-      monitorRunning = false;
-      return;
-    }
-
-    if (!users || users.length === 0) {
+    if (error || !users || users.length === 0) {
       monitorRunning = false;
       return;
     }
@@ -317,10 +306,9 @@ async function checkDeposits() {
 
             allLogs.push(...batchLogs);
           } catch (batchErr) {
-            console.error(`Error en lote ${batchStart}-${batchEnd}:`, batchErr.message);
-            // Rotar provider
+            console.error(`⚠️ Error en lote ${batchStart}-${batchEnd}, rotando RPC...`);
             currentProvider = null;
-            break;
+            provider = await getProvider();
           }
 
           batchStart = batchEnd + 1;
@@ -336,11 +324,7 @@ async function checkDeposits() {
         console.log(`📥 ${allLogs.length} transferencia(s) detectada(s) para user ${u.user_id}`);
 
         for (const log of allLogs) {
-          const decoded = ifaceTransfer.parseLog({
-            topics: log.topics,
-            data: log.data
-          });
-
+          const decoded = ifaceTransfer.parseLog({ topics: log.topics, data: log.data });
           const amount = parseFloat(ethers.formatUnits(decoded.args.value, 18));
           const txHash = log.transactionHash;
           const fromAddress = decoded.args.from;
@@ -351,10 +335,7 @@ async function checkDeposits() {
             .eq('tx_hash', txHash)
             .maybeSingle();
 
-          if (existing) {
-            console.log(`⏭️ Depósito duplicado ignorado: ${txHash}`);
-            continue;
-          }
+          if (existing) continue;
 
           await supabase.from('deposits').insert({
             user_id: u.user_id,
@@ -372,16 +353,9 @@ async function checkDeposits() {
 
           u.wallet_balance = newWalletBalance;
 
-          await addHistory(
-            u.user_id,
-            'deposit',
-            amount,
-            'Depósito detectado automáticamente',
-            null,
-            txHash
-          );
+          await addHistory(u.user_id, 'deposit', amount, 'Depósito detectado automáticamente', null, txHash);
 
-          console.log(`✅ Depósito acreditado: user ${u.user_id} +${amount} JHOAL (tx: ${txHash})`);
+          console.log(`✅ Depósito acreditado: user ${u.user_id} +${amount} JHOAL`);
         }
 
         await new Promise(r => setTimeout(r, 500));
@@ -420,15 +394,8 @@ function validateInitData(initData) {
     dataCheckArr.sort();
     const dataCheckString = dataCheckArr.join('\n');
 
-    const secretKey = crypto
-      .createHmac('sha256', 'WebAppData')
-      .update(BOT_TOKEN)
-      .digest();
-
-    const calculatedHash = crypto
-      .createHmac('sha256', secretKey)
-      .update(dataCheckString)
-      .digest('hex');
+    const secretKey = crypto.createHmac('sha256', 'WebAppData').update(BOT_TOKEN).digest();
+    const calculatedHash = crypto.createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
 
     if (calculatedHash !== hash) return null;
 
@@ -441,7 +408,6 @@ function validateInitData(initData) {
     const userObj = JSON.parse(userJson);
     return userObj.id ? String(userObj.id) : null;
   } catch (e) {
-    console.error('Error validateInitData:', e);
     return null;
   }
 }
@@ -463,7 +429,7 @@ function requireAuth(req, res, next) {
   next();
 }
 
-// ==== HUERTO DE HORUS ====
+// ==== HUERTO ====
 const PLANT_LEVELS = {
   basic: { name: 'Básica', emoji: '🌱', price: 10, waterCost: 1, fruitValue: 1.5, sellPrice: 9 },
   medium: { name: 'Media', emoji: '🌿', price: 50, waterCost: 5, fruitValue: 7.5, sellPrice: 45 },
@@ -477,45 +443,25 @@ const PERFECT_WINDOW = 35;
 const ROT_TIME = 60;
 
 function getPlantStatus(plant) {
-  if (plant.status === 'refunded') {
-    return { status: 'refunded', value: 0, minutesLeft: 0, progress: 0, canRefund: false };
-  }
-  if (plant.status === 'dry' || !plant.last_watered) {
-    return { status: 'dry', value: 0, minutesLeft: 0, progress: 0, canRefund: false };
-  }
+  if (plant.status === 'refunded') return { status: 'refunded', value: 0, minutesLeft: 0, progress: 0, canRefund: false };
+  if (plant.status === 'dry' || !plant.last_watered) return { status: 'dry', value: 0, minutesLeft: 0, progress: 0, canRefund: false };
 
   const now = Math.floor(Date.now() / 1000);
   const level = PLANT_LEVELS[plant.level];
-
   const moonMult = parseFloat(plant.moon_multiplier || 1) || 1;
   const effectiveGrowTime = GROW_TIME_MIN / moonMult;
-
   const elapsed = (now - plant.last_watered) / 60;
 
   if (elapsed < effectiveGrowTime) {
     const progress = Math.floor((elapsed / effectiveGrowTime) * 100);
-    return {
-      status: 'growing',
-      value: 0,
-      minutesLeft: Math.ceil(effectiveGrowTime - elapsed),
-      progress: Math.min(progress, 99),
-      canRefund: false,
-      moonBoost: moonMult > 1
-    };
+    return { status: 'growing', value: 0, minutesLeft: Math.ceil(effectiveGrowTime - elapsed), progress: Math.min(progress, 99), canRefund: false, moonBoost: moonMult > 1 };
   }
 
   const elapsedSinceReady = elapsed - effectiveGrowTime;
   const perfectDuration = PERFECT_WINDOW - GROW_TIME_MIN;
 
   if (elapsedSinceReady <= perfectDuration) {
-    return {
-      status: 'ready',
-      value: level.fruitValue,
-      minutesLeft: Math.ceil(perfectDuration - elapsedSinceReady),
-      progress: 100,
-      canRefund: false,
-      moonBoost: moonMult > 1
-    };
+    return { status: 'ready', value: level.fruitValue, minutesLeft: Math.ceil(perfectDuration - elapsedSinceReady), progress: 100, canRefund: false, moonBoost: moonMult > 1 };
   }
 
   const witheringTotal = ROT_TIME - PERFECT_WINDOW;
@@ -524,28 +470,13 @@ function getPlantStatus(plant) {
   if (witheringElapsed <= witheringTotal) {
     const withering = witheringElapsed / witheringTotal;
     const value = level.fruitValue * (1 - withering * 0.1);
-    return {
-      status: 'withering',
-      value: Math.max(0, value),
-      minutesLeft: Math.ceil(witheringTotal - witheringElapsed),
-      progress: 100,
-      canRefund: false,
-      moonBoost: moonMult > 1
-    };
+    return { status: 'withering', value: Math.max(0, value), minutesLeft: Math.ceil(witheringTotal - witheringElapsed), progress: 100, canRefund: false, moonBoost: moonMult > 1 };
   }
 
   return { status: 'rotten', value: 0, minutesLeft: 0, progress: 0, canRefund: true, moonBoost: moonMult > 1 };
 }
 
 // ==== HELPERS ====
-function timeAgo(timestamp) {
-  const seconds = Math.floor(Date.now() / 1000) - timestamp;
-  if (seconds < 60) return 'hace ' + seconds + 's';
-  if (seconds < 3600) return 'hace ' + Math.floor(seconds / 60) + 'm';
-  if (seconds < 86400) return 'hace ' + Math.floor(seconds / 3600) + 'h';
-  return 'hace ' + Math.floor(seconds / 86400) + 'd';
-}
-
 function spinRoulette() {
   const random = Math.random() * 100;
   if (random < 33) return 0;
@@ -574,229 +505,138 @@ async function ensureUser(userId) {
 async function addHistory(userId, type, amount, description, metadata, txHash) {
   try {
     await supabase.from('history').insert({
-      user_id: userId,
-      type: type,
-      amount: amount,
-      description: description,
-      metadata: metadata || null,
-      tx_hash: txHash || null,
+      user_id: userId, type: type, amount: amount, description: description,
+      metadata: metadata || null, tx_hash: txHash || null,
       created_at: Math.floor(Date.now() / 1000)
     });
-  } catch (e) {
-    console.error('Error history:', e);
-  }
+  } catch (e) {}
 }
 
 async function refundPlant(userId, plantId) {
   try {
     const { data: plant } = await supabase.from('plants').select('*').eq('id', plantId).eq('user_id', userId).maybeSingle();
     if (!plant) return { success: false, error: 'Planta no encontrada' };
-
     const status = getPlantStatus(plant);
     if (status.status !== 'rotten') return { success: false, error: 'La planta todavía no está podrida' };
-
     const level = PLANT_LEVELS[plant.level];
     const refundAmount = level.waterCost * 0.9;
-
     const user = await ensureUser(userId);
     const newBalance = parseFloat(user.balance) + refundAmount;
     await supabase.from('users_balance').update({ balance: newBalance }).eq('user_id', userId);
-
     await supabase.from('history').insert({
-      user_id: userId,
-      type: 'plant_refund',
-      amount: refundAmount,
+      user_id: userId, type: 'plant_refund', amount: refundAmount,
       description: 'Reembolso por planta marchita (' + level.name + ')',
-      metadata: String(plantId),
-      tx_hash: null,
-      created_at: Math.floor(Date.now() / 1000)
+      metadata: String(plantId), tx_hash: null, created_at: Math.floor(Date.now() / 1000)
     });
-
     await supabase.from('plants').update({ status: 'dry', last_watered: null, moon_multiplier: 1 }).eq('id', plantId).eq('user_id', userId);
-
-    return { success: true, amount: refundAmount, message: '¡Recibiste ' + refundAmount.toFixed(2) + ' JHOAL de reembolso! Plantá de nuevo cuando quieras.' };
+    return { success: true, amount: refundAmount, message: '¡Recibiste ' + refundAmount.toFixed(2) + ' JHOAL de reembolso!' };
   } catch (e) {
-    console.error('Error refund:', e);
     return { success: false, error: e.message };
   }
 }
 
-// ==== ENDPOINT: MOON STATUS ====
+// ==== ENDPOINTS ====
 app.get('/moon-status', (req, res) => {
   const now = Math.floor(Date.now() / 1000);
-  res.json({
-    success: true,
-    active: moonState.active,
-    startedAt: moonState.startedAt,
-    endsAt: moonState.endsAt,
-    secondsLeft: moonState.active ? Math.max(0, moonState.endsAt - now) : 0,
-    multiplier: MOON_GROWTH_MULTIPLIER,
-    durationMinutes: MOON_DURATION_MIN,
-    eventsToday: moonState.eventsToday
-  });
+  res.json({ success: true, active: moonState.active, startedAt: moonState.startedAt, endsAt: moonState.endsAt, secondsLeft: moonState.active ? Math.max(0, moonState.endsAt - now) : 0, multiplier: MOON_GROWTH_MULTIPLIER, durationMinutes: MOON_DURATION_MIN, eventsToday: moonState.eventsToday });
 });
 
-// ==== ENDPOINT: REGISTRAR CHAT_ID ====
 app.post('/register-user', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { chatId } = req.body;
-  
   if (!chatId) return res.json({ success: true, message: 'Sin chatId' });
-  
   try {
     await ensureUser(userId);
-    await supabase.from('users_balance')
-      .update({ chat_id: chatId })
-      .eq('user_id', userId);
-    
+    await supabase.from('users_balance').update({ chat_id: chatId }).eq('user_id', userId);
     res.json({ success: true });
   } catch (e) {
-    console.error('Error register-user:', e);
     res.status(500).json({ error: e.message });
   }
 });
 
-// ==== ENDPOINT: MI WALLET DE DEPÓSITO ====
 app.post('/my-deposit-wallet', requireAuth, async (req, res) => {
   const userId = req.userId;
   try {
     const user = await ensureUser(userId);
-    
     if (user.deposit_address) {
-      return res.json({ 
-        success: true, 
-        address: user.deposit_address,
-        walletBalance: parseFloat(user.wallet_balance || 0)
-      });
+      return res.json({ success: true, address: user.deposit_address, walletBalance: parseFloat(user.wallet_balance || 0) });
     }
-    
     console.log('🔐 Generando nueva wallet para user', userId);
     const newWallet = ethers.Wallet.createRandom();
     const encryptedKey = encryptPrivateKey(newWallet.privateKey);
-    
-    await supabase.from('users_balance')
-      .update({ 
-        deposit_address: newWallet.address,
-        deposit_private_key: encryptedKey,
-        wallet_balance: 0,
-        last_deposit_block: 0
-      })
-      .eq('user_id', userId);
-    
+    await supabase.from('users_balance').update({
+      deposit_address: newWallet.address,
+      deposit_private_key: encryptedKey,
+      wallet_balance: 0,
+      last_deposit_block: 0
+    }).eq('user_id', userId);
     console.log('✅ Wallet generada:', newWallet.address);
-    
-    res.json({ 
-      success: true, 
-      address: newWallet.address,
-      walletBalance: 0
-    });
+    res.json({ success: true, address: newWallet.address, walletBalance: 0 });
   } catch (e) {
-    console.error('Error my-deposit-wallet:', e);
     res.status(500).json({ error: e.message });
   }
 });
 
-// ==== ENDPOINT: MOVER DE WALLET AL JUEGO ====
 app.post('/move-to-game', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { amount } = req.body;
-  
-  if (!amount || amount <= 0) {
-    return res.status(400).json({ error: 'Cantidad inválida' });
-  }
-  
+  if (!amount || amount <= 0) return res.status(400).json({ error: 'Cantidad inválida' });
   try {
     const user = await ensureUser(userId);
-    
-    if (!user.deposit_address || !user.deposit_private_key) {
-      return res.status(400).json({ error: 'No tienes wallet personal' });
-    }
-    
-    if (parseFloat(user.wallet_balance || 0) < amount) {
-      return res.status(400).json({ error: 'Saldo insuficiente en wallet' });
-    }
-    
+    if (!user.deposit_address || !user.deposit_private_key) return res.status(400).json({ error: 'No tienes wallet personal' });
+    if (parseFloat(user.wallet_balance || 0) < amount) return res.status(400).json({ error: 'Saldo insuficiente en wallet' });
+
     const provider = await getProvider();
-    const tokenContract = new ethers.Contract(TOKEN_ADDRESS, ABI, provider);
-    const walletContract = new ethers.Contract(TOKEN_ADDRESS, ABI, new ethers.Wallet(PRIVATE_KEY, provider));
-    
+    const signer = new ethers.Wallet(PRIVATE_KEY, provider);
+    const tokenContract = new ethers.Contract(TOKEN_ADDRESS, ABI, signer);
+    const userSigner = new ethers.Wallet(decryptPrivateKey(user.deposit_private_key), provider);
+    const userToken = new ethers.Contract(TOKEN_ADDRESS, ABI, userSigner);
+
     const realBalanceWei = await tokenContract.balanceOf(user.deposit_address);
     const realBalance = parseFloat(ethers.formatUnits(realBalanceWei, 18));
-    
-    if (realBalance < amount) {
-      return res.status(400).json({ error: 'La wallet no tiene fondos suficientes' });
-    }
-    
+    if (realBalance < amount) return res.status(400).json({ error: 'La wallet no tiene fondos suficientes' });
+
     const bnbNeeded = ethers.parseEther('0.0003');
     const bnbBalance = await provider.getBalance(user.deposit_address);
-    
     if (bnbBalance < bnbNeeded) {
-      console.log('⛽ Enviando BNB para gas a', user.deposit_address);
-      const bnbTx = await walletContract.runner.sendTransaction({
-        to: user.deposit_address,
-        value: bnbNeeded
-      });
+      const bnbTx = await signer.sendTransaction({ to: user.deposit_address, value: bnbNeeded });
       await bnbTx.wait();
     }
-    
-    const pk = decryptPrivateKey(user.deposit_private_key);
-    const userSigner = new ethers.Wallet(pk, provider);
-    const userToken = new ethers.Contract(TOKEN_ADDRESS, ABI, userSigner);
-    
+
     const amountWei = ethers.parseUnits(amount.toString(), 18);
-    const tx = await userToken.transfer(walletContract.runner.address, amountWei);
+    const tx = await userToken.transfer(signer.address, amountWei);
     console.log('📤 Mover al juego TX:', tx.hash);
-    
     await tx.wait();
-    
+
     const newWalletBalance = parseFloat(user.wallet_balance) - amount;
     const newGameBalance = parseFloat(user.balance) + amount;
-    
-    await supabase.from('users_balance')
-      .update({ wallet_balance: newWalletBalance, balance: newGameBalance })
-      .eq('user_id', userId);
-    
+    await supabase.from('users_balance').update({ wallet_balance: newWalletBalance, balance: newGameBalance }).eq('user_id', userId);
     await addHistory(userId, 'deposit', amount, 'Movido al saldo del juego', null, tx.hash);
-    
-    res.json({ 
-      success: true, 
-      txHash: tx.hash,
-      newWalletBalance: newWalletBalance,
-      newGameBalance: newGameBalance,
-      explorer: 'https://bscscan.com/tx/' + tx.hash
-    });
+    res.json({ success: true, txHash: tx.hash, newWalletBalance: newWalletBalance, newGameBalance: newGameBalance, explorer: 'https://bscscan.com/tx/' + tx.hash });
   } catch (e) {
-    console.error('Error move-to-game:', e);
     res.status(500).json({ error: e.message });
   }
 });
 
-// ==== ENDPOINT: RECLAMAR ====
 app.post('/claim', requireAuth, async (req, res) => {
   const userId = req.userId;
   try {
     const user = await ensureUser(userId);
     const now = Math.floor(Date.now() / 1000);
-
     if (user.last_claim && now - user.last_claim < COOLDOWN) {
       const restante = COOLDOWN - (now - user.last_claim);
-      return res.status(429).json({ error: 'Espera ' + Math.floor(restante / 60) + 'm ' + (restante % 60) + 's antes de reclamar otra vez' });
+      return res.status(429).json({ error: 'Espera ' + Math.floor(restante / 60) + 'm ' + (restante % 60) + 's' });
     }
-
     const newBalance = parseFloat(user.balance) + 1;
     const newClaimed = parseFloat(user.total_claimed || 0) + 1;
-
     await supabase.from('users_balance').update({ balance: newBalance, total_claimed: newClaimed, last_claim: now }).eq('user_id', userId);
     await addHistory(userId, 'faucet', 1, 'Reclamo del faucet', null, null);
-
-    res.json({ success: true, amount: 1, message: '¡1 JHOAL añadido a tu saldo!' });
+    res.json({ success: true, amount: 1, message: '¡1 JHOAL añadido!' });
   } catch (error) {
-    console.error('Error claim:', error);
     res.status(500).json({ error: 'Error: ' + error.message });
   }
 });
 
-// ==== ENDPOINT: BALANCE ====
 app.get('/balance-game/:userId', requireAuth, async (req, res) => {
   try {
     const user = await getUser(req.userId);
@@ -815,22 +655,18 @@ app.get('/balance-game/:userId', requireAuth, async (req, res) => {
   }
 });
 
-// ==== ENDPOINT: APOSTAR ====
 app.post('/bet', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { amount } = req.body;
   if (!amount) return res.status(400).json({ error: 'Faltan datos' });
-  if (amount < MIN_BET || amount > MAX_BET) return res.status(400).json({ error: 'Apuesta inválida (' + MIN_BET + '-' + MAX_BET + ')' });
-
+  if (amount < MIN_BET || amount > MAX_BET) return res.status(400).json({ error: 'Apuesta inválida' });
   try {
     const user = await ensureUser(userId);
     if (parseFloat(user.balance) < amount) return res.status(400).json({ error: 'Saldo insuficiente' });
-
     const multiplier = spinRoulette();
     const payout = amount * multiplier;
     const profit = payout - amount;
     const now = Math.floor(Date.now() / 1000);
-
     let newBalance, newWon, newLost;
     if (multiplier === 0) {
       newBalance = parseFloat(user.balance) - amount;
@@ -841,24 +677,19 @@ app.post('/bet', requireAuth, async (req, res) => {
       newWon = parseFloat(user.total_won || 0) + profit;
       newLost = parseFloat(user.total_lost || 0);
     }
-
     await supabase.from('users_balance').update({ balance: newBalance, total_won: newWon, total_lost: newLost }).eq('user_id', userId);
     await supabase.from('bets').insert({ user_id: userId, amount: amount, multiplier: multiplier, payout: payout, result: multiplier === 0 ? 'lose' : 'win', created_at: now });
-
     if (multiplier === 0) {
       await addHistory(userId, 'dice_lose', -amount, 'Perdiste en los dados (x0)', null, null);
     } else {
       await addHistory(userId, 'dice_win', profit, 'Ganaste x' + multiplier + ' en los dados', null, null);
     }
-
     res.json({ success: true, multiplier: multiplier, payout: payout, profit: profit, newBalance: newBalance });
   } catch (error) {
-    console.error('Error bet:', error);
     res.status(500).json({ error: 'Error: ' + error.message });
   }
 });
 
-// ==== ENDPOINT: HISTORIAL DE APUESTAS ====
 app.get('/bet-history/:userId', requireAuth, async (req, res) => {
   try {
     const { data } = await supabase.from('bets').select('*').eq('user_id', req.userId).order('created_at', { ascending: false }).limit(10);
@@ -868,42 +699,33 @@ app.get('/bet-history/:userId', requireAuth, async (req, res) => {
   }
 });
 
-// ==== ENDPOINT: RETIRAR ====
 app.post('/withdraw', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { wallet: userWallet, amount } = req.body;
   if (!userWallet || !amount) return res.status(400).json({ error: 'Faltan datos' });
   if (!ethers.isAddress(userWallet)) return res.status(400).json({ error: 'Wallet inválida' });
   if (amount <= 0) return res.status(400).json({ error: 'Cantidad inválida' });
-
   try {
     const user = await ensureUser(userId);
     if (parseFloat(user.balance) < amount) return res.status(400).json({ error: 'Saldo insuficiente' });
-
     const provider = await getProvider();
     const signer = new ethers.Wallet(PRIVATE_KEY, provider);
     const tokenContract = new ethers.Contract(TOKEN_ADDRESS, ABI, signer);
-
     const amountWei = ethers.parseUnits(amount.toString(), 18);
     const tx = await tokenContract.transfer(userWallet, amountWei);
     console.log('Withdraw TX:', tx.hash);
-
     const newBalance = parseFloat(user.balance) - amount;
     const newWithdrawn = parseFloat(user.total_withdrawn || 0) + amount;
-
     await supabase.from('users_balance').update({ balance: newBalance, total_withdrawn: newWithdrawn }).eq('user_id', userId);
     await supabase.from('withdrawals').insert({ user_id: userId, wallet: userWallet, amount: amount, tx_hash: tx.hash, created_at: Math.floor(Date.now() / 1000) });
     await addHistory(userId, 'withdraw', -amount, 'Retiro a wallet', null, tx.hash);
     await tx.wait();
-
     res.json({ success: true, txHash: tx.hash, explorer: 'https://bscscan.com/tx/' + tx.hash, amount: amount });
   } catch (error) {
-    console.error('Error withdraw:', error);
     res.status(500).json({ error: 'Error: ' + error.message });
   }
 });
 
-// ==== ENDPOINT: INFO DE DEPÓSITO ====
 app.get('/deposit-info', async (req, res) => {
   try {
     const provider = await getProvider();
@@ -914,146 +736,101 @@ app.get('/deposit-info', async (req, res) => {
   }
 });
 
-// ==== HUERTO: COMPRAR ====
 app.post('/buy-plant', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { level } = req.body;
-  if (!level) return res.status(400).json({ error: 'Faltan datos' });
-  if (!PLANT_LEVELS[level]) return res.status(400).json({ error: 'Nivel inválido' });
-
+  if (!level || !PLANT_LEVELS[level]) return res.status(400).json({ error: 'Nivel inválido' });
   try {
     const user = await ensureUser(userId);
     const { count } = await supabase.from('plants').select('*', { count: 'exact', head: true }).eq('user_id', userId);
-    if (count >= MAX_PLANTS) return res.status(400).json({ error: 'Máximo ' + MAX_PLANTS + ' plantas por usuario' });
-
+    if (count >= MAX_PLANTS) return res.status(400).json({ error: 'Máximo ' + MAX_PLANTS + ' plantas' });
     const plantInfo = PLANT_LEVELS[level];
-    if (parseFloat(user.balance) < plantInfo.price) return res.status(400).json({ error: 'Saldo insuficiente. Necesitás ' + plantInfo.price + ' JHOAL' });
-
+    if (parseFloat(user.balance) < plantInfo.price) return res.status(400).json({ error: 'Saldo insuficiente' });
     const now = Math.floor(Date.now() / 1000);
     const newBalance = parseFloat(user.balance) - plantInfo.price;
-
     await supabase.from('users_balance').update({ balance: newBalance }).eq('user_id', userId);
     await supabase.from('plants').insert({ user_id: userId, level: level, status: 'dry', created_at: now, moon_multiplier: 1 });
     await addHistory(userId, 'plant_buy', -plantInfo.price, 'Compraste planta ' + plantInfo.name, null, null);
-
     res.json({ success: true, message: '¡Compraste una planta ' + plantInfo.name + '!' });
   } catch (error) {
-    console.error('Error buy-plant:', error);
     res.status(500).json({ error: 'Error: ' + error.message });
   }
 });
 
-// ==== HUERTO: REGAR ====
 app.post('/water-plant', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { plantId } = req.body;
   if (!plantId) return res.status(400).json({ error: 'Faltan datos' });
-
   try {
     const { data: plant } = await supabase.from('plants').select('*').eq('id', plantId).eq('user_id', userId).maybeSingle();
     if (!plant) return res.status(400).json({ error: 'Planta no encontrada' });
-
     const status = getPlantStatus(plant);
-    if (status.status !== 'dry' && status.status !== 'rotten') return res.status(400).json({ error: 'La planta todavía tiene fruto o está creciendo' });
-
+    if (status.status !== 'dry' && status.status !== 'rotten') return res.status(400).json({ error: 'La planta todavía tiene fruto' });
     const user = await ensureUser(userId);
     const level = PLANT_LEVELS[plant.level];
-    if (parseFloat(user.balance) < level.waterCost) return res.status(400).json({ error: 'Saldo insuficiente. Necesitás ' + level.waterCost + ' JHOAL' });
-
+    if (parseFloat(user.balance) < level.waterCost) return res.status(400).json({ error: 'Saldo insuficiente' });
     const now = Math.floor(Date.now() / 1000);
     const newBalance = parseFloat(user.balance) - level.waterCost;
-
     const moonMult = moonState.active ? MOON_GROWTH_MULTIPLIER : 1;
     const effectiveGrowTime = Math.round((GROW_TIME_MIN / moonMult) * 10) / 10;
-
     await supabase.from('users_balance').update({ balance: newBalance }).eq('user_id', userId);
-    await supabase.from('plants').update({
-      last_watered: now,
-      status: 'growing',
-      moon_multiplier: moonMult
-    }).eq('id', plantId).eq('user_id', userId);
-
-    const moonMsg = moonMult > 1 ? ' 🌕 ¡Luna Llena activa! Crecerá en ~' + effectiveGrowTime + ' min.' : '';
+    await supabase.from('plants').update({ last_watered: now, status: 'growing', moon_multiplier: moonMult }).eq('id', plantId).eq('user_id', userId);
+    const moonMsg = moonMult > 1 ? ' 🌕 ¡Luna Llena activa!' : '';
     await addHistory(userId, 'plant_water', -level.waterCost, 'Regaste ' + level.name + (moonMult > 1 ? ' (Luna Llena 🌕)' : ''), null, null);
-
-    res.json({
-      success: true,
-      message: '¡Regaste tu planta! Lista en ' + effectiveGrowTime + ' minutos.' + moonMsg,
-      moonActive: moonMult > 1,
-      growTimeMinutes: effectiveGrowTime
-    });
+    res.json({ success: true, message: '¡Regaste tu planta! Lista en ' + effectiveGrowTime + ' min.' + moonMsg, moonActive: moonMult > 1, growTimeMinutes: effectiveGrowTime });
   } catch (error) {
-    console.error('Error water-plant:', error);
     res.status(500).json({ error: 'Error: ' + error.message });
   }
 });
 
-// ==== HUERTO: COSECHAR ====
 app.post('/harvest', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { plantId } = req.body;
   if (!plantId) return res.status(400).json({ error: 'Faltan datos' });
-
   try {
     const { data: plant } = await supabase.from('plants').select('*').eq('id', plantId).eq('user_id', userId).maybeSingle();
     if (!plant) return res.status(400).json({ error: 'Planta no encontrada' });
-
     const status = getPlantStatus(plant);
-    if (status.status !== 'ready' && status.status !== 'withering') return res.status(400).json({ error: 'Todavía no podés cosechar esta planta' });
-
+    if (status.status !== 'ready' && status.status !== 'withering') return res.status(400).json({ error: 'Todavía no podés cosechar' });
     const value = status.value;
     if (value <= 0) return res.status(400).json({ error: 'El fruto está podrido' });
-
     const user = await ensureUser(userId);
     const newBalance = parseFloat(user.balance) + value;
     const newWon = parseFloat(user.total_won || 0) + value;
-
     await supabase.from('users_balance').update({ balance: newBalance, total_won: newWon }).eq('user_id', userId);
     await supabase.from('plants').update({ status: 'dry', last_watered: null, moon_multiplier: 1 }).eq('id', plantId).eq('user_id', userId);
-
     const level = PLANT_LEVELS[plant.level];
     await addHistory(userId, 'plant_harvest', value, 'Cosechaste ' + level.name, null, null);
-
     res.json({ success: true, value: value, message: '¡Cosechaste ' + value.toFixed(2) + ' JHOAL!' });
   } catch (error) {
-    console.error('Error harvest:', error);
     res.status(500).json({ error: 'Error: ' + error.message });
   }
 });
 
-// ==== HUERTO: VENDER ====
 app.post('/sell-plant', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { plantId } = req.body;
   if (!plantId) return res.status(400).json({ error: 'Faltan datos' });
-
   try {
     const { data: plant } = await supabase.from('plants').select('*').eq('id', plantId).eq('user_id', userId).maybeSingle();
     if (!plant) return res.status(400).json({ error: 'Planta no encontrada' });
-
     const level = PLANT_LEVELS[plant.level];
     const sellValue = level.sellPrice;
-
     const user = await ensureUser(userId);
     const newBalance = parseFloat(user.balance) + sellValue;
-
     await supabase.from('users_balance').update({ balance: newBalance }).eq('user_id', userId);
     await supabase.from('plants').delete().eq('id', plantId).eq('user_id', userId);
     await addHistory(userId, 'plant_sell', sellValue, 'Vendiste ' + level.name, null, null);
-
     res.json({ success: true, value: sellValue, message: '¡Vendiste por ' + sellValue + ' JHOAL!' });
   } catch (error) {
-    console.error('Error sell-plant:', error);
     res.status(500).json({ error: 'Error: ' + error.message });
   }
 });
 
-// ==== HUERTO: RECLAMAR DEVOLUCIÓN ====
 app.post('/refund-plant', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { plantId } = req.body;
   if (!plantId) return res.status(400).json({ error: 'Faltan datos' });
-
   const result = await refundPlant(userId, plantId);
   if (result.success) {
     res.json({ success: true, amount: result.amount, message: result.message });
@@ -1062,12 +839,10 @@ app.post('/refund-plant', requireAuth, async (req, res) => {
   }
 });
 
-// ==== HUERTO: MIS PLANTAS ====
 app.get('/my-plants/:userId', requireAuth, async (req, res) => {
   try {
     const userId = req.userId;
     const { data: plants } = await supabase.from('plants').select('*').eq('user_id', userId).order('created_at', { ascending: true });
-
     const plantsWithStatus = (plants || []).map(function(p) {
       const status = getPlantStatus(p);
       const level = PLANT_LEVELS[p.level];
@@ -1082,40 +857,29 @@ app.get('/my-plants/:userId', requireAuth, async (req, res) => {
         moonBoost: status.moonBoost || false
       };
     });
-
     res.json({
       success: true,
       plants: plantsWithStatus,
       count: plantsWithStatus.length,
       maxPlants: MAX_PLANTS,
       plantLevels: PLANT_LEVELS,
-      moon: {
-        active: moonState.active,
-        endsAt: moonState.endsAt,
-        multiplier: MOON_GROWTH_MULTIPLIER
-      }
+      moon: { active: moonState.active, endsAt: moonState.endsAt, multiplier: MOON_GROWTH_MULTIPLIER }
     });
   } catch (error) {
-    console.error('Error my-plants:', error);
     res.status(500).json({ error: 'Error: ' + error.message });
   }
 });
 
-// ==== HISTORIAL ====
 app.get('/history/:userId', requireAuth, async (req, res) => {
   try {
     const userId = req.userId;
     const limit = parseInt(req.query.limit) || 50;
     const type = req.query.type;
-
     let query = supabase.from('history').select('*').eq('user_id', userId).order('created_at', { ascending: false }).limit(limit);
     if (type && type !== 'all') query = query.eq('type', type);
-
     const { data: history } = await query;
     const { data: allHistory } = await supabase.from('history').select('type, amount').eq('user_id', userId);
-
     let summary = { faucet: 0, dice: 0, deposit: 0, withdraw: 0, garden: 0, total: 0 };
-
     (allHistory || []).forEach(function(h) {
       const amount = parseFloat(h.amount) || 0;
       if (h.type === 'faucet') summary.faucet += amount;
@@ -1125,15 +889,12 @@ app.get('/history/:userId', requireAuth, async (req, res) => {
       else if (h.type && h.type.startsWith('plant_')) summary.garden += amount;
       summary.total += amount;
     });
-
     res.json({ success: true, history: history || [], summary: summary });
   } catch (error) {
-    console.error('Error history:', error);
     res.status(500).json({ error: 'Error: ' + error.message });
   }
 });
 
-// ==== PRECIO ====
 app.get('/price', async (req, res) => {
   try {
     const provider = await getProvider();
@@ -1150,13 +911,12 @@ app.get('/price', async (req, res) => {
     }
     const jhoalAmount = parseFloat(ethers.formatUnits(jhoalReserve, 18));
     const usdtAmount = parseFloat(ethers.formatUnits(usdtReserve, 18));
-    res.json({ success: true, priceUsd: usdtAmount / jhoalAmount, jhoalPerUsdt: jhoalAmount / usdtAmount, jhoalReserve: jhoalAmount, usdtReserve: usdtAmount });
+    res.json({ success: true, priceUsd: usdtAmount / jhoalAmount, jhoalPerUsdt: jhoalAmount / usdtAmount });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-// ==== BALANCE FAUCET ====
 app.get('/balance', async (req, res) => {
   try {
     const provider = await getProvider();
@@ -1170,9 +930,8 @@ app.get('/balance', async (req, res) => {
   }
 });
 
-// ==== ROOT ====
 app.get('/', (req, res) => {
-  res.json({ status: 'Faucet JHOAL + Dados + Huerto + Historial + Luna Llena funcionando' });
+  res.json({ status: 'Faucet JHOAL funcionando' });
 });
 
 // ==== BOT PRINCIPAL ====
@@ -1183,7 +942,7 @@ if (BOT_TOKEN) {
 
   bot.on('polling_error', (error) => {
     if (error.code === 'ETELEGRAM' && error.message.includes('409')) {
-      console.log('⚠️ Conflicto de polling - verificar instancias duplicadas');
+      console.log('⚠️ Conflicto de polling');
     }
   });
 
@@ -1219,10 +978,8 @@ if (SUPPORT_BOT_TOKEN && SUPPORT_CHAT_ID) {
     const chatId = msg.chat.id;
     const text = msg.text;
     if (text && text.startsWith('/')) return;
-
     const userName = msg.from.first_name || 'Usuario';
     const header = '📩 *SOPORTE*\n\n👤 ' + userName + '\n🆔 `' + msg.from.id + '`\n\n';
-    
     try {
       if (msg.text) {
         supportBot.sendMessage(SUPPORT_CHAT_ID, header + '💬 ' + msg.text, { parse_mode: 'Markdown' });
@@ -1237,5 +994,5 @@ app.listen(process.env.PORT || 3000, () => {
   console.log('Faucet JHOAL corriendo en puerto', process.env.PORT || 3000);
   console.log('🌕 Luna Llena: x' + MOON_GROWTH_MULTIPLIER);
   console.log('💾 Monitor de depósitos: ACTIVADO');
-  console.log('🔄 RPCs con fallback: ' + RPC_LIST.length + ' disponibles');
+  console.log('🔄 RPCs con fallback: ' + RPC_LIST.length);
 });
