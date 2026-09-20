@@ -11,7 +11,9 @@ app.use(cors());
 app.use(express.json());
 
 // ==== CONFIG ====
-const RPC = 'https://1rpc.io/bnb';
+const RPC_LIST = [
+  'https://bsc-mainnet.nodereal.io/v1/05f8075daa504e9e97eab50c590ae8a2'
+];
 const PRIVATE_KEY = process.env.PRIVATE_KEY;
 const TOKEN_ADDRESS = process.env.TOKEN_ADDRESS;
 const PAIR_ADDRESS = '0x70163906f11E7a05eb37Dce319602e7ffc4865e5';
@@ -41,7 +43,7 @@ const MOON_DURATION_MIN = 10;
 const MOON_MIN_PER_DAY = 1;
 const MOON_MAX_PER_DAY = 5;
 
-const provider = new ethers.JsonRpcProvider(RPC);
+const provider = new ethers.JsonRpcProvider(RPC_LIST[0]);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 
 const ABI = [
