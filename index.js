@@ -14,6 +14,35 @@ app.use(express.json());
 const RPC_LIST = [
   'https://bsc-mainnet.nodereal.io/v1/05f8075daa504e9e97eab50c590ae8a2'
 ];
+// ==== PROVIDER CON FALLBACK ====
+let currentProvider = null;
+
+async function getProvider() {
+  if (currentProvider) {
+    try {
+      await currentProvider.getBlockNumber();
+      return currentProvider;
+    } catch (e) {
+      console.log('⚠️ Provider anterior falló, creando uno nuevo');
+      currentProvider = null;
+    }
+  }
+  
+  // Probar cada RPC de la lista
+  for (const rpc of RPC_LIST) {
+    try {
+      const testProvider = new ethers.JsonRpcProvider(rpc);
+      await testProvider.getBlockNumber();
+      console.log('✅ RPC OK:', rpc);
+      currentProvider = testProvider;
+      return testProvider;
+    } catch (e) {
+      console.log('❌ RPC falló:', rpc);
+    }
+  }
+  
+  throw new Error('Ningún RPC funciona');
+}
 const PRIVATE_KEY = process.env.PRIVATE_KEY;
 const TOKEN_ADDRESS = process.env.TOKEN_ADDRESS;
 const PAIR_ADDRESS = '0x70163906f11E7a05eb37Dce319602e7ffc4865e5';
