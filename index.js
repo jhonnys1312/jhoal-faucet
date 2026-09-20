@@ -11,7 +11,7 @@ app.use(cors());
 app.use(express.json());
 
 // ==== CONFIG ====
-const RPC = 'https://bsc-dataseed1.defibit.io/';
+const RPC = 'https://1rpc.io/bnb';
 const PRIVATE_KEY = process.env.PRIVATE_KEY;
 const TOKEN_ADDRESS = process.env.TOKEN_ADDRESS;
 const PAIR_ADDRESS = '0x70163906f11E7a05eb37Dce319602e7ffc4865e5';
