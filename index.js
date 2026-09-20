@@ -28,11 +28,10 @@ const MIN_BET = 0.1;
 const MAX_BET = 1000;
 
 // ==== LUNA LLENA ====
-const MOON_GROWTH_MULTIPLIER = 1.9;   // 90% más rápido (25 min → ~13.2 min)
-const MOON_DURATION_MIN = 10;          // 10 minutos por evento
-const MOON_MIN_PER_DAY = 1;            // mínimo 1 por día
-const MOON_MAX_PER_DAY = 5;            // máximo 5 por día
-// ====================
+const MOON_GROWTH_MULTIPLIER = 1.9;
+const MOON_DURATION_MIN = 10;
+const MOON_MIN_PER_DAY = 1;
+const MOON_MAX_PER_DAY = 5;
 
 const provider = new ethers.JsonRpcProvider(RPC);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
@@ -53,6 +52,7 @@ const pair = new ethers.Contract(PAIR_ADDRESS, PAIR_ABI, provider);
 
 // ==== SUPABASE ====
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+
 // ==== ENCRIPTACIÓN DE PRIVATE KEYS ====
 const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY;
 
@@ -82,7 +82,8 @@ function decryptPrivateKey(encrypted) {
   decrypted += decipher.final('utf8');
   return decrypted;
 }
-// ==== ESTADO LUNA LLENA (en memoria) ====
+
+// ==== ESTADO LUNA LLENA ====
 const moonState = {
   active: false,
   startedAt: 0,
@@ -137,11 +138,9 @@ function activateMoon() {
   moonState.eventsToday += 1;
   console.log('🌕 LUNA LLENA ACTIVADA hasta', new Date(moonState.endsAt * 1000).toISOString());
   
-  // 🔔 Notificar a todos los usuarios por Telegram
   notificarLunaLlena();
 }
 
-// 🔔 Envía notificación a todos los usuarios con chat_id registrado
 async function notificarLunaLlena() {
   if (!bot) {
     console.log('No hay bot configurado, no se puede notificar');
@@ -215,6 +214,140 @@ function tickMoon() {
 moonState.todayKey = todayKeyUTC();
 scheduleNextMoon();
 setInterval(tickMoon, 30 * 1000);
+
+// ================================================================
+// ==== MONITOR DE DEPÓSITOS A WALLETS PERSONALES ====
+// ================================================================
+const ifaceTransfer = new ethers.Interface([
+  'event Transfer(address indexed from, address indexed to, uint256 value)'
+]);
+const TRANSFER_TOPIC = ethers.id('Transfer(address,address,uint256)');
+
+async function checkDeposits() {
+  try {
+    const currentBlock = await provider.getBlockNumber();
+
+    const { data: users, error } = await supabase
+      .from('users_balance')
+      .select('user_id, deposit_address, wallet_balance, last_deposit_block')
+      .not('deposit_address', 'is', null);
+
+    if (error) {
+      console.error('Error obteniendo usuarios:', error);
+      return;
+    }
+
+    if (!users || users.length === 0) return;
+
+    // Si nunca se ha procesado, empezar desde hace ~50 bloques (~2.5 min)
+    const MIN_CONFIRMATIONS = 3;
+
+    for (const u of users) {
+      try {
+        const fromBlock = u.last_deposit_block > 0 
+          ? u.last_deposit_block + 1 
+          : currentBlock - 50;
+        
+        const toBlock = currentBlock - MIN_CONFIRMATIONS;
+        
+        if (fromBlock > toBlock) continue;
+
+        const logs = await provider.getLogs({
+          address: TOKEN_ADDRESS,
+          topics: [
+            TRANSFER_TOPIC,
+            null,
+            ethers.zeroPadValue(u.deposit_address.toLowerCase(), 32)
+          ],
+          fromBlock: fromBlock,
+          toBlock: toBlock
+        });
+
+        if (logs.length === 0) {
+          // Actualizar el bloque procesado aunque no haya logs
+          await supabase.from('users_balance')
+            .update({ last_deposit_block: toBlock })
+            .eq('user_id', u.user_id);
+          continue;
+        }
+
+        console.log(`📥 ${logs.length} transferencia(s) detectada(s) para user ${u.user_id}`);
+
+        for (const log of logs) {
+          const decoded = ifaceTransfer.parseLog({
+            topics: log.topics,
+            data: log.data
+          });
+
+          const amount = parseFloat(ethers.formatUnits(decoded.args.value, 18));
+          const txHash = log.transactionHash;
+          const fromAddress = decoded.args.from;
+
+          // Verificar duplicados
+          const { data: existing } = await supabase
+            .from('deposits')
+            .select('tx_hash')
+            .eq('tx_hash', txHash)
+            .maybeSingle();
+
+          if (existing) {
+            console.log(`⏭️ Depósito duplicado ignorado: ${txHash}`);
+            continue;
+          }
+
+          // Registrar el depósito
+          await supabase.from('deposits').insert({
+            user_id: u.user_id,
+            wallet: fromAddress,
+            amount: amount,
+            tx_hash: txHash,
+            created_at: Math.floor(Date.now() / 1000)
+          });
+
+          // Actualizar wallet_balance
+          const newWalletBalance = parseFloat(u.wallet_balance || 0) + amount;
+          
+          await supabase.from('users_balance')
+            .update({ wallet_balance: newWalletBalance })
+            .eq('user_id', u.user_id);
+          
+          // Actualizar el `u.wallet_balance` local para próximos logs del mismo ciclo
+          u.wallet_balance = newWalletBalance;
+
+          // Registrar en historial
+          await addHistory(
+            u.user_id,
+            'deposit',
+            amount,
+            'Depósito detectado automáticamente',
+            null,
+            txHash
+          );
+
+          console.log(`✅ Depósito acreditado: user ${u.user_id} +${amount} JHOAL (tx: ${txHash})`);
+        }
+
+        // Actualizar last_deposit_block
+        await supabase.from('users_balance')
+          .update({ last_deposit_block: toBlock })
+          .eq('user_id', u.user_id);
+
+      } catch (e) {
+        console.error(`Error revisando wallet ${u.deposit_address}:`, e.message);
+      }
+    }
+  } catch (e) {
+    console.error('Error checkDeposits:', e);
+  }
+}
+
+// Ejecutar cada 30 segundos
+setInterval(checkDeposits, 30 * 1000);
+
+// Ejecutar una vez al inicio después de 10s
+setTimeout(checkDeposits, 10 * 1000);
+
+// ================================================================
 
 // ==== VALIDACIÓN INITDATA ====
 function validateInitData(initData) {
@@ -299,14 +432,11 @@ function getPlantStatus(plant) {
   const now = Math.floor(Date.now() / 1000);
   const level = PLANT_LEVELS[plant.level];
 
-  // 🌕 Si la planta se regó durante Luna Llena, su tiempo de crecimiento
-  // fue 1.9x más rápido. Guardamos ese multiplicador en moon_multiplier.
   const moonMult = parseFloat(plant.moon_multiplier || 1) || 1;
   const effectiveGrowTime = GROW_TIME_MIN / moonMult;
 
   const elapsed = (now - plant.last_watered) / 60;
 
-  // 1) Creciendo
   if (elapsed < effectiveGrowTime) {
     const progress = Math.floor((elapsed / effectiveGrowTime) * 100);
     return {
@@ -319,9 +449,8 @@ function getPlantStatus(plant) {
     };
   }
 
-  // 2) Desde que quedó lista hasta el final de la ventana perfecta (35 min)
   const elapsedSinceReady = elapsed - effectiveGrowTime;
-  const perfectDuration = PERFECT_WINDOW - GROW_TIME_MIN; // 10 minutos
+  const perfectDuration = PERFECT_WINDOW - GROW_TIME_MIN;
 
   if (elapsedSinceReady <= perfectDuration) {
     return {
@@ -334,8 +463,7 @@ function getPlantStatus(plant) {
     };
   }
 
-  // 3) Marchitándose hasta los 60 min
-  const witheringTotal = ROT_TIME - PERFECT_WINDOW; // 25 minutos
+  const witheringTotal = ROT_TIME - PERFECT_WINDOW;
   const witheringElapsed = elapsedSinceReady - perfectDuration;
 
   if (witheringElapsed <= witheringTotal) {
@@ -351,7 +479,6 @@ function getPlantStatus(plant) {
     };
   }
 
-  // 4) Podrida
   return { status: 'rotten', value: 0, minutesLeft: 0, progress: 0, canRefund: true, moonBoost: moonMult > 1 };
 }
 
@@ -366,13 +493,13 @@ function timeAgo(timestamp) {
 
 function spinRoulette() {
   const random = Math.random() * 100;
-  if (random < 33) return 0;          // 33% pierde
-  else if (random < 78) return 1.1;    // 45% x1.1
-  else if (random < 90) return 2;      // 12% x2
-  else if (random < 95) return 4;      // 5% x4
-  else if (random < 98) return 6;      // 3% x6
-  else if (random < 99) return 8;      // 1% x8
-  else return 10;                       // 1% x10
+  if (random < 33) return 0;
+  else if (random < 78) return 1.1;
+  else if (random < 90) return 2;
+  else if (random < 95) return 4;
+  else if (random < 98) return 6;
+  else if (random < 99) return 8;
+  else return 10;
 }
 
 async function getUser(userId) {
@@ -475,13 +602,13 @@ app.post('/register-user', requireAuth, async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+
 // ==== ENDPOINT: MI WALLET DE DEPÓSITO (protegido) ====
 app.post('/my-deposit-wallet', requireAuth, async (req, res) => {
   const userId = req.userId;
   try {
     const user = await ensureUser(userId);
     
-    // Si ya tiene wallet, devolverla
     if (user.deposit_address) {
       return res.json({ 
         success: true, 
@@ -490,7 +617,6 @@ app.post('/my-deposit-wallet', requireAuth, async (req, res) => {
       });
     }
     
-    // Generar nueva wallet
     console.log('🔐 Generando nueva wallet para user', userId);
     const newWallet = ethers.Wallet.createRandom();
     const encryptedKey = encryptPrivateKey(newWallet.privateKey);
@@ -516,6 +642,80 @@ app.post('/my-deposit-wallet', requireAuth, async (req, res) => {
   }
 });
 
+// ==== ENDPOINT: MOVER DE WALLET AL SALDO DEL JUEGO (protegido) ====
+app.post('/move-to-game', requireAuth, async (req, res) => {
+  const userId = req.userId;
+  const { amount } = req.body;
+  
+  if (!amount || amount <= 0) {
+    return res.status(400).json({ error: 'Cantidad inválida' });
+  }
+  
+  try {
+    const user = await ensureUser(userId);
+    
+    if (!user.deposit_address || !user.deposit_private_key) {
+      return res.status(400).json({ error: 'No tienes wallet personal' });
+    }
+    
+    if (parseFloat(user.wallet_balance || 0) < amount) {
+      return res.status(400).json({ error: 'Saldo insuficiente en wallet' });
+    }
+    
+    // Verificar saldo real on-chain
+    const realBalanceWei = await token.balanceOf(user.deposit_address);
+    const realBalance = parseFloat(ethers.formatUnits(realBalanceWei, 18));
+    
+    if (realBalance < amount) {
+      return res.status(400).json({ error: 'La wallet no tiene fondos suficientes' });
+    }
+    
+    // Enviar BNB para gas si la wallet no tiene
+    const bnbNeeded = ethers.parseEther('0.0003');
+    const bnbBalance = await provider.getBalance(user.deposit_address);
+    
+    if (bnbBalance < bnbNeeded) {
+      console.log('⛽ Enviando BNB para gas a', user.deposit_address);
+      const bnbTx = await wallet.sendTransaction({
+        to: user.deposit_address,
+        value: bnbNeeded
+      });
+      await bnbTx.wait();
+    }
+    
+    // Transferir JHOAL desde la wallet personal a la wallet principal
+    const pk = decryptPrivateKey(user.deposit_private_key);
+    const userSigner = new ethers.Wallet(pk, provider);
+    const userToken = new ethers.Contract(TOKEN_ADDRESS, ABI, userSigner);
+    
+    const amountWei = ethers.parseUnits(amount.toString(), 18);
+    const tx = await userToken.transfer(wallet.address, amountWei);
+    console.log('📤 Mover al juego TX:', tx.hash);
+    
+    await tx.wait();
+    
+    // Actualizar BD
+    const newWalletBalance = parseFloat(user.wallet_balance) - amount;
+    const newGameBalance = parseFloat(user.balance) + amount;
+    
+    await supabase.from('users_balance')
+      .update({ wallet_balance: newWalletBalance, balance: newGameBalance })
+      .eq('user_id', userId);
+    
+    await addHistory(userId, 'deposit', amount, 'Movido al saldo del juego', null, tx.hash);
+    
+    res.json({ 
+      success: true, 
+      txHash: tx.hash,
+      newWalletBalance: newWalletBalance,
+      newGameBalance: newGameBalance,
+      explorer: 'https://bscscan.com/tx/' + tx.hash
+    });
+  } catch (e) {
+    console.error('Error move-to-game:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
 
 // ==== ENDPOINT: RECLAMAR (protegido) ====
 app.post('/claim', requireAuth, async (req, res) => {
@@ -546,10 +746,11 @@ app.post('/claim', requireAuth, async (req, res) => {
 app.get('/balance-game/:userId', requireAuth, async (req, res) => {
   try {
     const user = await getUser(req.userId);
-    if (!user) return res.json({ success: true, balance: 0, total_claimed: 0, total_won: 0, total_lost: 0, last_claim: 0 });
+    if (!user) return res.json({ success: true, balance: 0, wallet_balance: 0, total_claimed: 0, total_won: 0, total_lost: 0, last_claim: 0 });
     res.json({
       success: true,
       balance: parseFloat(user.balance),
+      wallet_balance: parseFloat(user.wallet_balance || 0),
       total_claimed: parseFloat(user.total_claimed || 0),
       total_won: parseFloat(user.total_won || 0),
       total_lost: parseFloat(user.total_lost || 0),
@@ -649,61 +850,6 @@ app.get('/deposit-info', (req, res) => {
   res.json({ success: true, depositWallet: wallet.address, tokenAddress: TOKEN_ADDRESS, minDeposit: 1 });
 });
 
-// ==== ENDPOINT: VERIFICAR DEPÓSITO (protegido) ====
-app.post('/verify-deposit', requireAuth, async (req, res) => {
-  const userId = req.userId;
-  const { txHash } = req.body;
-  if (!txHash) return res.status(400).json({ error: 'Faltan datos' });
-  if (!/^0x[a-fA-F0-9]{64}$/.test(txHash)) return res.status(400).json({ error: 'Hash inválido' });
-
-  try {
-    const { data: existing } = await supabase.from('deposits').select('*').eq('tx_hash', txHash).maybeSingle();
-    if (existing) return res.status(400).json({ error: 'Esta transacción ya fue usada' });
-
-    const tx = await provider.getTransaction(txHash);
-    if (!tx) return res.status(400).json({ error: 'Transacción no encontrada. Espera 1-2 minutos.' });
-
-    const receipt = await provider.getTransactionReceipt(txHash);
-    if (!receipt) return res.status(400).json({ error: 'Transacción no confirmada todavía.' });
-    if (receipt.status !== 1) return res.status(400).json({ error: 'La transacción falló' });
-
-    const transferTopic = ethers.id('Transfer(address,address,uint256)');
-    const transferLog = receipt.logs.find(function(log) {
-      return log.topics[0] === transferTopic && log.address.toLowerCase() === TOKEN_ADDRESS.toLowerCase();
-    });
-
-    if (!transferLog) return res.status(400).json({ error: 'No se encontró transferencia de JHOAL' });
-
-    const iface = new ethers.Interface(['event Transfer(address indexed from, address indexed to, uint256 value)']);
-    const decoded = iface.parseLog(transferLog);
-
-    if (decoded.args.to.toLowerCase() !== wallet.address.toLowerCase()) {
-      return res.status(400).json({ error: 'La transferencia no fue a la wallet correcta' });
-    }
-
-    const amount = parseFloat(ethers.formatUnits(decoded.args.value, 18));
-    if (amount < 1) return res.status(400).json({ error: 'El depósito mínimo es 1 JHOAL' });
-
-    const block = await provider.getBlock(receipt.blockNumber);
-    const now = Math.floor(Date.now() / 1000);
-    if (block && now - block.timestamp > 3600) return res.status(400).json({ error: 'Transacción muy antigua (más de 1 hora)' });
-
-    await supabase.from('deposits').insert({ user_id: userId, wallet: decoded.args.from, amount: amount, tx_hash: txHash, created_at: now });
-
-    const user = await ensureUser(userId);
-    const newBalance = parseFloat(user.balance) + amount;
-    const newDeposited = parseFloat(user.total_deposited || 0) + amount;
-
-    await supabase.from('users_balance').update({ balance: newBalance, total_deposited: newDeposited }).eq('user_id', userId);
-    await addHistory(userId, 'deposit', amount, 'Depósito de JHOAL', null, txHash);
-
-    res.json({ success: true, amount: amount, message: '¡Depositaste ' + amount.toFixed(2) + ' JHOAL!' });
-  } catch (error) {
-    console.error('Error deposit:', error);
-    res.status(500).json({ error: 'Error al verificar: ' + error.message });
-  }
-});
-
 // ==== HUERTO: COMPRAR (protegido) ====
 app.post('/buy-plant', requireAuth, async (req, res) => {
   const userId = req.userId;
@@ -753,8 +899,6 @@ app.post('/water-plant', requireAuth, async (req, res) => {
     const now = Math.floor(Date.now() / 1000);
     const newBalance = parseFloat(user.balance) - level.waterCost;
 
-    // 🌕 Si la Luna Llena está activa, guardamos el multiplicador en la planta.
-    // Así, aunque la luna termine, esa planta sigue creciendo al ritmo iniciado.
     const moonMult = moonState.active ? MOON_GROWTH_MULTIPLIER : 1;
     const effectiveGrowTime = Math.round((GROW_TIME_MIN / moonMult) * 10) / 10;
 
@@ -1142,4 +1286,5 @@ app.listen(process.env.PORT || 3000, () => {
   console.log('Supabase:', SUPABASE_URL ? 'SÍ' : 'NO');
   console.log('Validación initData:', BOT_TOKEN ? 'ACTIVADA' : 'DESACTIVADA (falta BOT_TOKEN)');
   console.log('🌕 Luna Llena: 1-' + MOON_MAX_PER_DAY + ' eventos/día, ' + MOON_DURATION_MIN + ' min c/u, x' + MOON_GROWTH_MULTIPLIER + ' crecimiento');
+  console.log('💾 Monitor de depósitos: ACTIVADO (cada 30s)');
 });
