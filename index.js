@@ -736,14 +736,15 @@ app.post('/move-to-game', requireAuth, async (req, res) => {
     const newGameBalance = parseFloat(user.balance) + amount;
     
     await supabase.from('users_balance')
-      .update({ wallet_balance: newWalletBalance, balance: newGameBalance })
-      .eq('user_id', userId);
-    
-    await addHistory(userId, 'deposit_game', amount, '🎮 Movido al saldo del juego'
-    
-    res.json({ 
-      success: true, 
-      txHash: tx.hash,
+  .update({ wallet_balance: newWalletBalance, balance: newGameBalance })
+  .eq('user_id', userId);
+
+await addHistory(userId, 'deposit_game', amount, '🎮 Movido al saldo del juego', null, tx.hash);
+
+res.json({ 
+  success: true, 
+  txHash: tx.hash,
+  ...
       newWalletBalance: newWalletBalance,
       newGameBalance: newGameBalance,
       explorer: 'https://bscscan.com/tx/' + tx.hash
