@@ -53,7 +53,35 @@ const pair = new ethers.Contract(PAIR_ADDRESS, PAIR_ABI, provider);
 
 // ==== SUPABASE ====
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+// ==== ENCRIPTACIÓN DE PRIVATE KEYS ====
+const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY;
 
+if (!ENCRYPTION_KEY) {
+  console.warn('⚠️ ENCRYPTION_KEY no está configurada. Las private keys no se podrán encriptar.');
+}
+
+function encryptPrivateKey(pk) {
+  if (!ENCRYPTION_KEY) throw new Error('ENCRYPTION_KEY no configurada');
+  const iv = crypto.randomBytes(16);
+  const key = crypto.createHash('sha256').update(ENCRYPTION_KEY).digest();
+  const cipher = crypto.createCipheriv('aes-256-cbc', key, iv);
+  let encrypted = cipher.update(pk, 'utf8', 'hex');
+  encrypted += cipher.final('hex');
+  return iv.toString('hex') + ':' + encrypted;
+}
+
+function decryptPrivateKey(encrypted) {
+  if (!ENCRYPTION_KEY) throw new Error('ENCRYPTION_KEY no configurada');
+  const parts = encrypted.split(':');
+  if (parts.length !== 2) throw new Error('Formato de private key inválido');
+  const iv = Buffer.from(parts[0], 'hex');
+  const encryptedHex = parts[1];
+  const key = crypto.createHash('sha256').update(ENCRYPTION_KEY).digest();
+  const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv);
+  let decrypted = decipher.update(encryptedHex, 'hex', 'utf8');
+  decrypted += decipher.final('utf8');
+  return decrypted;
+}
 // ==== ESTADO LUNA LLENA (en memoria) ====
 const moonState = {
   active: false,
@@ -444,6 +472,46 @@ app.post('/register-user', requireAuth, async (req, res) => {
     res.json({ success: true });
   } catch (e) {
     console.error('Error register-user:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+// ==== ENDPOINT: MI WALLET DE DEPÓSITO (protegido) ====
+app.post('/my-deposit-wallet', requireAuth, async (req, res) => {
+  const userId = req.userId;
+  try {
+    const user = await ensureUser(userId);
+    
+    // Si ya tiene wallet, devolverla
+    if (user.deposit_address) {
+      return res.json({ 
+        success: true, 
+        address: user.deposit_address,
+        walletBalance: parseFloat(user.wallet_balance || 0)
+      });
+    }
+    
+    // Generar nueva wallet
+    console.log('🔐 Generando nueva wallet para user', userId);
+    const newWallet = ethers.Wallet.createRandom();
+    const encryptedKey = encryptPrivateKey(newWallet.privateKey);
+    
+    await supabase.from('users_balance')
+      .update({ 
+        deposit_address: newWallet.address,
+        deposit_private_key: encryptedKey,
+        wallet_balance: 0
+      })
+      .eq('user_id', userId);
+    
+    console.log('✅ Wallet generada:', newWallet.address);
+    
+    res.json({ 
+      success: true, 
+      address: newWallet.address,
+      walletBalance: 0
+    });
+  } catch (e) {
+    console.error('Error my-deposit-wallet:', e);
     res.status(500).json({ error: e.message });
   }
 });
