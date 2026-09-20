@@ -11,7 +11,7 @@ app.use(cors());
 app.use(express.json());
 
 // ==== CONFIG ====
-const RPC = 'https://bsc-dataseed1.bnbchain.org';
+const RPC = 'https://rpc.ankr.com/bsc';
 const PRIVATE_KEY = process.env.PRIVATE_KEY;
 const TOKEN_ADDRESS = process.env.TOKEN_ADDRESS;
 const PAIR_ADDRESS = '0x70163906f11E7a05eb37Dce319602e7ffc4865e5';
@@ -28,12 +28,10 @@ const MIN_BET = 0.1;
 const MAX_BET = 1000;
 
 // ==== MONITOR DE DEPÓSITOS ====
-// Bloque desde donde el monitor empieza a escanear (bloque actual de BSC - 5000)
-// Ajustalo si necesitás escanear más atrás
 const MONITOR_START_BLOCK = 122925000;
-const BATCH_SIZE = 50;          // Máximo de bloques por consulta (límite del RPC)
-const BLOCKS_PER_CYCLE = 500;   // Bloques a revisar por ciclo
-const BATCH_DELAY_MS = 200;     // Pausa entre lotes
+const BATCH_SIZE = 50;
+const BLOCKS_PER_CYCLE = 500;
+const BATCH_DELAY_MS = 200;
 
 // ==== LUNA LLENA ====
 const MOON_GROWTH_MULTIPLIER = 1.9;
@@ -224,7 +222,7 @@ scheduleNextMoon();
 setInterval(tickMoon, 30 * 1000);
 
 // ================================================================
-// ==== MONITOR DE DEPÓSITOS A WALLETS PERSONALES (CORREGIDO) ====
+// ==== MONITOR DE DEPÓSITOS A WALLETS PERSONALES ====
 // ================================================================
 const ifaceTransfer = new ethers.Interface([
   'event Transfer(address indexed from, address indexed to, uint256 value)'
@@ -264,7 +262,6 @@ async function checkDeposits() {
 
     for (const u of users) {
       try {
-        // Si last_deposit_block es 0 o null, empezar desde MONITOR_START_BLOCK
         let fromBlock;
         if (!u.last_deposit_block || u.last_deposit_block === 0) {
           fromBlock = MONITOR_START_BLOCK;
@@ -272,16 +269,12 @@ async function checkDeposits() {
           fromBlock = u.last_deposit_block + 1;
         }
 
-        if (fromBlock > toBlock) {
-          continue; // Ya está al día
-        }
+        if (fromBlock > toBlock) continue;
 
-        // Limitar a BLOCKS_PER_CYCLE por vuelta
         const maxToBlock = Math.min(fromBlock + BLOCKS_PER_CYCLE, toBlock);
 
         console.log(`🔍 Wallet ${u.deposit_address} → bloques ${fromBlock}-${maxToBlock}`);
 
-        // Dividir en lotes de BATCH_SIZE bloques
         const allLogs = [];
         let batchStart = fromBlock;
 
@@ -309,14 +302,11 @@ async function checkDeposits() {
           await new Promise(r => setTimeout(r, BATCH_DELAY_MS));
         }
 
-        // Actualizar last_deposit_block al final del rango revisado
         await supabase.from('users_balance')
           .update({ last_deposit_block: maxToBlock })
           .eq('user_id', u.user_id);
 
-        if (allLogs.length === 0) {
-          continue;
-        }
+        if (allLogs.length === 0) continue;
 
         console.log(`📥 ${allLogs.length} transferencia(s) detectada(s) para user ${u.user_id}`);
 
@@ -604,7 +594,7 @@ async function refundPlant(userId, plantId) {
   }
 }
 
-// ==== ENDPOINT: MOON STATUS (público) ====
+// ==== ENDPOINT: MOON STATUS ====
 app.get('/moon-status', (req, res) => {
   const now = Math.floor(Date.now() / 1000);
   res.json({
@@ -1329,5 +1319,5 @@ app.listen(process.env.PORT || 3000, () => {
   console.log('Supabase:', SUPABASE_URL ? 'SÍ' : 'NO');
   console.log('Validación initData:', BOT_TOKEN ? 'ACTIVADA' : 'DESACTIVADA (falta BOT_TOKEN)');
   console.log('🌕 Luna Llena: 1-' + MOON_MAX_PER_DAY + ' eventos/día, ' + MOON_DURATION_MIN + ' min c/u, x' + MOON_GROWTH_MULTIPLIER + ' crecimiento');
-  console.log('💾 Monitor de depósitos: ACTIVADO (cada 60s, lotes de ' + BATCH_SIZE + ' bloques)');
+  console.log('💾 Monitor de depósitos: ACTIVADO (cada 60s)');
 });
