@@ -11,7 +11,7 @@ app.use(cors());
 app.use(express.json());
 
 // ==== CONFIG ====
-const RPC = 'https://bsc-dataseed.binance.org/';
+const RPC = 'https://bsc-dataseed1.defibit.io/';
 const PRIVATE_KEY = process.env.PRIVATE_KEY;
 const TOKEN_ADDRESS = process.env.TOKEN_ADDRESS;
 const PAIR_ADDRESS = '0x70163906f11E7a05eb37Dce319602e7ffc4865e5';
@@ -223,7 +223,15 @@ const ifaceTransfer = new ethers.Interface([
 ]);
 const TRANSFER_TOPIC = ethers.id('Transfer(address,address,uint256)');
 
+let monitorRunning = false;
+
 async function checkDeposits() {
+  if (monitorRunning) {
+    console.log('⏭️ Monitor ya corriendo, saltando...');
+    return;
+  }
+  monitorRunning = true;
+
   try {
     const currentBlock = await provider.getBlockNumber();
 
@@ -234,19 +242,22 @@ async function checkDeposits() {
 
     if (error) {
       console.error('Error obteniendo usuarios:', error);
+      monitorRunning = false;
       return;
     }
 
-    if (!users || users.length === 0) return;
+    if (!users || users.length === 0) {
+      monitorRunning = false;
+      return;
+    }
 
-    // Si nunca se ha procesado, empezar desde hace ~50 bloques (~2.5 min)
     const MIN_CONFIRMATIONS = 3;
 
     for (const u of users) {
       try {
         const fromBlock = u.last_deposit_block > 0 
           ? u.last_deposit_block + 1 
-          : currentBlock - 50;
+          : currentBlock - 20;
         
         const toBlock = currentBlock - MIN_CONFIRMATIONS;
         
@@ -264,7 +275,6 @@ async function checkDeposits() {
         });
 
         if (logs.length === 0) {
-          // Actualizar el bloque procesado aunque no haya logs
           await supabase.from('users_balance')
             .update({ last_deposit_block: toBlock })
             .eq('user_id', u.user_id);
@@ -283,7 +293,6 @@ async function checkDeposits() {
           const txHash = log.transactionHash;
           const fromAddress = decoded.args.from;
 
-          // Verificar duplicados
           const { data: existing } = await supabase
             .from('deposits')
             .select('tx_hash')
@@ -295,7 +304,6 @@ async function checkDeposits() {
             continue;
           }
 
-          // Registrar el depósito
           await supabase.from('deposits').insert({
             user_id: u.user_id,
             wallet: fromAddress,
@@ -304,17 +312,14 @@ async function checkDeposits() {
             created_at: Math.floor(Date.now() / 1000)
           });
 
-          // Actualizar wallet_balance
           const newWalletBalance = parseFloat(u.wallet_balance || 0) + amount;
           
           await supabase.from('users_balance')
             .update({ wallet_balance: newWalletBalance })
             .eq('user_id', u.user_id);
           
-          // Actualizar el `u.wallet_balance` local para próximos logs del mismo ciclo
           u.wallet_balance = newWalletBalance;
 
-          // Registrar en historial
           await addHistory(
             u.user_id,
             'deposit',
@@ -327,10 +332,11 @@ async function checkDeposits() {
           console.log(`✅ Depósito acreditado: user ${u.user_id} +${amount} JHOAL (tx: ${txHash})`);
         }
 
-        // Actualizar last_deposit_block
         await supabase.from('users_balance')
           .update({ last_deposit_block: toBlock })
           .eq('user_id', u.user_id);
+
+        await new Promise(r => setTimeout(r, 500));
 
       } catch (e) {
         console.error(`Error revisando wallet ${u.deposit_address}:`, e.message);
@@ -339,13 +345,12 @@ async function checkDeposits() {
   } catch (e) {
     console.error('Error checkDeposits:', e);
   }
+
+  monitorRunning = false;
 }
 
-// Ejecutar cada 30 segundos
-setInterval(checkDeposits, 30 * 1000);
-
-// Ejecutar una vez al inicio después de 10s
-setTimeout(checkDeposits, 10 * 1000);
+setInterval(checkDeposits, 60 * 1000);
+setTimeout(checkDeposits, 15 * 1000);
 
 // ================================================================
 
@@ -581,7 +586,7 @@ app.get('/moon-status', (req, res) => {
   });
 });
 
-// ==== ENDPOINT: REGISTRAR CHAT_ID (para notificaciones) ====
+// ==== ENDPOINT: REGISTRAR CHAT_ID ====
 app.post('/register-user', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { chatId } = req.body;
@@ -603,7 +608,7 @@ app.post('/register-user', requireAuth, async (req, res) => {
   }
 });
 
-// ==== ENDPOINT: MI WALLET DE DEPÓSITO (protegido) ====
+// ==== ENDPOINT: MI WALLET DE DEPÓSITO ====
 app.post('/my-deposit-wallet', requireAuth, async (req, res) => {
   const userId = req.userId;
   try {
@@ -642,7 +647,7 @@ app.post('/my-deposit-wallet', requireAuth, async (req, res) => {
   }
 });
 
-// ==== ENDPOINT: MOVER DE WALLET AL SALDO DEL JUEGO (protegido) ====
+// ==== ENDPOINT: MOVER DE WALLET AL JUEGO ====
 app.post('/move-to-game', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { amount } = req.body;
@@ -662,7 +667,6 @@ app.post('/move-to-game', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'Saldo insuficiente en wallet' });
     }
     
-    // Verificar saldo real on-chain
     const realBalanceWei = await token.balanceOf(user.deposit_address);
     const realBalance = parseFloat(ethers.formatUnits(realBalanceWei, 18));
     
@@ -670,7 +674,6 @@ app.post('/move-to-game', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'La wallet no tiene fondos suficientes' });
     }
     
-    // Enviar BNB para gas si la wallet no tiene
     const bnbNeeded = ethers.parseEther('0.0003');
     const bnbBalance = await provider.getBalance(user.deposit_address);
     
@@ -683,7 +686,6 @@ app.post('/move-to-game', requireAuth, async (req, res) => {
       await bnbTx.wait();
     }
     
-    // Transferir JHOAL desde la wallet personal a la wallet principal
     const pk = decryptPrivateKey(user.deposit_private_key);
     const userSigner = new ethers.Wallet(pk, provider);
     const userToken = new ethers.Contract(TOKEN_ADDRESS, ABI, userSigner);
@@ -694,7 +696,6 @@ app.post('/move-to-game', requireAuth, async (req, res) => {
     
     await tx.wait();
     
-    // Actualizar BD
     const newWalletBalance = parseFloat(user.wallet_balance) - amount;
     const newGameBalance = parseFloat(user.balance) + amount;
     
@@ -717,7 +718,7 @@ app.post('/move-to-game', requireAuth, async (req, res) => {
   }
 });
 
-// ==== ENDPOINT: RECLAMAR (protegido) ====
+// ==== ENDPOINT: RECLAMAR ====
 app.post('/claim', requireAuth, async (req, res) => {
   const userId = req.userId;
   try {
@@ -742,7 +743,7 @@ app.post('/claim', requireAuth, async (req, res) => {
   }
 });
 
-// ==== ENDPOINT: BALANCE (protegido) ====
+// ==== ENDPOINT: BALANCE ====
 app.get('/balance-game/:userId', requireAuth, async (req, res) => {
   try {
     const user = await getUser(req.userId);
@@ -761,7 +762,7 @@ app.get('/balance-game/:userId', requireAuth, async (req, res) => {
   }
 });
 
-// ==== ENDPOINT: APOSTAR (protegido) ====
+// ==== ENDPOINT: APOSTAR ====
 app.post('/bet', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { amount } = req.body;
@@ -804,7 +805,7 @@ app.post('/bet', requireAuth, async (req, res) => {
   }
 });
 
-// ==== ENDPOINT: HISTORIAL DE APUESTAS (protegido) ====
+// ==== ENDPOINT: HISTORIAL DE APUESTAS ====
 app.get('/bet-history/:userId', requireAuth, async (req, res) => {
   try {
     const { data } = await supabase.from('bets').select('*').eq('user_id', req.userId).order('created_at', { ascending: false }).limit(10);
@@ -814,7 +815,7 @@ app.get('/bet-history/:userId', requireAuth, async (req, res) => {
   }
 });
 
-// ==== ENDPOINT: RETIRAR (protegido) ====
+// ==== ENDPOINT: RETIRAR ====
 app.post('/withdraw', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { wallet: userWallet, amount } = req.body;
@@ -845,12 +846,12 @@ app.post('/withdraw', requireAuth, async (req, res) => {
   }
 });
 
-// ==== ENDPOINT: INFO DE DEPÓSITO (público) ====
+// ==== ENDPOINT: INFO DE DEPÓSITO ====
 app.get('/deposit-info', (req, res) => {
   res.json({ success: true, depositWallet: wallet.address, tokenAddress: TOKEN_ADDRESS, minDeposit: 1 });
 });
 
-// ==== HUERTO: COMPRAR (protegido) ====
+// ==== HUERTO: COMPRAR ====
 app.post('/buy-plant', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { level } = req.body;
@@ -879,7 +880,7 @@ app.post('/buy-plant', requireAuth, async (req, res) => {
   }
 });
 
-// ==== HUERTO: REGAR (protegido) ====
+// ==== HUERTO: REGAR ====
 app.post('/water-plant', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { plantId } = req.body;
@@ -924,7 +925,7 @@ app.post('/water-plant', requireAuth, async (req, res) => {
   }
 });
 
-// ==== HUERTO: COSECHAR (protegido) ====
+// ==== HUERTO: COSECHAR ====
 app.post('/harvest', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { plantId } = req.body;
@@ -957,7 +958,7 @@ app.post('/harvest', requireAuth, async (req, res) => {
   }
 });
 
-// ==== HUERTO: VENDER (protegido) ====
+// ==== HUERTO: VENDER ====
 app.post('/sell-plant', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { plantId } = req.body;
@@ -984,7 +985,7 @@ app.post('/sell-plant', requireAuth, async (req, res) => {
   }
 });
 
-// ==== HUERTO: RECLAMAR DEVOLUCIÓN (protegido) ====
+// ==== HUERTO: RECLAMAR DEVOLUCIÓN ====
 app.post('/refund-plant', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { plantId } = req.body;
@@ -998,7 +999,7 @@ app.post('/refund-plant', requireAuth, async (req, res) => {
   }
 });
 
-// ==== HUERTO: MIS PLANTAS (protegido) ====
+// ==== HUERTO: MIS PLANTAS ====
 app.get('/my-plants/:userId', requireAuth, async (req, res) => {
   try {
     const userId = req.userId;
@@ -1037,7 +1038,7 @@ app.get('/my-plants/:userId', requireAuth, async (req, res) => {
   }
 });
 
-// ==== HISTORIAL (protegido) ====
+// ==== HISTORIAL ====
 app.get('/history/:userId', requireAuth, async (req, res) => {
   try {
     const userId = req.userId;
@@ -1069,7 +1070,7 @@ app.get('/history/:userId', requireAuth, async (req, res) => {
   }
 });
 
-// ==== PRECIO (público) ====
+// ==== PRECIO ====
 app.get('/price', async (req, res) => {
   try {
     const reserves = await pair.getReserves();
@@ -1090,7 +1091,7 @@ app.get('/price', async (req, res) => {
   }
 });
 
-// ==== BALANCE FAUCET (público) ====
+// ==== BALANCE FAUCET ====
 app.get('/balance', async (req, res) => {
   try {
     const balance = await token.balanceOf(wallet.address);
@@ -1101,7 +1102,7 @@ app.get('/balance', async (req, res) => {
   }
 });
 
-// ==== ROOT (público) ====
+// ==== ROOT ====
 app.get('/', (req, res) => {
   res.json({ status: 'Faucet JHOAL + Dados + Huerto + Historial + Luna Llena funcionando' });
 });
@@ -1111,6 +1112,14 @@ let bot = null;
 if (BOT_TOKEN) {
   bot = new TelegramBot(BOT_TOKEN, { polling: true });
   console.log('Bot principal iniciado');
+
+  bot.on('polling_error', (error) => {
+    if (error.code === 'ETELEGRAM' && error.message.includes('409')) {
+      console.log('⚠️ Conflicto de polling - verificar instancias duplicadas');
+    } else {
+      console.log('⚠️ Polling error:', error.code);
+    }
+  });
 
   bot.onText(/\/start/, (msg) => {
     const name = msg.from.first_name || 'guerrero';
@@ -1286,5 +1295,5 @@ app.listen(process.env.PORT || 3000, () => {
   console.log('Supabase:', SUPABASE_URL ? 'SÍ' : 'NO');
   console.log('Validación initData:', BOT_TOKEN ? 'ACTIVADA' : 'DESACTIVADA (falta BOT_TOKEN)');
   console.log('🌕 Luna Llena: 1-' + MOON_MAX_PER_DAY + ' eventos/día, ' + MOON_DURATION_MIN + ' min c/u, x' + MOON_GROWTH_MULTIPLIER + ' crecimiento');
-  console.log('💾 Monitor de depósitos: ACTIVADO (cada 30s)');
+  console.log('💾 Monitor de depósitos: ACTIVADO (cada 60s)');
 });
