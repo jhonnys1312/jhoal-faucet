@@ -542,8 +542,8 @@ function timeAgo(timestamp) {
 
 function spinRoulette() {
   const random = Math.random() * 100;
-  if (random < 33) return 0;
-  else if (random < 78) return 1.1;
+  if (random < 37) return 0;
+  else if (random < 82) return 1.1;
   else if (random < 90) return 2;
   else if (random < 95) return 4;
   else if (random < 98) return 6;
