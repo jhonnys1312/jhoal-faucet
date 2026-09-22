@@ -65,6 +65,10 @@ const MOON_DURATION_MIN = 10;
 const MOON_MIN_PER_DAY = 1;
 const MOON_MAX_PER_DAY = 5;
 
+// ==== ADSGRAM ====
+const AD_REWARD_AMOUNT = 5;
+const AD_COOLDOWN = 10 * 60;
+
 const provider = new ethers.JsonRpcProvider(RPC_LIST[0]);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 
@@ -347,17 +351,8 @@ function getPlantStatus(plant) {
   const lifetimeLeft = PLANT_LIFETIME_SECONDS - ageSeconds;
   const daysLeft = Math.max(0, Math.ceil(lifetimeLeft / 86400));
 
-  // 💀 EXPIRADA (30 días) — ciclo cumplido, SIN reembolso
   if (lifetimeLeft <= 0) {
-    return {
-      status: 'expired',
-      value: 0,
-      minutesLeft: 0,
-      progress: 0,
-      canRefund: false,
-      daysLeft: 0,
-      expiresAt: createdAt + PLANT_LIFETIME_SECONDS
-    };
+    return { status: 'expired', value: 0, minutesLeft: 0, progress: 0, canRefund: false, daysLeft: 0, expiresAt: createdAt + PLANT_LIFETIME_SECONDS };
   }
 
   if (plant.status === 'dry' || !plant.last_watered) {
@@ -436,7 +431,7 @@ async function addHistory(userId, type, amount, description, metadata, txHash) {
   } catch (e) { console.error('Error history:', e); }
 }
 
-// 🔄 Reembolso SOLO si está podrida (rotten) → 90% del riego
+// 🔄 Reembolso 90% del riego (solo si está podrida)
 async function refundPlant(userId, plantId) {
   try {
     const { data: plant } = await supabase.from('plants').select('*').eq('id', plantId).eq('user_id', userId).maybeSingle();
@@ -466,18 +461,12 @@ async function cleanupExpiredPlants() {
   try {
     const now = Math.floor(Date.now() / 1000);
     const limiteExpiracion = now - PLANT_LIFETIME_SECONDS;
-
-    // 1. Buscar todas las plantas que ya expiraron
     const { data: expiradas } = await supabase
       .from('plants')
       .select('id, user_id, level, created_at')
       .lt('created_at', limiteExpiracion);
-
     if (!expiradas || expiradas.length === 0) return;
-
     console.log(`🧹 ${expiradas.length} plantas expiradas detectadas`);
-
-    // 2. Por cada una, dejar nota en el historial
     for (const p of expiradas) {
       const level = PLANT_LEVELS[p.level];
       const nombreNivel = level ? level.name : p.level;
@@ -491,8 +480,6 @@ async function cleanupExpiredPlants() {
         created_at: now
       });
     }
-
-    // 3. Borrar las plantas expiradas
     const ids = expiradas.map(p => p.id);
     await supabase.from('plants').delete().in('id', ids);
     console.log(`🧹 ${expiradas.length} plantas eliminadas (espacios libres)`);
@@ -518,6 +505,7 @@ async function cleanupOldPlants() {
     console.error('Error cleanupOldPlants:', e);
   }
 }
+
 // ==== ENDPOINTS ====
 app.get('/moon-status', (req, res) => {
   const now = Math.floor(Date.now() / 1000);
@@ -618,6 +606,53 @@ app.post('/claim', requireAuth, async (req, res) => {
     res.json({ success: true, amount: 1, message: '¡1 JHOAL añadido a tu saldo!' });
   } catch (error) {
     res.status(500).json({ error: 'Error: ' + error.message });
+  }
+});
+
+// ==== RECOMPENSA POR VER ANUNCIO (MANUAL desde el botón) ====
+app.post('/claim-ad-reward-manual', requireAuth, async (req, res) => {
+  const userId = req.userId;
+  try {
+    const user = await ensureUser(userId);
+    const now = Math.floor(Date.now() / 1000);
+    const lastAdReward = user.last_ad_reward || 0;
+    if (now - lastAdReward < AD_COOLDOWN) {
+      const restante = AD_COOLDOWN - (now - lastAdReward);
+      return res.status(429).json({ error: 'Espera ' + Math.ceil(restante / 60) + ' min para ver otro anuncio' });
+    }
+    const newBalance = parseFloat(user.balance) + AD_REWARD_AMOUNT;
+    await supabase.from('users_balance').update({ balance: newBalance, last_ad_reward: now }).eq('user_id', userId);
+    await addHistory(userId, 'ad_reward', AD_REWARD_AMOUNT, '📺 Recompensa por ver anuncio', null, null);
+    res.json({ success: true, amount: AD_REWARD_AMOUNT, newBalance });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ==== WEBHOOK ADSGRAM (GET) — AdsGram lo llama cuando ve el anuncio ====
+app.get('/claim-ad-reward', async (req, res) => {
+  try {
+    const userId = req.query.userId;
+    if (!userId) return res.status(400).json({ error: 'Falta userId' });
+
+    const user = await ensureUser(userId);
+    const now = Math.floor(Date.now() / 1000);
+    const lastAdReward = user.last_ad_reward || 0;
+
+    if (now - lastAdReward < AD_COOLDOWN) {
+      console.log(`⚠️ AdsGram: user ${userId} en cooldown`);
+      return res.json({ success: true, message: 'Cooldown activo' });
+    }
+
+    const newBalance = parseFloat(user.balance) + AD_REWARD_AMOUNT;
+    await supabase.from('users_balance').update({ balance: newBalance, last_ad_reward: now }).eq('user_id', userId);
+    await addHistory(userId, 'ad_reward', AD_REWARD_AMOUNT, '📺 Recompensa por ver anuncio (AdsGram)', null, null);
+
+    console.log(`✅ AdsGram: user ${userId} +${AD_REWARD_AMOUNT} JHOAL`);
+    res.json({ success: true, amount: AD_REWARD_AMOUNT, newBalance });
+  } catch (e) {
+    console.error('Error claim-ad-reward AdsGram:', e);
+    res.status(500).json({ error: e.message });
   }
 });
 
@@ -799,12 +834,10 @@ app.post('/sell-plant', requireAuth, async (req, res) => {
     if (!plant) return res.status(400).json({ error: 'Planta no encontrada' });
     const level = PLANT_LEVELS[plant.level];
     if (!level.canSell) return res.status(400).json({ error: '❌ La planta ' + level.name + ' no se puede vender.' });
-
     const sellValue = getSellPrice(plant);
     if (sellValue <= 0) {
       return res.status(400).json({ error: 'La planta ya no tiene valor de venta. Dejala cumplir su ciclo.' });
     }
-
     const user = await ensureUser(userId);
     const newBalance = parseFloat(user.balance) + sellValue;
     await supabase.from('users_balance').update({ balance: newBalance }).eq('user_id', userId);
@@ -844,7 +877,7 @@ app.get('/my-plants/:userId', requireAuth, async (req, res) => {
         status: status.status, value: status.value,
         minutesLeft: status.minutesLeft || 0, progress: status.progress || 0,
         waterCost: level.waterCost, fruitValue: level.fruitValue,
-        sellPrice: sellValue, // 💰 precio decreciente
+        sellPrice: sellValue,
         canSell: level.canSell && sellValue > 0,
         lastWatered: p.last_watered,
         canRefund: status.canRefund || false,
@@ -939,7 +972,7 @@ app.get('/huerto-warning', (req, res) => {
 });
 
 app.get('/', (req, res) => {
-  res.json({ status: 'Faucet JHOAL + Dados + Huerto + Historial + Luna Llena funcionando' });
+  res.json({ status: 'Faucet JHOAL + Dados + Huerto + Historial + Luna Llena + AdsGram funcionando' });
 });
 
 // ==== BOT PRINCIPAL ====
@@ -962,6 +995,7 @@ if (BOT_TOKEN) {
       '⚱ *JHOAL - La ofrenda del dios* 🦅\n\n' +
       '¡Bienvenido, ' + name + '!\n\n' +
       '💰 Reclama *1 JHOAL GRATIS* cada 30 minutos\n' +
+      '📺 Mirá anuncios y ganá *5 JHOAL extra*\n' +
       '🎲 Juega en *Los Dados de Horus*\n' +
       '🌱 Planta en el *Huerto de Horus*\n' +
       '🌕 Atento a la *Luna Llena*\n' +
@@ -1052,14 +1086,11 @@ app.listen(process.env.PORT || 3000, () => {
   console.log('🌕 Luna Llena: x' + MOON_GROWTH_MULTIPLIER);
   console.log('🌱 Plantas duran ' + PLANT_LIFETIME_DAYS + ' días');
   console.log('📉 Venta decreciente: 100% día 0 → 0% día 30');
+  console.log('📺 AdsGram: +' + AD_REWARD_AMOUNT + ' JHOAL cada ' + (AD_COOLDOWN/60) + ' min');
   console.log('🧹 Limpieza automática de plantas: ACTIVADA');
 
-  // Limpieza inicial
   cleanupOldPlants();
   cleanupExpiredPlants();
-
-  // Cada 1 hora: limpiar plantas expiradas
   setInterval(cleanupExpiredPlants, 60 * 60 * 1000);
-  // Cada 6 horas: limpiar plantas viejas sin created_at (por si acaso)
   setInterval(cleanupOldPlants, 6 * 60 * 60 * 1000);
 });
