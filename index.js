@@ -659,7 +659,7 @@ app.get('/claim-ad-reward', async (req, res) => {
 app.get('/balance-game/:userId', requireAuth, async (req, res) => {
   try {
     const user = await getUser(req.userId);
-    if (!user) return res.json({ success: true, balance: 0, wallet_balance: 0, total_claimed: 0, total_won: 0, total_lost: 0, last_claim: 0 });
+    if (!user) return res.json({ success: true, balance: 0, wallet_balance: 0, total_claimed: 0, total_won: 0, total_lost: 0, last_claim: 0, last_ad_reward: 0 });
     res.json({
       success: true,
       balance: parseFloat(user.balance),
@@ -667,7 +667,8 @@ app.get('/balance-game/:userId', requireAuth, async (req, res) => {
       total_claimed: parseFloat(user.total_claimed || 0),
       total_won: parseFloat(user.total_won || 0),
       total_lost: parseFloat(user.total_lost || 0),
-      last_claim: user.last_claim || 0
+      last_claim: user.last_claim || 0,
+      last_ad_reward: user.last_ad_reward || 0
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
