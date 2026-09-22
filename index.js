@@ -14,7 +14,6 @@ app.use(express.json());
 const RPC_LIST = [
   'https://bsc-mainnet.nodereal.io/v1/05f8075daa504e9e97eab50c590ae8a2'
 ];
-// ==== PROVIDER CON FALLBACK ====
 let currentProvider = null;
 
 async function getProvider() {
@@ -27,8 +26,6 @@ async function getProvider() {
       currentProvider = null;
     }
   }
-  
-  // Probar cada RPC de la lista
   for (const rpc of RPC_LIST) {
     try {
       const testProvider = new ethers.JsonRpcProvider(rpc);
@@ -40,7 +37,6 @@ async function getProvider() {
       console.log('❌ RPC falló:', rpc);
     }
   }
-  
   throw new Error('Ningún RPC funciona');
 }
 const PRIVATE_KEY = process.env.PRIVATE_KEY;
@@ -92,7 +88,6 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 // ==== ENCRIPTACIÓN ====
 const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY;
-
 if (!ENCRYPTION_KEY) {
   console.warn('⚠️ ENCRYPTION_KEY no está configurada.');
 }
@@ -146,24 +141,20 @@ function scheduleNextMoon() {
     moonState.todayKey = key;
     moonState.eventsToday = 0;
   }
-
   if (moonState.eventsToday >= MOON_MAX_PER_DAY) {
     const tomorrow = new Date();
     tomorrow.setUTCHours(24, 0, 0, 0);
     moonState.nextEventAt = Math.floor(tomorrow.getTime() / 1000) + randInt(0, 3600);
     return;
   }
-
   const remainingMin = MOON_MIN_PER_DAY - moonState.eventsToday;
   const hoursLeftToday = 24 - new Date().getUTCHours();
-
   let delay;
   if (remainingMin > 0 && hoursLeftToday <= remainingMin) {
     delay = randInt(60, 1800);
   } else {
     delay = randInt(1800, 5 * 3600);
   }
-
   moonState.nextEventAt = now + delay;
 }
 
@@ -184,11 +175,8 @@ async function notificarLunaLlena() {
       .from('users_balance')
       .select('chat_id')
       .not('chat_id', 'is', null);
-
     if (!usuarios || usuarios.length === 0) return;
-
     console.log('🌕 Notificando a', usuarios.length, 'usuarios');
-
     for (const u of usuarios) {
       try {
         await bot.sendMessage(
@@ -227,12 +215,10 @@ function tickMoon() {
     moonState.todayKey = key;
     moonState.eventsToday = 0;
   }
-
   if (moonState.active && now >= moonState.endsAt) {
     deactivateMoon();
     return;
   }
-
   if (!moonState.active && moonState.nextEventAt > 0 && now >= moonState.nextEventAt) {
     activateMoon();
   }
@@ -258,29 +244,23 @@ async function checkDeposits() {
     return;
   }
   monitorRunning = true;
-
   try {
     const currentBlock = await provider.getBlockNumber();
-
     const { data: users, error } = await supabase
       .from('users_balance')
       .select('user_id, deposit_address, wallet_balance, last_deposit_block')
       .not('deposit_address', 'is', null);
-
     if (error) {
       console.error('Error obteniendo usuarios:', error);
       monitorRunning = false;
       return;
     }
-
     if (!users || users.length === 0) {
       monitorRunning = false;
       return;
     }
-
     const MIN_CONFIRMATIONS = 3;
     const toBlock = currentBlock - MIN_CONFIRMATIONS;
-
     for (const u of users) {
       try {
         let fromBlock;
@@ -289,19 +269,13 @@ async function checkDeposits() {
         } else {
           fromBlock = u.last_deposit_block + 1;
         }
-
         if (fromBlock > toBlock) continue;
-
         const maxToBlock = Math.min(fromBlock + BLOCKS_PER_CYCLE, toBlock);
-
         console.log(`🔍 Wallet ${u.deposit_address} → bloques ${fromBlock}-${maxToBlock}`);
-
         const allLogs = [];
         let batchStart = fromBlock;
-
         while (batchStart <= maxToBlock) {
           const batchEnd = Math.min(batchStart + BATCH_SIZE - 1, maxToBlock);
-
           try {
             const batchLogs = await provider.getLogs({
               address: TOKEN_ADDRESS,
@@ -313,45 +287,32 @@ async function checkDeposits() {
               fromBlock: batchStart,
               toBlock: batchEnd
             });
-
             allLogs.push(...batchLogs);
           } catch (batchErr) {
             console.error(`Error en lote ${batchStart}-${batchEnd}:`, batchErr.message);
           }
-
           batchStart = batchEnd + 1;
           await new Promise(r => setTimeout(r, BATCH_DELAY_MS));
         }
-
         await supabase.from('users_balance')
           .update({ last_deposit_block: maxToBlock })
           .eq('user_id', u.user_id);
-
         if (allLogs.length === 0) continue;
-
         console.log(`📥 ${allLogs.length} transferencia(s) detectada(s) para user ${u.user_id}`);
-
         for (const log of allLogs) {
-          const decoded = ifaceTransfer.parseLog({
-            topics: log.topics,
-            data: log.data
-          });
-
+          const decoded = ifaceTransfer.parseLog({ topics: log.topics, data: log.data });
           const amount = parseFloat(ethers.formatUnits(decoded.args.value, 18));
           const txHash = log.transactionHash;
           const fromAddress = decoded.args.from;
-
           const { data: existing } = await supabase
             .from('deposits')
             .select('tx_hash')
             .eq('tx_hash', txHash)
             .maybeSingle();
-
           if (existing) {
             console.log(`⏭️ Depósito duplicado ignorado: ${txHash}`);
             continue;
           }
-
           await supabase.from('deposits').insert({
             user_id: u.user_id,
             wallet: fromAddress,
@@ -359,29 +320,15 @@ async function checkDeposits() {
             tx_hash: txHash,
             created_at: Math.floor(Date.now() / 1000)
           });
-
           const newWalletBalance = parseFloat(u.wallet_balance || 0) + amount;
-
           await supabase.from('users_balance')
             .update({ wallet_balance: newWalletBalance })
             .eq('user_id', u.user_id);
-
           u.wallet_balance = newWalletBalance;
-
-          await addHistory(
-            u.user_id,
-            'deposit',
-            amount,
-            '💵 Depósito a wallet personal',
-            null,
-            txHash
-          );
-
+          await addHistory(u.user_id, 'deposit', amount, '💵 Depósito a wallet personal', null, txHash);
           console.log(`✅ Depósito acreditado: user ${u.user_id} +${amount} JHOAL (tx: ${txHash})`);
         }
-
         await new Promise(r => setTimeout(r, 500));
-
       } catch (e) {
         console.error(`Error revisando wallet ${u.deposit_address}:`, e.message);
       }
@@ -389,7 +336,6 @@ async function checkDeposits() {
   } catch (e) {
     console.error('Error checkDeposits:', e);
   }
-
   monitorRunning = false;
 }
 
@@ -406,30 +352,18 @@ function validateInitData(initData) {
     const hash = params.get('hash');
     if (!hash) return null;
     params.delete('hash');
-
     const dataCheckArr = [];
     for (const [key, value] of params.entries()) {
       dataCheckArr.push(key + '=' + value);
     }
     dataCheckArr.sort();
     const dataCheckString = dataCheckArr.join('\n');
-
-    const secretKey = crypto
-      .createHmac('sha256', 'WebAppData')
-      .update(BOT_TOKEN)
-      .digest();
-
-    const calculatedHash = crypto
-      .createHmac('sha256', secretKey)
-      .update(dataCheckString)
-      .digest('hex');
-
+    const secretKey = crypto.createHmac('sha256', 'WebAppData').update(BOT_TOKEN).digest();
+    const calculatedHash = crypto.createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
     if (calculatedHash !== hash) return null;
-
     const authDate = parseInt(params.get('auth_date') || '0');
     const now = Math.floor(Date.now() / 1000);
     if (now - authDate > 86400) return null;
-
     const userJson = params.get('user');
     if (!userJson) return null;
     const userObj = JSON.parse(userJson);
@@ -443,26 +377,23 @@ function validateInitData(initData) {
 function requireAuth(req, res, next) {
   const initData = req.body.initData || req.headers['x-init-data'] || req.query.initData;
   const verifiedUserId = validateInitData(initData);
-
   if (!verifiedUserId) {
     return res.status(401).json({ error: 'No autorizado: initData inválido o expirado' });
   }
-
   const claimedUserId = req.body.userId || req.params.userId;
   if (claimedUserId && String(claimedUserId) !== String(verifiedUserId)) {
     return res.status(401).json({ error: 'No autorizado: userId no coincide' });
   }
-
   req.userId = verifiedUserId;
   next();
 }
 
 // ==== HUERTO ====
 const PLANT_LEVELS = {
-  basic: { name: 'Básica', emoji: '🌱', price: 10, waterCost: 1, fruitValue: 1.5, sellPrice: 9 },
-  medium: { name: 'Media', emoji: '🌿', price: 50, waterCost: 5, fruitValue: 7.5, sellPrice: 45 },
-  premium: { name: 'Premium', emoji: '🌳', price: 250, waterCost: 25, fruitValue: 37.5, sellPrice: 225 },
-  pro: { name: 'Pro', emoji: '🌴', price: 1000, waterCost: 100, fruitValue: 150, sellPrice: 900 }
+  basic:   { name: 'Básica',  emoji: '🌱', price: 10000, waterCost: 40,  fruitValue: 60,  sellPrice: 9000,  canSell: true  },
+  medium:  { name: 'Media',   emoji: '🌿', price: 20000, waterCost: 80,  fruitValue: 120, sellPrice: 18000, canSell: true  },
+  premium: { name: 'Premium', emoji: '🌳', price: 30000, waterCost: 120, fruitValue: 180, sellPrice: 27000, canSell: true  },
+  pro:     { name: 'Pro',     emoji: '🌴', price: 40000, waterCost: 160, fruitValue: 240, sellPrice: 0,     canSell: false }
 };
 
 const MAX_PLANTS = 12;
@@ -470,20 +401,39 @@ const GROW_TIME_MIN = 25;
 const PERFECT_WINDOW = 35;
 const ROT_TIME = 60;
 
+// ⏳ VIDA ÚTIL DE LA PLANTA: 30 DÍAS
+const PLANT_LIFETIME_DAYS = 30;
+const PLANT_LIFETIME_SECONDS = PLANT_LIFETIME_DAYS * 24 * 60 * 60;
+
 function getPlantStatus(plant) {
   if (plant.status === 'refunded') {
-    return { status: 'refunded', value: 0, minutesLeft: 0, progress: 0, canRefund: false };
+    return { status: 'refunded', value: 0, minutesLeft: 0, progress: 0, canRefund: false, daysLeft: 0 };
   }
-  if (plant.status === 'dry' || !plant.last_watered) {
-    return { status: 'dry', value: 0, minutesLeft: 0, progress: 0, canRefund: false };
-  }
-
   const now = Math.floor(Date.now() / 1000);
   const level = PLANT_LEVELS[plant.level];
+  const createdAt = plant.created_at || now;
+  const ageSeconds = now - createdAt;
+  const lifetimeLeft = PLANT_LIFETIME_SECONDS - ageSeconds;
+  const daysLeft = Math.max(0, Math.ceil(lifetimeLeft / 86400));
+
+  if (lifetimeLeft <= 0) {
+    return {
+      status: 'expired',
+      value: 0,
+      minutesLeft: 0,
+      progress: 0,
+      canRefund: false,
+      daysLeft: 0,
+      expiresAt: createdAt + PLANT_LIFETIME_SECONDS
+    };
+  }
+
+  if (plant.status === 'dry' || !plant.last_watered) {
+    return { status: 'dry', value: 0, minutesLeft: 0, progress: 0, canRefund: false, daysLeft, expiresAt: createdAt + PLANT_LIFETIME_SECONDS };
+  }
 
   const moonMult = parseFloat(plant.moon_multiplier || 1) || 1;
   const effectiveGrowTime = GROW_TIME_MIN / moonMult;
-
   const elapsed = (now - plant.last_watered) / 60;
 
   if (elapsed < effectiveGrowTime) {
@@ -494,7 +444,9 @@ function getPlantStatus(plant) {
       minutesLeft: Math.ceil(effectiveGrowTime - elapsed),
       progress: Math.min(progress, 99),
       canRefund: false,
-      moonBoost: moonMult > 1
+      moonBoost: moonMult > 1,
+      daysLeft,
+      expiresAt: createdAt + PLANT_LIFETIME_SECONDS
     };
   }
 
@@ -508,7 +460,9 @@ function getPlantStatus(plant) {
       minutesLeft: Math.ceil(perfectDuration - elapsedSinceReady),
       progress: 100,
       canRefund: false,
-      moonBoost: moonMult > 1
+      moonBoost: moonMult > 1,
+      daysLeft,
+      expiresAt: createdAt + PLANT_LIFETIME_SECONDS
     };
   }
 
@@ -524,11 +478,22 @@ function getPlantStatus(plant) {
       minutesLeft: Math.ceil(witheringTotal - witheringElapsed),
       progress: 100,
       canRefund: false,
-      moonBoost: moonMult > 1
+      moonBoost: moonMult > 1,
+      daysLeft,
+      expiresAt: createdAt + PLANT_LIFETIME_SECONDS
     };
   }
 
-  return { status: 'rotten', value: 0, minutesLeft: 0, progress: 0, canRefund: true, moonBoost: moonMult > 1 };
+  return {
+    status: 'rotten',
+    value: 0,
+    minutesLeft: 0,
+    progress: 0,
+    canRefund: true,
+    moonBoost: moonMult > 1,
+    daysLeft,
+    expiresAt: createdAt + PLANT_LIFETIME_SECONDS
+  };
 }
 
 // ==== HELPERS ====
@@ -587,10 +552,12 @@ async function refundPlant(userId, plantId) {
     if (!plant) return { success: false, error: 'Planta no encontrada' };
 
     const status = getPlantStatus(plant);
-    if (status.status !== 'rotten') return { success: false, error: 'La planta todavía no está podrida' };
+    if (status.status !== 'rotten' && status.status !== 'expired') {
+      return { success: false, error: 'La planta todavía no está podrida ni expirada' };
+    }
 
     const level = PLANT_LEVELS[plant.level];
-    const refundAmount = level.waterCost * 0.9;
+    const refundAmount = level.waterCost * 0.9; // 💧 90% del RIEGO
 
     const user = await ensureUser(userId);
     const newBalance = parseFloat(user.balance) + refundAmount;
@@ -600,7 +567,7 @@ async function refundPlant(userId, plantId) {
       user_id: userId,
       type: 'plant_refund',
       amount: refundAmount,
-      description: 'Reembolso por planta marchita (' + level.name + ')',
+      description: 'Reembolso 90% del riego (' + level.name + ')',
       metadata: String(plantId),
       tx_hash: null,
       created_at: Math.floor(Date.now() / 1000)
@@ -608,7 +575,7 @@ async function refundPlant(userId, plantId) {
 
     await supabase.from('plants').update({ status: 'dry', last_watered: null, moon_multiplier: 1 }).eq('id', plantId).eq('user_id', userId);
 
-    return { success: true, amount: refundAmount, message: '¡Recibiste ' + refundAmount.toFixed(2) + ' JHOAL de reembolso!' };
+    return { success: true, amount: refundAmount, message: '¡Recibiste ' + refundAmount.toFixed(2) + ' JHOAL de reembolso (90% del riego)!' };
   } catch (e) {
     console.error('Error refund:', e);
     return { success: false, error: e.message };
@@ -633,15 +600,10 @@ app.get('/moon-status', (req, res) => {
 app.post('/register-user', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { chatId } = req.body;
-  
   if (!chatId) return res.json({ success: true, message: 'Sin chatId' });
-  
   try {
     await ensureUser(userId);
-    await supabase.from('users_balance')
-      .update({ chat_id: chatId })
-      .eq('user_id', userId);
-    
+    await supabase.from('users_balance').update({ chat_id: chatId }).eq('user_id', userId);
     res.json({ success: true });
   } catch (e) {
     console.error('Error register-user:', e);
@@ -653,7 +615,6 @@ app.post('/my-deposit-wallet', requireAuth, async (req, res) => {
   const userId = req.userId;
   try {
     const user = await ensureUser(userId);
-    
     if (user.deposit_address) {
       return res.json({ 
         success: true, 
@@ -661,11 +622,9 @@ app.post('/my-deposit-wallet', requireAuth, async (req, res) => {
         walletBalance: parseFloat(user.wallet_balance || 0)
       });
     }
-    
     console.log('🔐 Generando nueva wallet para user', userId);
     const newWallet = ethers.Wallet.createRandom();
     const encryptedKey = encryptPrivateKey(newWallet.privateKey);
-    
     await supabase.from('users_balance')
       .update({ 
         deposit_address: newWallet.address,
@@ -674,9 +633,7 @@ app.post('/my-deposit-wallet', requireAuth, async (req, res) => {
         last_deposit_block: await getProvider().then(p => p.getBlockNumber()).then(b => b - 10)
       })
       .eq('user_id', userId);
-    
     console.log('✅ Wallet generada:', newWallet.address);
-    
     res.json({ 
       success: true, 
       address: newWallet.address,
@@ -691,32 +648,24 @@ app.post('/my-deposit-wallet', requireAuth, async (req, res) => {
 app.post('/move-to-game', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { amount } = req.body;
-  
   if (!amount || amount <= 0) {
     return res.status(400).json({ error: 'Cantidad inválida' });
   }
-  
   try {
     const user = await ensureUser(userId);
-    
     if (!user.deposit_address || !user.deposit_private_key) {
       return res.status(400).json({ error: 'No tienes wallet personal' });
     }
-    
     if (parseFloat(user.wallet_balance || 0) < amount) {
       return res.status(400).json({ error: 'Saldo insuficiente en wallet' });
     }
-    
     const realBalanceWei = await token.balanceOf(user.deposit_address);
     const realBalance = parseFloat(ethers.formatUnits(realBalanceWei, 18));
-    
     if (realBalance < amount) {
       return res.status(400).json({ error: 'La wallet no tiene fondos suficientes' });
     }
-    
     const bnbNeeded = ethers.parseEther('0.000002');
     const bnbBalance = await provider.getBalance(user.deposit_address);
-    
     if (bnbBalance < bnbNeeded) {
       console.log('⛽ Enviando BNB para gas a', user.deposit_address);
       const bnbTx = await wallet.sendTransaction({
@@ -725,26 +674,19 @@ app.post('/move-to-game', requireAuth, async (req, res) => {
       });
       await bnbTx.wait();
     }
-    
     const pk = decryptPrivateKey(user.deposit_private_key);
     const userSigner = new ethers.Wallet(pk, provider);
     const userToken = new ethers.Contract(TOKEN_ADDRESS, ABI, userSigner);
-    
     const amountWei = ethers.parseUnits(amount.toString(), 18);
     const tx = await userToken.transfer(wallet.address, amountWei);
     console.log('📤 Mover al juego TX:', tx.hash);
-    
     await tx.wait();
-    
     const newWalletBalance = parseFloat(user.wallet_balance) - amount;
     const newGameBalance = parseFloat(user.balance) + amount;
-    
     await supabase.from('users_balance')
       .update({ wallet_balance: newWalletBalance, balance: newGameBalance })
       .eq('user_id', userId);
-    
     await addHistory(userId, 'deposit_game', amount, '🎮 Movido al saldo del juego', null, tx.hash);
-    
     res.json({ 
       success: true, 
       txHash: tx.hash,
@@ -763,18 +705,14 @@ app.post('/claim', requireAuth, async (req, res) => {
   try {
     const user = await ensureUser(userId);
     const now = Math.floor(Date.now() / 1000);
-
     if (user.last_claim && now - user.last_claim < COOLDOWN) {
       const restante = COOLDOWN - (now - user.last_claim);
       return res.status(429).json({ error: 'Espera ' + Math.floor(restante / 60) + 'm ' + (restante % 60) + 's antes de reclamar otra vez' });
     }
-
     const newBalance = parseFloat(user.balance) + 1;
     const newClaimed = parseFloat(user.total_claimed || 0) + 1;
-
     await supabase.from('users_balance').update({ balance: newBalance, total_claimed: newClaimed, last_claim: now }).eq('user_id', userId);
     await addHistory(userId, 'faucet', 1, 'Reclamo del faucet', null, null);
-
     res.json({ success: true, amount: 1, message: '¡1 JHOAL añadido a tu saldo!' });
   } catch (error) {
     console.error('Error claim:', error);
@@ -906,7 +844,7 @@ app.post('/buy-plant', requireAuth, async (req, res) => {
     await supabase.from('plants').insert({ user_id: userId, level: level, status: 'dry', created_at: now, moon_multiplier: 1 });
     await addHistory(userId, 'plant_buy', -plantInfo.price, 'Compraste planta ' + plantInfo.name, null, null);
 
-    res.json({ success: true, message: '¡Compraste una planta ' + plantInfo.name + '!' });
+    res.json({ success: true, message: '¡Compraste una planta ' + plantInfo.name + '!', expiresInDays: PLANT_LIFETIME_DAYS });
   } catch (error) {
     console.error('Error buy-plant:', error);
     res.status(500).json({ error: 'Error: ' + error.message });
@@ -923,6 +861,9 @@ app.post('/water-plant', requireAuth, async (req, res) => {
     if (!plant) return res.status(400).json({ error: 'Planta no encontrada' });
 
     const status = getPlantStatus(plant);
+    if (status.status === 'expired') {
+      return res.status(400).json({ error: '❌ Esta planta expiró (30 días). Tenés que comprar una nueva.' });
+    }
     if (status.status !== 'dry' && status.status !== 'rotten') return res.status(400).json({ error: 'La planta todavía tiene fruto o está creciendo' });
 
     const user = await ensureUser(userId);
@@ -967,6 +908,9 @@ app.post('/harvest', requireAuth, async (req, res) => {
     if (!plant) return res.status(400).json({ error: 'Planta no encontrada' });
 
     const status = getPlantStatus(plant);
+    if (status.status === 'expired') {
+      return res.status(400).json({ error: '❌ Esta planta expiró (30 días). No se puede cosechar.' });
+    }
     if (status.status !== 'ready' && status.status !== 'withering') return res.status(400).json({ error: 'Todavía no podés cosechar esta planta' });
 
     const value = status.value;
@@ -999,6 +943,9 @@ app.post('/sell-plant', requireAuth, async (req, res) => {
     if (!plant) return res.status(400).json({ error: 'Planta no encontrada' });
 
     const level = PLANT_LEVELS[plant.level];
+    if (!level.canSell) {
+      return res.status(400).json({ error: '❌ La planta ' + level.name + ' no se puede vender.' });
+    }
     const sellValue = level.sellPrice;
 
     const user = await ensureUser(userId);
@@ -1041,10 +988,13 @@ app.get('/my-plants/:userId', requireAuth, async (req, res) => {
         status: status.status, value: status.value,
         minutesLeft: status.minutesLeft || 0, progress: status.progress || 0,
         waterCost: level.waterCost, fruitValue: level.fruitValue, sellPrice: level.sellPrice,
+        canSell: level.canSell,
         lastWatered: p.last_watered,
         canRefund: status.canRefund || false,
         refundAmount: status.canRefund ? (level.waterCost * 0.9) : 0,
-        moonBoost: status.moonBoost || false
+        moonBoost: status.moonBoost || false,
+        daysLeft: status.daysLeft || 0,
+        expiresAt: status.expiresAt || null
       };
     });
 
@@ -1054,6 +1004,7 @@ app.get('/my-plants/:userId', requireAuth, async (req, res) => {
       count: plantsWithStatus.length,
       maxPlants: MAX_PLANTS,
       plantLevels: PLANT_LEVELS,
+      lifetimeDays: PLANT_LIFETIME_DAYS,
       moon: {
         active: moonState.active,
         endsAt: moonState.endsAt,
@@ -1125,6 +1076,17 @@ app.get('/balance', async (req, res) => {
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+// ==== AVISO DEL HUERTO ====
+app.get('/huerto-warning', (req, res) => {
+  res.json({
+    success: true,
+    title: '⚠️ AVISO IMPORTANTE – HUERTO DE HORUS ⚠️',
+    message: '🌱 El que no cosecha, PIERDE.\nLas plantas duran solo 30 días. Si no las RIEGAS y cosechás a tiempo, se mueren y perdés tu inversión.\n💰 Acá se puede GANAR o PERDER.\n👀 Estate atento a tus plantas. Si no las cuidás, pierdes todo.',
+    lifetimeDays: PLANT_LIFETIME_DAYS,
+    refundPercent: 90
+  });
 });
 
 app.get('/', (req, res) => {
@@ -1226,19 +1188,15 @@ if (SUPPORT_BOT_TOKEN && SUPPORT_CHAT_ID) {
   supportBot.on('message', (msg) => {
     const chatId = msg.chat.id;
     const text = msg.text;
-
     if (text && text.startsWith('/')) return;
-
     const userName = msg.from.first_name || 'Usuario';
     const userUsername = msg.from.username ? '@' + msg.from.username : 'sin username';
     const userId = msg.from.id;
-
     const header =
       '📩 *NUEVO MENSAJE DE SOPORTE*\n\n' +
       '👤 De: ' + userName + '\n' +
       '🔗 Username: ' + userUsername + '\n' +
       '🆔 ID: `' + userId + '`\n\n';
-
     try {
       if (msg.text) {
         supportBot.sendMessage(SUPPORT_CHAT_ID, header + '💬 Mensaje:\n' + msg.text, { parse_mode: 'Markdown' });
@@ -1259,4 +1217,5 @@ app.listen(process.env.PORT || 3000, () => {
   console.log('Supabase:', SUPABASE_URL ? 'SÍ' : 'NO');
   console.log('🌕 Luna Llena: x' + MOON_GROWTH_MULTIPLIER);
   console.log('💾 Monitor de depósitos: ACTIVADO');
+  console.log('🌱 Plantas duran ' + PLANT_LIFETIME_DAYS + ' días');
 });
