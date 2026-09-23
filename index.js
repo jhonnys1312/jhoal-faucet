@@ -53,6 +53,11 @@ const COOLDOWN = 30 * 60;
 const MIN_BET = 0.1;
 const MAX_BET = 1000;
 
+// ==== REFERIDOS ====
+const REFERRAL_REWARD = 1000;
+const REFERRAL_BOT_USERNAME = process.env.REFERRAL_BOT_USERNAME || 'JhoalFaucetBot';
+const REFERRAL_BANNER_URL = process.env.REFERRAL_BANNER_URL || 'https://i.imgur.com/REEMPLAZA_ESTO.png';
+
 // ==== MONITOR DE DEPÓSITOS ====
 const MONITOR_START_BLOCK = 122925000;
 const BATCH_SIZE = 100;
@@ -239,14 +244,14 @@ function scheduleBlessing() {
     const randomHour = randInt(0, 23);
     const randomMin = randInt(0, 59);
     console.log(`👑 Bendición del Faraón programada para hoy a las ${randomHour}:${randomMin}`);
-    
+
     const now = new Date();
     const targetTime = new Date();
     targetTime.setUTCHours(randomHour, randomMin, 0, 0);
-    
+
     let msUntilEvent = targetTime.getTime() - now.getTime();
     if (msUntilEvent < 0) msUntilEvent += 24 * 60 * 60 * 1000;
-    
+
     setTimeout(activateBlessing, msUntilEvent);
   }
 }
@@ -260,7 +265,7 @@ function activateBlessing() {
 
   setTimeout(() => {
     blessingState.active = false;
-    console.log('👑 Bendición del Faraón terminada. Ya pasó la bendición, esperá mañana.');
+    console.log('👑 Bendición del Faraón terminada.');
     scheduleBlessing();
   }, BLESSING_DURATION);
 }
@@ -385,7 +390,6 @@ function requireAuth(req, res, next) {
 }
 
 // ==== HUERTO ====
-// Tabla actualizada: Pro NO se puede vender
 const PLANT_LEVELS = {
   basic:   { name: 'Básica',  emoji: '🌱', price: 10000, waterCost: 40,  fruitValue: 125, sellPrice: 20400, canSell: true  },
   medium:  { name: 'Media',   emoji: '🌿', price: 20000, waterCost: 80,  fruitValue: 250, sellPrice: 40800, canSell: true  },
@@ -399,9 +403,8 @@ const PERFECT_WINDOW = 35;
 const ROT_TIME = 60;
 const PLANT_LIFETIME_DAYS = 30;
 const PLANT_LIFETIME_SECONDS = PLANT_LIFETIME_DAYS * 24 * 60 * 60;
-const LIFETIME_MINUTES = PLANT_LIFETIME_DAYS * 24 * 60; // 43,200 minutos
+const LIFETIME_MINUTES = PLANT_LIFETIME_DAYS * 24 * 60;
 
-// 💰 PRECIO DE VENTA DECRECIENTE POR MINUTO (100% minuto 0 → 0% en 30 días)
 function getSellPrice(plant) {
   const level = PLANT_LEVELS[plant.level];
   if (!level.canSell) return 0;
@@ -419,7 +422,6 @@ function getPlantStatus(plant) {
   const createdAt = plant.created_at || now;
   const ageSeconds = now - createdAt;
   const lifetimeLeft = PLANT_LIFETIME_SECONDS - ageSeconds;
-  // ✅ Math.floor para que los días bajen inmediatamente
   const daysLeft = Math.max(0, Math.floor(lifetimeLeft / 86400));
 
   if (lifetimeLeft <= 0) {
@@ -502,7 +504,6 @@ async function addHistory(userId, type, amount, description, metadata, txHash) {
   } catch (e) { console.error('Error history:', e); }
 }
 
-// 🔄 Reembolso 90% del riego (solo si está podrida)
 async function refundPlant(userId, plantId) {
   try {
     const { data: plant } = await supabase.from('plants').select('*').eq('id', plantId).eq('user_id', userId).maybeSingle();
@@ -527,7 +528,6 @@ async function refundPlant(userId, plantId) {
   }
 }
 
-// 🧹 LIMPIEZA AUTOMÁTICA DE PLANTAS EXPIRADAS
 async function cleanupExpiredPlants() {
   try {
     const now = Math.floor(Date.now() / 1000);
@@ -559,7 +559,6 @@ async function cleanupExpiredPlants() {
   }
 }
 
-// 🔧 LIMPIEZA DE PLANTAS SIN created_at (viejas)
 async function cleanupOldPlants() {
   try {
     console.log('🧹 Buscando plantas viejas sin created_at...');
@@ -574,6 +573,79 @@ async function cleanupOldPlants() {
     }
   } catch (e) {
     console.error('Error cleanupOldPlants:', e);
+  }
+}
+
+// ==== REFERIDOS HELPERS ====
+async function otorgarRecompensaReferido(referrerId, referredId) {
+  try {
+    const { data: yaExiste } = await supabase
+      .from('referrals')
+      .select('id')
+      .eq('referred_id', referredId)
+      .maybeSingle();
+    if (yaExiste) return { success: false, error: 'Ya se pagó este referido' };
+
+    const referredUser = await ensureUser(referredId);
+    if (!referredUser.total_claimed || parseFloat(referredUser.total_claimed) < 1) {
+      return { success: false, error: 'El referido aún no reclama el faucet' };
+    }
+
+    const { error: insErr } = await supabase.from('referrals').insert({
+      referrer_id: referrerId,
+      referred_id: referredId,
+      reward: REFERRAL_REWARD,
+      created_at: Math.floor(Date.now() / 1000)
+    });
+    if (insErr) return { success: false, error: insErr.message };
+
+    const referrer = await ensureUser(referrerId);
+    const nuevoBalance = parseFloat(referrer.balance || 0) + REFERRAL_REWARD;
+    await supabase.from('users_balance')
+      .update({ balance: nuevoBalance })
+      .eq('user_id', referrerId);
+
+    await addHistory(
+      referrerId,
+      'referral_reward',
+      REFERRAL_REWARD,
+      '🎁 Recompensa por referido (' + referredId + ')',
+      null,
+      null
+    );
+
+    console.log(`🎁 Referido pagado: ${referrerId} +${REFERRAL_REWARD} JHOAL por ${referredId}`);
+
+    if (bot && referrer.chat_id) {
+      try {
+        await bot.sendMessage(referrer.chat_id,
+          `🎁 *¡NUEVO REFERIDO!*\n\nGanaste *${REFERRAL_REWARD} JHOAL* por invitar a un nuevo guerrero.\n\n💰 Total acreditado en tu saldo.`,
+          { parse_mode: 'Markdown' }
+        );
+      } catch (e) {}
+    }
+
+    return { success: true };
+  } catch (e) {
+    console.error('Error otorgarRecompensaReferido:', e);
+    return { success: false, error: e.message };
+  }
+}
+
+async function intentarPagarReferido(userId) {
+  try {
+    const { data: pendiente } = await supabase
+      .from('referrals_pending')
+      .select('*')
+      .eq('referred_id', userId)
+      .maybeSingle();
+    if (!pendiente) return;
+    const result = await otorgarRecompensaReferido(pendiente.referrer_id, userId);
+    if (result.success) {
+      await supabase.from('referrals_pending').delete().eq('referred_id', userId);
+    }
+  } catch (e) {
+    console.error('Error intentarPagarReferido:', e);
   }
 }
 
@@ -602,6 +674,64 @@ app.get('/blessing-status', (req, res) => {
     secondsLeft: blessingState.active ? Math.max(0, Math.floor((blessingState.endsAt - now) / 1000)) : 0,
     multiplier: BLESSING_FRUIT_MULTIPLIER
   });
+});
+
+app.post('/register-referral', requireAuth, async (req, res) => {
+  const userId = req.userId;
+  const { referrerId } = req.body;
+  if (!referrerId || String(referrerId) === String(userId)) {
+    return res.json({ success: true, message: 'Sin referido válido' });
+  }
+  try {
+    const { data: yaPagado } = await supabase
+      .from('referrals')
+      .select('id')
+      .eq('referred_id', userId)
+      .maybeSingle();
+    if (yaPagado) return res.json({ success: true, message: 'Ya referido' });
+
+    const { data: yaPendiente } = await supabase
+      .from('referrals_pending')
+      .select('id')
+      .eq('referred_id', userId)
+      .maybeSingle();
+    if (yaPendiente) return res.json({ success: true, message: 'Ya pendiente' });
+
+    await supabase.from('referrals_pending').insert({
+      referrer_id: String(referrerId),
+      referred_id: String(userId),
+      created_at: Math.floor(Date.now() / 1000)
+    });
+
+    console.log(`🔗 Referido pendiente: ${referrerId} ← ${userId}`);
+    res.json({ success: true, message: 'Referido registrado, se paga al primer reclamo' });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/my-referrals/:userId', requireAuth, async (req, res) => {
+  const userId = req.userId;
+  try {
+    const { data: referidos } = await supabase
+      .from('referrals')
+      .select('referred_id, reward, created_at')
+      .eq('referrer_id', userId)
+      .order('created_at', { ascending: false });
+
+    const total = (referidos || []).reduce((s, r) => s + parseFloat(r.reward || 0), 0);
+
+    res.json({
+      success: true,
+      link: 'https://t.me/' + REFERRAL_BOT_USERNAME + '?start=ref_' + userId,
+      count: (referidos || []).length,
+      totalEarned: total,
+      rewardPerReferral: REFERRAL_REWARD,
+      referrals: referidos || []
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.post('/register-user', requireAuth, async (req, res) => {
@@ -686,13 +816,15 @@ app.post('/claim', requireAuth, async (req, res) => {
     const newClaimed = parseFloat(user.total_claimed || 0) + 1;
     await supabase.from('users_balance').update({ balance: newBalance, total_claimed: newClaimed, last_claim: now }).eq('user_id', userId);
     await addHistory(userId, 'faucet', 1, 'Reclamo del faucet', null, null);
+
+    intentarPagarReferido(userId);
+
     res.json({ success: true, amount: 1, message: '¡1 JHOAL añadido a tu saldo!' });
   } catch (error) {
     res.status(500).json({ error: 'Error: ' + error.message });
   }
 });
 
-// ==== RECOMPENSA POR VER ANUNCIO (MANUAL desde el botón) ====
 app.post('/claim-ad-reward-manual', requireAuth, async (req, res) => {
   const userId = req.userId;
   try {
@@ -712,7 +844,6 @@ app.post('/claim-ad-reward-manual', requireAuth, async (req, res) => {
   }
 });
 
-// ==== WEBHOOK ADSGRAM (GET) — AdsGram lo llama cuando ve el anuncio ====
 app.get('/claim-ad-reward', async (req, res) => {
   try {
     const userId = req.query.userId;
@@ -829,7 +960,6 @@ app.get('/deposit-info', (req, res) => {
   res.json({ success: true, depositWallet: wallet.address, tokenAddress: TOKEN_ADDRESS, minDeposit: 1 });
 });
 
-// ==== COMPRAR PLANTA ====
 app.post('/buy-plant', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { level } = req.body;
@@ -852,7 +982,6 @@ app.post('/buy-plant', requireAuth, async (req, res) => {
   }
 });
 
-// ==== REGAR PLANTA ====
 app.post('/water-plant', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { plantId } = req.body;
@@ -882,7 +1011,6 @@ app.post('/water-plant', requireAuth, async (req, res) => {
   }
 });
 
-// ==== COSECHAR ====
 app.post('/harvest', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { plantId } = req.body;
@@ -890,15 +1018,14 @@ app.post('/harvest', requireAuth, async (req, res) => {
   try {
     const { data: plant } = await supabase.from('plants').select('*').eq('id', plantId).eq('user_id', userId).maybeSingle();
     if (!plant) return res.status(400).json({ error: 'Planta no encontrada' });
-    
+
     const status = getPlantStatus(plant);
     if (status.status === 'expired') return res.status(400).json({ error: '🌱 Esta planta ya cumplió su ciclo.' });
     if (status.status !== 'ready' && status.status !== 'withering') return res.status(400).json({ error: 'Todavía no podés cosechar esta planta' });
-    
+
     let value = status.value;
     if (value <= 0) return res.status(400).json({ error: 'El fruto está podrido' });
 
-    // 🎯 APLICAR BENDICIÓN DEL FARAÓN (Fruto x2)
     let multiplicadorBendicion = 1;
     if (blessingState.active) {
       multiplicadorBendicion = BLESSING_FRUIT_MULTIPLIER;
@@ -910,18 +1037,17 @@ app.post('/harvest', requireAuth, async (req, res) => {
     const newWon = parseFloat(user.total_won || 0) + value;
     await supabase.from('users_balance').update({ balance: newBalance, total_won: newWon }).eq('user_id', userId);
     await supabase.from('plants').update({ status: 'dry', last_watered: null, moon_multiplier: 1 }).eq('id', plantId).eq('user_id', userId);
-    
+
     const level = PLANT_LEVELS[plant.level];
     const msg = multiplicadorBendicion > 1 ? ' 👑 ¡Bendición del Faraón x2 aplicada!' : '';
     await addHistory(userId, 'plant_harvest', value, 'Cosechaste ' + level.name + msg, null, null);
-    
+
     res.json({ success: true, value, message: '¡Cosechaste ' + value.toFixed(2) + ' JHOAL!' + msg });
   } catch (error) {
     res.status(500).json({ error: 'Error: ' + error.message });
   }
 });
 
-// ==== VENDER PLANTA (precio decreciente por minuto) ====
 app.post('/sell-plant', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { plantId } = req.body;
@@ -947,7 +1073,6 @@ app.post('/sell-plant', requireAuth, async (req, res) => {
   }
 });
 
-// ==== REEMBOLSO 90% DEL RIEGO (solo si está podrida) ====
 app.post('/refund-plant', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { plantId } = req.body;
@@ -960,7 +1085,6 @@ app.post('/refund-plant', requireAuth, async (req, res) => {
   }
 });
 
-// ==== MIS PLANTAS ====
 app.get('/my-plants/:userId', requireAuth, async (req, res) => {
   try {
     const userId = req.userId;
@@ -973,7 +1097,6 @@ app.get('/my-plants/:userId', requireAuth, async (req, res) => {
       const now = Math.floor(Date.now() / 1000);
       const createdAt = p.created_at || now;
       const ageMinutes = Math.max(0, (now - createdAt) / 60);
-      // ✅ Porcentaje restante (100% minuto 0 → 0% en 30 días)
       const sellPercentage = level.canSell ? Math.max(0, Math.round((1 - ageMinutes / LIFETIME_MINUTES) * 100)) : 0;
       return {
         id: p.id, level: p.level, levelName: level.name, emoji: level.emoji,
@@ -1008,7 +1131,6 @@ app.get('/my-plants/:userId', requireAuth, async (req, res) => {
   }
 });
 
-// ==== HISTORIAL ====
 app.get('/history/:userId', requireAuth, async (req, res) => {
   try {
     const userId = req.userId;
@@ -1018,13 +1140,14 @@ app.get('/history/:userId', requireAuth, async (req, res) => {
     if (type && type !== 'all') query = query.eq('type', type);
     const { data: history } = await query;
     const { data: allHistory } = await supabase.from('history').select('type, amount').eq('user_id', userId);
-    let summary = { faucet: 0, dice: 0, deposit: 0, withdraw: 0, garden: 0, total: 0 };
+    let summary = { faucet: 0, dice: 0, deposit: 0, withdraw: 0, garden: 0, referral: 0, total: 0 };
     (allHistory || []).forEach(function(h) {
       const amount = parseFloat(h.amount) || 0;
       if (h.type === 'faucet') summary.faucet += amount;
       else if (h.type === 'dice_win' || h.type === 'dice_lose') summary.dice += amount;
       else if (h.type === 'deposit' || h.type === 'deposit_game') summary.deposit += amount;
       else if (h.type === 'withdraw') summary.withdraw += amount;
+      else if (h.type === 'referral_reward') summary.referral += amount;
       else if (h.type && h.type.startsWith('plant_')) summary.garden += amount;
       summary.total += amount;
     });
@@ -1034,7 +1157,6 @@ app.get('/history/:userId', requireAuth, async (req, res) => {
   }
 });
 
-// ==== PRECIO ====
 app.get('/price', async (req, res) => {
   try {
     const reserves = await pair.getReserves();
@@ -1055,7 +1177,6 @@ app.get('/price', async (req, res) => {
   }
 });
 
-// ==== BALANCE ====
 app.get('/balance', async (req, res) => {
   try {
     const balance = await token.balanceOf(wallet.address);
@@ -1066,7 +1187,6 @@ app.get('/balance', async (req, res) => {
   }
 });
 
-// ==== AVISO DEL HUERTO ====
 app.get('/huerto-warning', (req, res) => {
   res.json({
     success: true,
@@ -1078,7 +1198,7 @@ app.get('/huerto-warning', (req, res) => {
 });
 
 app.get('/', (req, res) => {
-  res.json({ status: 'Faucet JHOAL + Dados + Huerto + Historial + Luna Llena + Bendición del Faraón + AdsGram funcionando' });
+  res.json({ status: 'Horus Faucet + Dados + Huerto + Historial + Luna Llena + Bendición + AdsGram + Referidos funcionando' });
 });
 
 // ==== BOT PRINCIPAL ====
@@ -1095,10 +1215,44 @@ if (BOT_TOKEN) {
     }
   });
 
-  bot.onText(/\/start/, (msg) => {
+  bot.onText(/\/start(.*)/, async (msg, match) => {
+    const chatId = msg.chat.id;
+    const userId = String(msg.from.id);
     const name = msg.from.first_name || 'guerrero';
-    bot.sendMessage(msg.chat.id,
-      '⚱ *JHOAL - La ofrenda del dios* 🦅\n\n' +
+    const payload = (match[1] || '').trim();
+
+    if (payload && payload.startsWith('ref_')) {
+      const referrerId = payload.replace('ref_', '').trim();
+      if (referrerId && referrerId !== userId) {
+        try {
+          const { data: yaPagado } = await supabase
+            .from('referrals')
+            .select('id')
+            .eq('referred_id', userId)
+            .maybeSingle();
+          if (!yaPagado) {
+            const { data: yaPendiente } = await supabase
+              .from('referrals_pending')
+              .select('id')
+              .eq('referred_id', userId)
+              .maybeSingle();
+            if (!yaPendiente) {
+              await supabase.from('referrals_pending').insert({
+                referrer_id: String(referrerId),
+                referred_id: userId,
+                created_at: Math.floor(Date.now() / 1000)
+              });
+              console.log(`🔗 Referido pendiente desde /start: ${referrerId} ← ${userId}`);
+            }
+          }
+        } catch (e) {
+          console.error('Error registrando referido en /start:', e);
+        }
+      }
+    }
+
+    bot.sendMessage(chatId,
+      '⚱ *HORUS FAUCET - La ofrenda del Dios Horus* 🦅\n\n' +
       '¡Bienvenido, ' + name + '!\n\n' +
       '💰 Reclama *1 JHOAL GRATIS* cada 30 minutos\n' +
       '📺 Mirá anuncios y ganá *5 JHOAL extra*\n' +
@@ -1106,17 +1260,54 @@ if (BOT_TOKEN) {
       '🌱 Planta en el *Huerto de Horus*\n' +
       '🌕 Atento a la *Luna Llena*\n' +
       '👑 Atento a la *Bendición del Faraón*\n' +
+      '🎁 Gana *1000 JHOAL* por cada amigo que invites\n' +
       '📜 Mirá tu *Historial*\n\n' +
-      '👉 Toca "Abrir Faucet" para empezar.',
-      { parse_mode: 'Markdown' }
+      '👉 Toca "Abrir Horus Faucet" para empezar.',
+      { parse_mode: 'Markdown',
+        reply_markup: { inline_keyboard: [[{ text: '🏛 Abrir Horus Faucet', web_app: { url: MINI_APP_URL } }]] } }
     );
   });
 
   bot.onText(/\/faucet/, (msg) => {
-    bot.sendMessage(msg.chat.id, '🚰 *Abrir Faucet*', {
+    bot.sendMessage(msg.chat.id, '🏛 *Abrir Horus Faucet*', {
       parse_mode: 'Markdown',
-      reply_markup: { inline_keyboard: [[{ text: '⚱ Abrir Faucet', web_app: { url: MINI_APP_URL } }]] }
+      reply_markup: { inline_keyboard: [[{ text: '🏛 Abrir Horus Faucet', web_app: { url: MINI_APP_URL } }]] }
     });
+  });
+
+  // ==== /invitar CON BANNER ====
+  bot.onText(/\/invitar|\/referidos|\/ref/, async (msg) => {
+    const userId = String(msg.from.id);
+    const link = 'https://t.me/' + REFERRAL_BOT_USERNAME + '?start=ref_' + userId;
+    const texto =
+      '🏛 *HORUS FAUCET* 🦅\n\n' +
+      '🎁 *INVITA Y GANA ' + REFERRAL_REWARD + ' JHOAL*\n' +
+      'por cada amigo que entre con tu enlace y reclame su primer faucet.\n\n' +
+      '🔗 *Tu enlace único:*\n`' + link + '`\n\n' +
+      '📋 Copialo y compartilo en tus grupos.\n' +
+      '💎 Sin límite de referidos.';
+    try {
+      await bot.sendPhoto(msg.chat.id, REFERRAL_BANNER_URL, {
+        caption: texto,
+        parse_mode: 'Markdown',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '📤 Compartir enlace', url: 'https://t.me/share/url?url=' + encodeURIComponent(link) + '&text=' + encodeURIComponent('🎁 Gana 1000 JHOAL gratis en Horus Faucet 🏛') }],
+            [{ text: '🏛 Abrir Horus Faucet', web_app: { url: MINI_APP_URL } }]
+          ]
+        }
+      });
+    } catch (e) {
+      await bot.sendMessage(msg.chat.id, texto, {
+        parse_mode: 'Markdown',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '📤 Compartir enlace', url: 'https://t.me/share/url?url=' + encodeURIComponent(link) + '&text=' + encodeURIComponent('🎁 Gana 1000 JHOAL gratis en Horus Faucet 🏛') }],
+            [{ text: '🏛 Abrir Horus Faucet', web_app: { url: MINI_APP_URL } }]
+          ]
+        }
+      });
+    }
   });
 
   bot.onText(/\/price/, async (msg) => {
@@ -1146,7 +1337,7 @@ if (BOT_TOKEN) {
 
   bot.onText(/\/help/, (msg) => {
     bot.sendMessage(msg.chat.id,
-      '🆘 *AYUDA*\n\n/start - Iniciar\n/faucet - Abrir faucet\n/price - Precio\n/help - Esta ayuda\n\n📩 Soporte: @' + SUPPORT_USERNAME,
+      '🆘 *AYUDA*\n\n/start - Iniciar\n/faucet - Abrir faucet\n/invitar - Tu enlace de referidos\n/price - Precio\n/help - Esta ayuda\n\n📩 Soporte: @' + SUPPORT_USERNAME,
       { parse_mode: 'Markdown' }
     );
   });
@@ -1161,7 +1352,7 @@ if (SUPPORT_BOT_TOKEN && SUPPORT_CHAT_ID) {
     const chatId = msg.chat.id;
     const name = msg.from.first_name || 'usuario';
     supportBot.sendMessage(chatId,
-      '🆘 *SOPORTE JHOAL*\n\n¡Hola, ' + name + '!\n\nPodés enviarme texto, fotos, videos, audios o documentos.\n\nTe vamos a responder a la brevedad.',
+      '🆘 *SOPORTE HORUS FAUCET*\n\n¡Hola, ' + name + '!\n\nPodés enviarme texto, fotos, videos, audios o documentos.\n\nTe vamos a responder a la brevedad.',
       { parse_mode: 'Markdown' }
     );
   });
@@ -1185,7 +1376,7 @@ if (SUPPORT_BOT_TOKEN && SUPPORT_CHAT_ID) {
 
 // ==== INICIAR SERVIDOR ====
 app.listen(process.env.PORT || 3000, () => {
-  console.log('Faucet JHOAL corriendo en puerto', process.env.PORT || 3000);
+  console.log('Horus Faucet corriendo en puerto', process.env.PORT || 3000);
   console.log('Wallet:', wallet.address);
   console.log('Bot principal:', BOT_TOKEN ? 'SÍ' : 'NO');
   console.log('Bot de soporte:', SUPPORT_BOT_TOKEN ? 'SÍ' : 'NO');
@@ -1193,12 +1384,12 @@ app.listen(process.env.PORT || 3000, () => {
   console.log('🌕 Luna Llena: x' + MOON_GROWTH_MULTIPLIER);
   console.log('👑 Bendición del Faraón: Fruto x' + BLESSING_FRUIT_MULTIPLIER);
   console.log('🌱 Plantas duran ' + PLANT_LIFETIME_DAYS + ' días');
-  console.log('📉 Venta decreciente por minuto: 100% min 0 → 0% min 43,200 (30 días)');
   console.log('📺 AdsGram: +' + AD_REWARD_AMOUNT + ' JHOAL cada ' + (AD_COOLDOWN/60) + ' min');
+  console.log('🎁 Referidos: +' + REFERRAL_REWARD + ' JHOAL por referido válido');
   console.log('🧹 Limpieza automática de plantas: ACTIVADA');
 
   cleanupOldPlants();
   cleanupExpiredPlants();
-  setInterval(cleanupExpiredPlants, 5 * 60 * 1000); // Cada 5 minutos
+  setInterval(cleanupExpiredPlants, 5 * 60 * 1000);
   setInterval(cleanupOldPlants, 6 * 60 * 60 * 1000);
 });
