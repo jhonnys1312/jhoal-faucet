@@ -48,7 +48,6 @@ const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_SECRET_KEY;
 const MINI_APP_URL = 'https://willowy-starburst-59c5f3.netlify.app';
 const SUPPORT_USERNAME = 'JhoalSupportbot';
-const AMOUNT = ethers.parseUnits('1', 18);
 const COOLDOWN = 30 * 60;
 const MIN_BET = 0.1;
 const MAX_BET = 1000;
@@ -56,7 +55,7 @@ const MAX_BET = 1000;
 // ==== REFERIDOS ====
 const REFERRAL_REWARD = 1000;
 const REFERRAL_BOT_USERNAME = process.env.REFERRAL_BOT_USERNAME || 'JhoalFaucetBot';
-const REFERRAL_BANNER_URL = process.env.REFERRAL_BANNER_URL || 'https://i.imgur.com/REEMPLAZA_ESTO.png';
+const REFERRAL_BANNER_URL = process.env.REFERRAL_BANNER_URL || 'https://i.imgur.com/xoIBdWv.png';
 
 // ==== MONITOR DE DEPÓSITOS ====
 const MONITOR_START_BLOCK = 122925000;
@@ -1275,7 +1274,6 @@ if (BOT_TOKEN) {
     });
   });
 
-  // ==== /invitar CON BANNER ====
   bot.onText(/\/invitar|\/referidos|\/ref/, async (msg) => {
     const userId = String(msg.from.id);
     const link = 'https://t.me/' + REFERRAL_BOT_USERNAME + '?start=ref_' + userId;
