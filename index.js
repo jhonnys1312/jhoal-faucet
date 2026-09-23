@@ -215,6 +215,74 @@ moonState.todayKey = todayKeyUTC();
 scheduleNextMoon();
 setInterval(tickMoon, 30 * 1000);
 
+// ==== ESTADO BENDICIÓN ====
+const BLESSING_DURATION = 30 * 60 * 1000;
+const BLESSING_FRUIT_MULTIPLIER = 2;
+
+const blessingState = {
+  active: false,
+  startedAt: 0,
+  endsAt: 0,
+  eventScheduledToday: false,
+  todayKey: ''
+};
+
+function scheduleBlessing() {
+  const key = todayKeyUTC();
+  if (blessingState.todayKey !== key) {
+    blessingState.todayKey = key;
+    blessingState.eventScheduledToday = false;
+    blessingState.active = false;
+  }
+  if (!blessingState.eventScheduledToday) {
+    blessingState.eventScheduledToday = true;
+    const randomHour = randInt(0, 23);
+    const randomMin = randInt(0, 59);
+    console.log(`👑 Bendición programada para hoy a las ${randomHour}:${randomMin}`);
+    
+    const now = new Date();
+    const targetTime = new Date();
+    targetTime.setUTCHours(randomHour, randomMin, 0, 0);
+    
+    let msUntilEvent = targetTime.getTime() - now.getTime();
+    if (msUntilEvent < 0) msUntilEvent += 24 * 60 * 60 * 1000;
+    
+    setTimeout(activateBlessing, msUntilEvent);
+  }
+}
+
+function activateBlessing() {
+  blessingState.active = true;
+  blessingState.startedAt = Date.now();
+  blessingState.endsAt = Date.now() + BLESSING_DURATION;
+  console.log('👑 ¡BENDICIÓN ACTIVA! Fruto x2');
+  notificarBendicion();
+
+  setTimeout(() => {
+    blessingState.active = false;
+    console.log('👑 Bendición terminada. Ya pasó la bendición, esperá mañana.');
+    scheduleBlessing();
+  }, BLESSING_DURATION);
+}
+
+async function notificarBendicion() {
+  if (!bot) return;
+  try {
+    const { data: usuarios } = await supabase.from('users_balance').select('chat_id').not('chat_id', 'is', null);
+    if (!usuarios || usuarios.length === 0) return;
+    for (const u of usuarios) {
+      try {
+        await bot.sendMessage(u.chat_id,
+          '👑 *¡BENDICIÓN ACTIVA!*\n\nTodos los que cosechen durante los próximos *30 minutos* obtendrán *Fruto x2*.\n\n👉 Abre el Huerto y cosecha ahora.',
+          { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '🌱 Abrir Huerto', web_app: { url: MINI_APP_URL } }]] } }
+        );
+      } catch (e) {}
+    }
+  } catch (e) {}
+}
+
+scheduleBlessing();
+
 // ==== MONITOR DE DEPÓSITOS ====
 const ifaceTransfer = new ethers.Interface(['event Transfer(address indexed from, address indexed to, uint256 value)']);
 const TRANSFER_TOPIC = ethers.id('Transfer(address,address,uint256)');
@@ -317,11 +385,12 @@ function requireAuth(req, res, next) {
 }
 
 // ==== HUERTO ====
+// Tabla actualizada según tu imagen
 const PLANT_LEVELS = {
-  basic:   { name: 'Básica',  emoji: '🌱', price: 10000, waterCost: 40,  fruitValue: 60,  sellPrice: 9000,  canSell: true  },
-  medium:  { name: 'Media',   emoji: '🌿', price: 20000, waterCost: 80,  fruitValue: 120, sellPrice: 18000, canSell: true  },
-  premium: { name: 'Premium', emoji: '🌳', price: 30000, waterCost: 120, fruitValue: 180, sellPrice: 27000, canSell: true  },
-  pro:     { name: 'Pro',     emoji: '🌴', price: 40000, waterCost: 160, fruitValue: 240, sellPrice: 0,     canSell: false }
+  basic:   { name: 'Básica',  emoji: '🌱', price: 10000, waterCost: 40,  fruitValue: 125, sellPrice: 20400, canSell: true  },
+  medium:  { name: 'Media',   emoji: '🌿', price: 20000, waterCost: 80,  fruitValue: 250, sellPrice: 40800, canSell: true  },
+  premium: { name: 'Premium', emoji: '🌳', price: 30000, waterCost: 120, fruitValue: 375, sellPrice: 61200, canSell: true  },
+  pro:     { name: 'Pro',     emoji: '🌴', price: 40000, waterCost: 160, fruitValue: 500, sellPrice: 81600, canSell: true  }
 };
 
 const MAX_PLANTS = 12;
@@ -518,6 +587,18 @@ app.get('/moon-status', (req, res) => {
     multiplier: MOON_GROWTH_MULTIPLIER,
     durationMinutes: MOON_DURATION_MIN,
     eventsToday: moonState.eventsToday
+  });
+});
+
+app.get('/blessing-status', (req, res) => {
+  const now = Date.now();
+  res.json({
+    success: true,
+    active: blessingState.active,
+    startedAt: blessingState.startedAt,
+    endsAt: blessingState.endsAt,
+    secondsLeft: blessingState.active ? Math.max(0, Math.floor((blessingState.endsAt - now) / 1000)) : 0,
+    multiplier: BLESSING_FRUIT_MULTIPLIER
   });
 });
 
@@ -807,19 +888,32 @@ app.post('/harvest', requireAuth, async (req, res) => {
   try {
     const { data: plant } = await supabase.from('plants').select('*').eq('id', plantId).eq('user_id', userId).maybeSingle();
     if (!plant) return res.status(400).json({ error: 'Planta no encontrada' });
+    
     const status = getPlantStatus(plant);
     if (status.status === 'expired') return res.status(400).json({ error: '🌱 Esta planta ya cumplió su ciclo.' });
     if (status.status !== 'ready' && status.status !== 'withering') return res.status(400).json({ error: 'Todavía no podés cosechar esta planta' });
-    const value = status.value;
+    
+    let value = status.value;
     if (value <= 0) return res.status(400).json({ error: 'El fruto está podrido' });
+
+    // 🎯 APLICAR BENDICIÓN (Fruto x2)
+    let multiplicadorBendicion = 1;
+    if (blessingState.active) {
+      multiplicadorBendicion = BLESSING_FRUIT_MULTIPLIER;
+      value = value * multiplicadorBendicion;
+    }
+
     const user = await ensureUser(userId);
     const newBalance = parseFloat(user.balance) + value;
     const newWon = parseFloat(user.total_won || 0) + value;
     await supabase.from('users_balance').update({ balance: newBalance, total_won: newWon }).eq('user_id', userId);
     await supabase.from('plants').update({ status: 'dry', last_watered: null, moon_multiplier: 1 }).eq('id', plantId).eq('user_id', userId);
+    
     const level = PLANT_LEVELS[plant.level];
-    await addHistory(userId, 'plant_harvest', value, 'Cosechaste ' + level.name, null, null);
-    res.json({ success: true, value, message: '¡Cosechaste ' + value.toFixed(2) + ' JHOAL!' });
+    const msg = multiplicadorBendicion > 1 ? ' 👑 ¡Bendición x2 aplicada!' : '';
+    await addHistory(userId, 'plant_harvest', value, 'Cosechaste ' + level.name + msg, null, null);
+    
+    res.json({ success: true, value, message: '¡Cosechaste ' + value.toFixed(2) + ' JHOAL!' + msg });
   } catch (error) {
     res.status(500).json({ error: 'Error: ' + error.message });
   }
@@ -896,7 +990,8 @@ app.get('/my-plants/:userId', requireAuth, async (req, res) => {
       maxPlants: MAX_PLANTS,
       plantLevels: PLANT_LEVELS,
       lifetimeDays: PLANT_LIFETIME_DAYS,
-      moon: { active: moonState.active, endsAt: moonState.endsAt, multiplier: MOON_GROWTH_MULTIPLIER }
+      moon: { active: moonState.active, endsAt: moonState.endsAt, multiplier: MOON_GROWTH_MULTIPLIER },
+      blessing: { active: blessingState.active, endsAt: blessingState.endsAt, multiplier: BLESSING_FRUIT_MULTIPLIER }
     });
   } catch (error) {
     res.status(500).json({ error: 'Error: ' + error.message });
@@ -973,7 +1068,7 @@ app.get('/huerto-warning', (req, res) => {
 });
 
 app.get('/', (req, res) => {
-  res.json({ status: 'Faucet JHOAL + Dados + Huerto + Historial + Luna Llena + AdsGram funcionando' });
+  res.json({ status: 'Faucet JHOAL + Dados + Huerto + Historial + Luna Llena + Bendición + AdsGram funcionando' });
 });
 
 // ==== BOT PRINCIPAL ====
@@ -1000,6 +1095,7 @@ if (BOT_TOKEN) {
       '🎲 Juega en *Los Dados de Horus*\n' +
       '🌱 Planta en el *Huerto de Horus*\n' +
       '🌕 Atento a la *Luna Llena*\n' +
+      '👑 Atento a la *Bendición*\n' +
       '📜 Mirá tu *Historial*\n\n' +
       '👉 Toca "Abrir Faucet" para empezar.',
       { parse_mode: 'Markdown' }
@@ -1085,6 +1181,7 @@ app.listen(process.env.PORT || 3000, () => {
   console.log('Bot de soporte:', SUPPORT_BOT_TOKEN ? 'SÍ' : 'NO');
   console.log('Supabase:', SUPABASE_URL ? 'SÍ' : 'NO');
   console.log('🌕 Luna Llena: x' + MOON_GROWTH_MULTIPLIER);
+  console.log('👑 Bendición: Fruto x' + BLESSING_FRUIT_MULTIPLIER);
   console.log('🌱 Plantas duran ' + PLANT_LIFETIME_DAYS + ' días');
   console.log('📉 Venta decreciente: 100% día 0 → 0% día 30');
   console.log('📺 AdsGram: +' + AD_REWARD_AMOUNT + ' JHOAL cada ' + (AD_COOLDOWN/60) + ' min');
