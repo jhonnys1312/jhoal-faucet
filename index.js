@@ -215,7 +215,7 @@ moonState.todayKey = todayKeyUTC();
 scheduleNextMoon();
 setInterval(tickMoon, 30 * 1000);
 
-// ==== ESTADO BENDICIÓN ====
+// ==== ESTADO BENDICIÓN DEL FARAÓN ====
 const BLESSING_DURATION = 30 * 60 * 1000;
 const BLESSING_FRUIT_MULTIPLIER = 2;
 
@@ -399,17 +399,17 @@ const PERFECT_WINDOW = 35;
 const ROT_TIME = 60;
 const PLANT_LIFETIME_DAYS = 30;
 const PLANT_LIFETIME_SECONDS = PLANT_LIFETIME_DAYS * 24 * 60 * 60;
+const LIFETIME_MINUTES = PLANT_LIFETIME_DAYS * 24 * 60; // 43,200 minutos
 
-// 💰 PRECIO DE VENTA DECRECIENTE (100% día 0 → 0% día 30)
+// 💰 PRECIO DE VENTA DECRECIENTE POR MINUTO (100% minuto 0 → 0% en 30 días)
 function getSellPrice(plant) {
   const level = PLANT_LEVELS[plant.level];
   if (!level.canSell) return 0;
   const now = Math.floor(Date.now() / 1000);
   const createdAt = plant.created_at || now;
-  // ✅ CORREGIDO: Math.floor para que el día 0 sea el día de compra
-  const ageDays = Math.max(0, Math.floor((now - createdAt) / 86400));
-  if (ageDays >= PLANT_LIFETIME_DAYS) return 0;
-  const percentage = 1 - (ageDays / PLANT_LIFETIME_DAYS);
+  const ageMinutes = Math.max(0, (now - createdAt) / 60);
+  if (ageMinutes >= LIFETIME_MINUTES) return 0;
+  const percentage = 1 - (ageMinutes / LIFETIME_MINUTES);
   return Math.max(0, Math.floor(level.price * percentage));
 }
 
@@ -419,7 +419,7 @@ function getPlantStatus(plant) {
   const createdAt = plant.created_at || now;
   const ageSeconds = now - createdAt;
   const lifetimeLeft = PLANT_LIFETIME_SECONDS - ageSeconds;
-  // ✅ CORREGIDO: Math.floor para que los días bajen inmediatamente
+  // ✅ Math.floor para que los días bajen inmediatamente
   const daysLeft = Math.max(0, Math.floor(lifetimeLeft / 86400));
 
   if (lifetimeLeft <= 0) {
@@ -545,7 +545,7 @@ async function cleanupExpiredPlants() {
         user_id: p.user_id,
         type: 'plant_expired',
         amount: 0,
-        description: '✨ ¡Tu planta ' + nombreNivel + ' completó sus 30 días de vida! El espacio quedó libre para plantar una nueva semilla. 🌱',
+        description: '💀 Tu planta ' + nombreNivel + ' ha expirado (30 días). ¡Ya puedes sembrar otra planta en su lugar! 🌱',
         metadata: String(p.id),
         tx_hash: null,
         created_at: now
@@ -921,7 +921,7 @@ app.post('/harvest', requireAuth, async (req, res) => {
   }
 });
 
-// ==== VENDER PLANTA (precio decreciente) ====
+// ==== VENDER PLANTA (precio decreciente por minuto) ====
 app.post('/sell-plant', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { plantId } = req.body;
@@ -939,7 +939,8 @@ app.post('/sell-plant', requireAuth, async (req, res) => {
     const newBalance = parseFloat(user.balance) + sellValue;
     await supabase.from('users_balance').update({ balance: newBalance }).eq('user_id', userId);
     await supabase.from('plants').delete().eq('id', plantId).eq('user_id', userId);
-    await addHistory(userId, 'plant_sell', sellValue, 'Vendiste ' + level.name + ' (día ' + Math.floor((Date.now()/1000 - plant.created_at)/86400) + ')', null, null);
+    const ageMinutes = Math.floor((Date.now()/1000 - plant.created_at) / 60);
+    await addHistory(userId, 'plant_sell', sellValue, 'Vendiste ' + level.name + ' (minuto ' + ageMinutes + ')', null, null);
     res.json({ success: true, value: sellValue, message: '¡Vendiste por ' + sellValue.toLocaleString() + ' JHOAL!' });
   } catch (error) {
     res.status(500).json({ error: 'Error: ' + error.message });
@@ -969,12 +970,19 @@ app.get('/my-plants/:userId', requireAuth, async (req, res) => {
       const status = getPlantStatus(p);
       const level = PLANT_LEVELS[p.level];
       const sellValue = getSellPrice(p);
+      const now = Math.floor(Date.now() / 1000);
+      const createdAt = p.created_at || now;
+      const ageMinutes = Math.max(0, (now - createdAt) / 60);
+      // ✅ Porcentaje restante (100% minuto 0 → 0% en 30 días)
+      const sellPercentage = level.canSell ? Math.max(0, Math.round((1 - ageMinutes / LIFETIME_MINUTES) * 100)) : 0;
       return {
         id: p.id, level: p.level, levelName: level.name, emoji: level.emoji,
         status: status.status, value: status.value,
         minutesLeft: status.minutesLeft || 0, progress: status.progress || 0,
         waterCost: level.waterCost, fruitValue: level.fruitValue,
         sellPrice: sellValue,
+        sellPercentage: sellPercentage,
+        originalSellPrice: level.price,
         canSell: level.canSell && sellValue > 0,
         lastWatered: p.last_watered,
         canRefund: status.canRefund || false,
@@ -1063,7 +1071,7 @@ app.get('/huerto-warning', (req, res) => {
   res.json({
     success: true,
     title: '⚠️ AVISO IMPORTANTE – HUERTO DE HORUS ⚠️',
-    message: '🌱 El que no cosecha, PIERDE.\nLas plantas duran solo 30 días. Si no las RIEGAS y cosechás a tiempo, el fruto se pudre.\n💰 Podés reclamar el 90% del riego si se pudre.\n📉 El precio de venta de la planta baja cada día.\n👀 Estate atento a tus plantas.',
+    message: '🌱 El que no cosecha, PIERDE.\nLas plantas duran solo 30 días. Si no las RIEGAS y cosechás a tiempo, el fruto se pudre.\n💰 Podés reclamar el 90% del riego si se pudre.\n📉 El precio de venta de la planta baja cada minuto.\n👀 Estate atento a tus plantas.',
     lifetimeDays: PLANT_LIFETIME_DAYS,
     refundPercent: 90
   });
@@ -1185,12 +1193,12 @@ app.listen(process.env.PORT || 3000, () => {
   console.log('🌕 Luna Llena: x' + MOON_GROWTH_MULTIPLIER);
   console.log('👑 Bendición del Faraón: Fruto x' + BLESSING_FRUIT_MULTIPLIER);
   console.log('🌱 Plantas duran ' + PLANT_LIFETIME_DAYS + ' días');
-  console.log('📉 Venta decreciente: 100% día 0 → 0% día 30');
+  console.log('📉 Venta decreciente por minuto: 100% min 0 → 0% min 43,200 (30 días)');
   console.log('📺 AdsGram: +' + AD_REWARD_AMOUNT + ' JHOAL cada ' + (AD_COOLDOWN/60) + ' min');
   console.log('🧹 Limpieza automática de plantas: ACTIVADA');
 
   cleanupOldPlants();
   cleanupExpiredPlants();
-  setInterval(cleanupExpiredPlants, 60 * 60 * 1000);
+  setInterval(cleanupExpiredPlants, 5 * 60 * 1000); // Cada 5 minutos
   setInterval(cleanupOldPlants, 6 * 60 * 60 * 1000);
 });
