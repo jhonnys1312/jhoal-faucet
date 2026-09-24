@@ -38,6 +38,7 @@ async function getProvider() {
   }
   throw new Error('Ningún RPC funciona');
 }
+
 const PRIVATE_KEY = process.env.PRIVATE_KEY;
 const TOKEN_ADDRESS = process.env.TOKEN_ADDRESS;
 const PAIR_ADDRESS = '0x70163906f11E7a05eb37Dce319602e7ffc4865e5';
@@ -58,12 +59,15 @@ const REFERRAL_BOT_USERNAME = process.env.REFERRAL_BOT_USERNAME || 'Jhoal_faucet
 const REFERRAL_BANNER_URL = process.env.REFERRAL_BANNER_URL || 'https://i.imgur.com/xoIBdWv.png';
 
 // ==== CAPTCHA ANTI-BOT ====
-const CAPTCHA_EXPIRY_MS = 30 * 1000;   // 30 segundos para responder
-const CAPTCHA_MIN_BETS = 5;            // mínimo de tiradas antes del captcha
-const CAPTCHA_MAX_BETS = 10;           // máximo de tiradas antes del captcha
-const captchaStore = new Map();        // token -> { answer, userId, expiresAt, verified, verifiedAt }
-const userBetCounters = new Map();     // userId -> tiradas actuales
-const userCaptchaThresholds = new Map(); // userId -> umbral aleatorio (5-10)
+const CAPTCHA_EXPIRY_MS = 30 * 1000;
+const CAPTCHA_MIN_BETS = 5;
+const CAPTCHA_MAX_BETS = 10;
+// userId -> { question, answer, expiresAt }
+const captchaStore = new Map();
+// userId -> tiradas desde el último captcha
+const userBetCounters = new Map();
+// userId -> umbral aleatorio (5-10)
+const userCaptchaThresholds = new Map();
 
 function getCaptchaThreshold(userId) {
   if (!userCaptchaThresholds.has(userId)) {
@@ -75,8 +79,8 @@ function getCaptchaThreshold(userId) {
 }
 
 function generateCaptcha() {
-  const a = Math.floor(Math.random() * 8) + 2;   // 2-9
-  const b = Math.floor(Math.random() * 8) + 2;   // 2-9
+  const a = Math.floor(Math.random() * 8) + 2;
+  const b = Math.floor(Math.random() * 8) + 2;
   const ops = ['+', '-', '*'];
   const op = ops[Math.floor(Math.random() * ops.length)];
   let answer;
@@ -552,33 +556,17 @@ app.get('/blessing-status', (req, res) => {
   res.json({ success: true, active: blessingState.active, startedAt: blessingState.startedAt, endsAt: blessingState.endsAt, secondsLeft: blessingState.active ? Math.max(0, Math.floor((blessingState.endsAt - now) / 1000)) : 0, multiplier: BLESSING_FRUIT_MULTIPLIER });
 });
 
-// ==== CAPTCHA ENDPOINTS ====
-app.post('/captcha/generate', requireAuth, async (req, res) => {
-  try {
-    const userId = req.userId;
-    for (const [k, v] of captchaStore.entries()) if (v.expiresAt < Date.now()) captchaStore.delete(k);
-    const { question, answer } = generateCaptcha();
-    const token = crypto.randomBytes(16).toString('hex');
-    captchaStore.set(token, { answer, userId, expiresAt: Date.now() + CAPTCHA_EXPIRY_MS, verified: false });
-    res.json({ success: true, token, question, expiresInSeconds: 30 });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
+// ==== CAPTCHA (SISTEMA SIMPLE SIN TOKENS) ====
+// El frontend pide una pregunta, el backend la genera y la guarda por userId
+// El frontend envía la respuesta junto con el /bet y el backend la valida.
 
-app.post('/captcha/verify', requireAuth, async (req, res) => {
+app.post('/captcha/new', requireAuth, async (req, res) => {
   try {
     const userId = req.userId;
-    const { token, answer } = req.body;
-    if (!token || answer === undefined || answer === null || answer === '') return res.status(400).json({ error: 'Faltan datos' });
-    const c = captchaStore.get(token);
-    if (!c) return res.status(400).json({ error: 'Captcha expirado o inválido' });
-    if (c.userId !== userId) return res.status(400).json({ error: 'Captcha no válido para este usuario' });
-    if (c.expiresAt < Date.now()) { captchaStore.delete(token); return res.status(400).json({ error: 'Captcha expirado' }); }
-    if (String(answer).trim() !== c.answer) {
-      captchaStore.delete(token);
-      return res.status(400).json({ error: 'Respuesta incorrecta' });
-    }
-    captchaStore.set(token, { ...c, verified: true, verifiedAt: Date.now() });
-    res.json({ success: true, message: 'Captcha verificado' });
+    const { question, answer } = generateCaptcha();
+    captchaStore.set(userId, { question, answer, expiresAt: Date.now() + CAPTCHA_EXPIRY_MS });
+    console.log(`🛡️ Captcha para ${userId}: ${question} = ${answer}`);
+    res.json({ success: true, question, expiresInSeconds: 30 });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -751,31 +739,49 @@ app.get('/balance-game/:userId', requireAuth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ==== BET CON CAPTCHA SIMPLE ====
 app.post('/bet', requireAuth, async (req, res) => {
   const userId = req.userId;
-  const { amount, captchaToken } = req.body;
+  const { amount, captchaAnswer } = req.body;
   if (!amount) return res.status(400).json({ error: 'Faltan datos' });
   if (amount < MIN_BET || amount > MAX_BET) return res.status(400).json({ error: 'Apuesta inválida (' + MIN_BET + '-' + MAX_BET + ')' });
 
-  // ==== VALIDAR CAPTCHA (umbral aleatorio 5-10) ====
   const currentCount = userBetCounters.get(userId) || 0;
   const threshold = getCaptchaThreshold(userId);
   const needsCaptcha = currentCount >= threshold;
 
   if (needsCaptcha) {
-    if (!captchaToken) {
-      return res.status(403).json({ error: 'CAPTCHA_REQUIRED', message: 'Necesitás resolver el captcha anti-bot para seguir tirando.' });
+    // Buscar captcha pendiente para este usuario
+    const c = captchaStore.get(userId);
+    if (!c) {
+      // No hay captcha → generar uno y avisar
+      const gen = generateCaptcha();
+      captchaStore.set(userId, { question: gen.question, answer: gen.answer, expiresAt: Date.now() + CAPTCHA_EXPIRY_MS });
+      console.log(`🛡️ Captcha nuevo para ${userId}: ${gen.question} = ${gen.answer}`);
+      return res.json({ success: false, captchaRequired: true, newQuestion: gen.question });
     }
-    const c = captchaStore.get(captchaToken);
-    if (!c || !c.verified || c.userId !== userId) {
-      return res.status(403).json({ error: 'CAPTCHA_REQUIRED', message: 'Captcha inválido. Resolvé uno nuevo.' });
+    if (c.expiresAt < Date.now()) {
+      captchaStore.delete(userId);
+      const gen = generateCaptcha();
+      captchaStore.set(userId, { question: gen.question, answer: gen.answer, expiresAt: Date.now() + CAPTCHA_EXPIRY_MS });
+      console.log(`🛡️ Captcha expirado, nuevo para ${userId}: ${gen.question} = ${gen.answer}`);
+      return res.json({ success: false, captchaRequired: true, newQuestion: gen.question });
     }
-    if (Date.now() - c.verifiedAt > CAPTCHA_EXPIRY_MS) {
-      captchaStore.delete(captchaToken);
-      return res.status(403).json({ error: 'CAPTCHA_REQUIRED', message: 'Captcha expirado. Resolvé uno nuevo.' });
+    // Si no llegó respuesta → pedirla
+    if (captchaAnswer === undefined || captchaAnswer === null || captchaAnswer === '') {
+      return res.json({ success: false, captchaRequired: true, newQuestion: c.question });
     }
-    // ✅ Consumir captcha, resetear contador y sortear nuevo umbral aleatorio
-    captchaStore.delete(captchaToken);
+    // Validar respuesta
+    if (String(captchaAnswer).trim() !== c.answer) {
+      captchaStore.delete(userId);
+      const gen = generateCaptcha();
+      captchaStore.set(userId, { question: gen.question, answer: gen.answer, expiresAt: Date.now() + CAPTCHA_EXPIRY_MS });
+      console.log(`❌ Captcha incorrecto para ${userId}. Nuevo: ${gen.question} = ${gen.answer}`);
+      return res.json({ success: false, captchaRequired: true, newQuestion: gen.question, error: 'Respuesta incorrecta' });
+    }
+    // ✅ Captcha correcto
+    console.log(`✅ Captcha correcto para ${userId}`);
+    captchaStore.delete(userId);
     userBetCounters.set(userId, 0);
     userCaptchaThresholds.delete(userId);
   } else {
