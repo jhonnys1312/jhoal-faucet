@@ -48,6 +48,7 @@ const SUPPORT_USERNAME = 'JhoalSupportbot';
 const COOLDOWN = 30 * 60;
 const MIN_BET = 0.1;
 const MAX_BET = 1000;
+const WITHDRAW_COOLDOWN = 5 * 60; // 5 minutos entre retiros
 
 // ==== REFERIDOS ====
 const REFERRAL_REWARD = 1000;
@@ -59,11 +60,9 @@ const HCAPTCHA_SECRET_KEY = process.env.HCAPTCHA_SECRET_KEY;
 const HCAPTCHA_SITE_KEY = process.env.HCAPTCHA_SITE_KEY || 'b264c464-eab2-4734-9ad8-ce7aa24a8346';
 const HCAPTCHA_VERIFY_URL = 'https://api.hcaptcha.com/siteverify';
 
-// Usuarios que ya verificaron hCaptcha (userId -> timestamp)
 const userVerifiedCaptcha = new Map();
 const CAPTCHA_VERIFICATION_TTL = 0;
 
-// Captcha en DADOS: aleatorio entre 1 y 10 tiradas
 const CAPTCHA_DICE_MIN_BETS = 1;
 const CAPTCHA_DICE_MAX_BETS = 10;
 const userDiceBetCounters = new Map();
@@ -78,7 +77,7 @@ function getDiceCaptchaThreshold(userId) {
   return userDiceCaptchaThresholds.get(userId);
 }
 
-// ==== ANTI-DUPLICADO (race condition) ====
+// ==== ANTI-DUPLICADO ====
 const operationsInProgress = new Map();
 function acquireLock(key) {
   if (operationsInProgress.has(key)) return false;
@@ -136,7 +135,7 @@ const AD_REWARD_AMOUNT = 5;
 const AD_COOLDOWN = 10 * 60;
 
 // ==== COOLDOWN DE SLOT AL VENDER ====
-const SELL_SLOT_COOLDOWN = 20; // segundos
+const SELL_SLOT_COOLDOWN = 20;
 
 const provider = new ethers.JsonRpcProvider(RPC_LIST[0]);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
@@ -587,7 +586,6 @@ app.get('/blessing-status', (req, res) => {
   res.json({ success: true, active: blessingState.active, startedAt: blessingState.startedAt, endsAt: blessingState.endsAt, secondsLeft: blessingState.active ? Math.max(0, Math.floor((blessingState.endsAt - now) / 1000)) : 0, multiplier: BLESSING_FRUIT_MULTIPLIER });
 });
 
-// ==== HCAPTCHA STATUS ====
 app.get('/captcha/status/:userId', requireAuth, async (req, res) => {
   try {
     const userId = req.userId;
@@ -605,7 +603,6 @@ app.get('/captcha/status/:userId', requireAuth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ==== REFERIDOS ENDPOINTS ====
 app.post('/register-referral', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { referrerId } = req.body;
@@ -669,13 +666,18 @@ app.post('/move-to-game', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { amount } = req.body;
   if (!amount || amount <= 0) return res.status(400).json({ error: 'Cantidad inválida' });
+
+  // 🔒 Lock por usuario
+  const lockKey = `move_${userId}`;
+  if (!acquireLock(lockKey)) return res.status(429).json({ error: '⏳ Movimiento en proceso. Esperá.' });
+
   try {
     const user = await ensureUser(userId);
-    if (!user.deposit_address || !user.deposit_private_key) return res.status(400).json({ error: 'No tienes wallet personal' });
-    if (parseFloat(user.wallet_balance || 0) < amount) return res.status(400).json({ error: 'Saldo insuficiente en wallet' });
+    if (!user.deposit_address || !user.deposit_private_key) { releaseLock(lockKey); return res.status(400).json({ error: 'No tienes wallet personal' }); }
+    if (parseFloat(user.wallet_balance || 0) < amount) { releaseLock(lockKey); return res.status(400).json({ error: 'Saldo insuficiente en wallet' }); }
     const realBalanceWei = await token.balanceOf(user.deposit_address);
     const realBalance = parseFloat(ethers.formatUnits(realBalanceWei, 18));
-    if (realBalance < amount) return res.status(400).json({ error: 'La wallet no tiene fondos suficientes' });
+    if (realBalance < amount) { releaseLock(lockKey); return res.status(400).json({ error: 'La wallet no tiene fondos suficientes' }); }
     const bnbNeeded = ethers.parseEther('0.000002');
     const bnbBalance = await provider.getBalance(user.deposit_address);
     if (bnbBalance < bnbNeeded) { const bnbTx = await wallet.sendTransaction({ to: user.deposit_address, value: bnbNeeded }); await bnbTx.wait(); }
@@ -689,8 +691,9 @@ app.post('/move-to-game', requireAuth, async (req, res) => {
     const newGameBalance = parseFloat(user.balance) + amount;
     await supabase.from('users_balance').update({ wallet_balance: newWalletBalance, balance: newGameBalance }).eq('user_id', userId);
     await addHistory(userId, 'deposit_game', amount, '🎮 Movido al saldo del juego', null, tx.hash);
+    releaseLock(lockKey);
     res.json({ success: true, txHash: tx.hash, newWalletBalance, newGameBalance, explorer: 'https://bscscan.com/tx/' + tx.hash });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { releaseLock(lockKey); res.status(500).json({ error: e.message }); }
 });
 
 app.post('/claim', requireAuth, async (req, res) => {
@@ -728,10 +731,9 @@ app.post('/claim-ad-reward-manual', requireAuth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.get('/claim-ad-reward', async (req, res) => {
+app.get('/claim-ad-reward', requireAuth, async (req, res) => {
   try {
-    const userId = req.query.userId;
-    if (!userId) return res.status(400).json({ error: 'Falta userId' });
+    const userId = req.userId;
     const user = await ensureUser(userId);
     const now = Math.floor(Date.now() / 1000);
     const lastAdReward = user.last_ad_reward || 0;
@@ -760,12 +762,16 @@ app.get('/balance-game/:userId', requireAuth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ==== BET CON HCAPTCHA ====
+// ==== BET CON HCAPTCHA + LOCK ====
 app.post('/bet', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { amount, hcaptchaToken } = req.body;
   if (!amount) return res.status(400).json({ error: 'Faltan datos' });
   if (amount < MIN_BET || amount > MAX_BET) return res.status(400).json({ error: 'Apuesta inválida (' + MIN_BET + '-' + MAX_BET + ')' });
+
+  // 🔒 Lock anti doble-click
+  const lockKey = `bet_${userId}`;
+  if (!acquireLock(lockKey)) return res.status(429).json({ error: '⏳ Apuesta en proceso. Esperá.' });
 
   const currentCount = userDiceBetCounters.get(userId) || 0;
   const threshold = getDiceCaptchaThreshold(userId);
@@ -775,6 +781,7 @@ app.post('/bet', requireAuth, async (req, res) => {
 
   if (needsCaptcha) {
     if (!hcaptchaToken) {
+      releaseLock(lockKey);
       return res.status(403).json({
         error: 'HCAPTCHA_REQUIRED',
         message: 'Necesitás verificar que sos humano para seguir tirando.',
@@ -783,6 +790,7 @@ app.post('/bet', requireAuth, async (req, res) => {
     }
     const verifyResult = await verificarHCaptcha(hcaptchaToken, req.ip);
     if (!verifyResult.success) {
+      releaseLock(lockKey);
       return res.status(403).json({
         error: 'HCAPTCHA_FAILED',
         message: 'Verificación fallida. Intentá de nuevo.',
@@ -799,7 +807,7 @@ app.post('/bet', requireAuth, async (req, res) => {
 
   try {
     const user = await ensureUser(userId);
-    if (parseFloat(user.balance) < amount) return res.status(400).json({ error: 'Saldo insuficiente' });
+    if (parseFloat(user.balance) < amount) { releaseLock(lockKey); return res.status(400).json({ error: 'Saldo insuficiente' }); }
     const multiplier = spinRoulette();
     const payout = amount * multiplier;
     const profit = payout - amount;
@@ -818,8 +826,9 @@ app.post('/bet', requireAuth, async (req, res) => {
     await supabase.from('bets').insert({ user_id: userId, amount, multiplier, payout, result: multiplier === 0 ? 'lose' : 'win', created_at: now });
     if (multiplier === 0) await addHistory(userId, 'dice_lose', -amount, 'Perdiste en los dados (x0)', null, null);
     else await addHistory(userId, 'dice_win', profit, 'Ganaste x' + multiplier + ' en los dados', null, null);
+    releaseLock(lockKey);
     res.json({ success: true, multiplier, payout, profit, newBalance });
-  } catch (error) { res.status(500).json({ error: 'Error: ' + error.message }); }
+  } catch (error) { releaseLock(lockKey); res.status(500).json({ error: 'Error: ' + error.message }); }
 });
 
 app.get('/bet-history/:userId', requireAuth, async (req, res) => {
@@ -829,30 +838,112 @@ app.get('/bet-history/:userId', requireAuth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ==== WITHDRAW CON LOCK + ATOMIC UPDATE + REVERT ====
 app.post('/withdraw', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { wallet: userWallet, amount } = req.body;
   if (!userWallet || !amount) return res.status(400).json({ error: 'Faltan datos' });
   if (!ethers.isAddress(userWallet)) return res.status(400).json({ error: 'Wallet inválida' });
   if (amount <= 0) return res.status(400).json({ error: 'Cantidad inválida' });
+
+  const lockKey = `withdraw_${userId}`;
+  if (!acquireLock(lockKey)) return res.status(429).json({ error: '⏳ Ya hay un retiro en proceso. Esperá.' });
+
   try {
+    // Cooldown de retiros
+    const { data: recent } = await supabase
+      .from('withdrawals')
+      .select('created_at')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (recent) {
+      const diff = Math.floor(Date.now() / 1000) - recent.created_at;
+      if (diff < WITHDRAW_COOLDOWN) {
+        releaseLock(lockKey);
+        return res.status(429).json({ error: '⏳ Esperá ' + (WITHDRAW_COOLDOWN - diff) + 's entre retiros' });
+      }
+    }
+
     const user = await ensureUser(userId);
-    if (parseFloat(user.balance) < amount) return res.status(400).json({ error: 'Saldo insuficiente' });
-    const amountWei = ethers.parseUnits(amount.toString(), 18);
-    const tx = await token.transfer(userWallet, amountWei);
-    const newBalance = parseFloat(user.balance) - amount;
-    const newWithdrawn = parseFloat(user.total_withdrawn || 0) + amount;
-    await supabase.from('users_balance').update({ balance: newBalance, total_withdrawn: newWithdrawn }).eq('user_id', userId);
-    await supabase.from('withdrawals').insert({ user_id: userId, wallet: userWallet, amount, tx_hash: tx.hash, created_at: Math.floor(Date.now() / 1000) });
+    if (parseFloat(user.balance) < amount) {
+      releaseLock(lockKey);
+      return res.status(400).json({ error: 'Saldo insuficiente' });
+    }
+
+    const previousBalance = parseFloat(user.balance);
+    const previousWithdrawn = parseFloat(user.total_withdrawn || 0);
+    const newBalance = previousBalance - amount;
+    const newWithdrawn = previousWithdrawn + amount;
+
+    // 🔒 Debitar atómicamente
+    const { data: updated, error: updErr } = await supabase
+      .from('users_balance')
+      .update({ balance: newBalance, total_withdrawn: newWithdrawn })
+      .eq('user_id', userId)
+      .gte('balance', amount)
+      .select();
+
+    if (updErr || !updated || updated.length === 0) {
+      releaseLock(lockKey);
+      return res.status(400).json({ error: 'Saldo insuficiente o retiro duplicado' });
+    }
+
+    // 💸 Enviar TX
+    let tx;
+    try {
+      const amountWei = ethers.parseUnits(amount.toString(), 18);
+      tx = await token.transfer(userWallet, amountWei);
+      await tx.wait();
+    } catch (txErr) {
+      console.error('❌ TX falló, revirtiendo débito:', txErr.message);
+      await supabase.from('users_balance').update({
+        balance: previousBalance,
+        total_withdrawn: previousWithdrawn
+      }).eq('user_id', userId);
+      releaseLock(lockKey);
+      return res.status(500).json({ error: 'Error enviando TX: ' + txErr.message });
+    }
+
+    await supabase.from('withdrawals').insert({
+      user_id: userId, wallet: userWallet, amount, tx_hash: tx.hash,
+      created_at: Math.floor(Date.now() / 1000)
+    });
     await addHistory(userId, 'withdraw', -amount, 'Retiro a wallet', null, tx.hash);
-    await tx.wait();
-    res.json({ success: true, txHash: tx.hash, explorer: 'https://bscscan.com/tx/' + tx.hash, amount });
-  } catch (error) { res.status(500).json({ error: 'Error: ' + error.message }); }
+
+    releaseLock(lockKey);
+    res.json({
+      success: true,
+      txHash: tx.hash,
+      explorer: 'https://bscscan.com/tx/' + tx.hash,
+      amount
+    });
+  } catch (error) {
+    releaseLock(lockKey);
+    res.status(500).json({ error: 'Error: ' + error.message });
+  }
+});
+
+// ==== CONSULTAR RETIROS PENDIENTES ====
+app.get('/withdrawals/pending/:userId', requireAuth, async (req, res) => {
+  try {
+    const userId = req.userId;
+    const fiveMinAgo = Math.floor(Date.now() / 1000) - 300;
+    const { data } = await supabase
+      .from('withdrawals')
+      .select('id, amount, tx_hash, created_at')
+      .eq('user_id', userId)
+      .gte('created_at', fiveMinAgo)
+      .order('created_at', { ascending: false })
+      .limit(1);
+    res.json({ success: true, hasPending: !!(data && data.length > 0), last: (data && data[0]) || null });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get('/deposit-info', (req, res) => res.json({ success: true, depositWallet: wallet.address, tokenAddress: TOKEN_ADDRESS, minDeposit: 1 }));
 
-// ==== BUY PLANT (con lock + hCaptcha + cooldown de slot) ====
+// ==== BUY PLANT (lock + hCaptcha + cooldown de slot) ====
 app.post('/buy-plant', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { level, hcaptchaToken } = req.body;
@@ -862,29 +953,19 @@ app.post('/buy-plant', requireAuth, async (req, res) => {
   if (!acquireLock(lockKey)) return res.status(429).json({ error: '⏳ Compra en proceso. Esperá.' });
 
   try {
-    // 🛡️ Verificar hCaptcha en CADA compra
     if (!hcaptchaToken) {
       releaseLock(lockKey);
-      return res.status(403).json({
-        error: 'HCAPTCHA_REQUIRED',
-        message: 'Verificá que sos humano para comprar.',
-        sitekey: HCAPTCHA_SITE_KEY
-      });
+      return res.status(403).json({ error: 'HCAPTCHA_REQUIRED', message: 'Verificá que sos humano para comprar.', sitekey: HCAPTCHA_SITE_KEY });
     }
     const verifyResult = await verificarHCaptcha(hcaptchaToken, req.ip);
     if (!verifyResult.success) {
       releaseLock(lockKey);
-      return res.status(403).json({
-        error: 'HCAPTCHA_FAILED',
-        message: 'Verificación fallida. Intentá de nuevo.',
-        sitekey: HCAPTCHA_SITE_KEY
-      });
+      return res.status(403).json({ error: 'HCAPTCHA_FAILED', message: 'Verificación fallida. Intentá de nuevo.', sitekey: HCAPTCHA_SITE_KEY });
     }
     console.log(`✅ hCaptcha verificado (BUY) para ${userId}`);
 
     const user = await ensureUser(userId);
 
-    // 🔒 Verificar cooldown del slot (por venta reciente)
     const nowSec = Math.floor(Date.now() / 1000);
     if (user.plant_slot_cooldown_until && user.plant_slot_cooldown_until > nowSec) {
       const remaining = user.plant_slot_cooldown_until - nowSec;
@@ -909,7 +990,7 @@ app.post('/buy-plant', requireAuth, async (req, res) => {
   } catch (error) { releaseLock(lockKey); res.status(500).json({ error: 'Error: ' + error.message }); }
 });
 
-// ==== WATER PLANT (con lock) ====
+// ==== WATER PLANT (lock) ====
 app.post('/water-plant', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { plantId } = req.body;
@@ -940,7 +1021,7 @@ app.post('/water-plant', requireAuth, async (req, res) => {
   } catch (error) { releaseLock(lockKey); res.status(500).json({ error: 'Error: ' + error.message }); }
 });
 
-// ==== HARVEST (CON HCAPTCHA + LOCK) ====
+// ==== HARVEST (hCaptcha + lock) ====
 app.post('/harvest', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { plantId, hcaptchaToken } = req.body;
@@ -958,23 +1039,14 @@ app.post('/harvest', requireAuth, async (req, res) => {
     let value = status.value;
     if (value <= 0) { releaseLock(lockKey); return res.status(400).json({ error: 'El fruto está podrido' }); }
 
-    // 🛡️ Verificar hCaptcha en CADA cosecha
     if (!hcaptchaToken) {
       releaseLock(lockKey);
-      return res.status(403).json({
-        error: 'HCAPTCHA_REQUIRED',
-        message: 'Verificá que sos humano para cosechar.',
-        sitekey: HCAPTCHA_SITE_KEY
-      });
+      return res.status(403).json({ error: 'HCAPTCHA_REQUIRED', message: 'Verificá que sos humano para cosechar.', sitekey: HCAPTCHA_SITE_KEY });
     }
     const verifyResult = await verificarHCaptcha(hcaptchaToken, req.ip);
     if (!verifyResult.success) {
       releaseLock(lockKey);
-      return res.status(403).json({
-        error: 'HCAPTCHA_FAILED',
-        message: 'Verificación fallida. Intentá de nuevo.',
-        sitekey: HCAPTCHA_SITE_KEY
-      });
+      return res.status(403).json({ error: 'HCAPTCHA_FAILED', message: 'Verificación fallida. Intentá de nuevo.', sitekey: HCAPTCHA_SITE_KEY });
     }
     console.log(`✅ hCaptcha verificado (HARVEST) para ${userId}`);
 
@@ -993,7 +1065,7 @@ app.post('/harvest', requireAuth, async (req, res) => {
   } catch (error) { releaseLock(lockKey); res.status(500).json({ error: 'Error: ' + error.message }); }
 });
 
-// ==== SELL PLANT (con lock + hCaptcha + cooldown de slot 20s) ====
+// ==== SELL PLANT (lock + hCaptcha + DELETE atómico + cooldown de slot) ====
 app.post('/sell-plant', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { plantId, hcaptchaToken } = req.body;
@@ -1003,45 +1075,51 @@ app.post('/sell-plant', requireAuth, async (req, res) => {
   if (!acquireLock(lockKey)) return res.status(429).json({ error: '⏳ Venta en proceso. Esperá.' });
 
   try {
-    const { data: plant } = await supabase.from('plants').select('*').eq('id', plantId).eq('user_id', userId).maybeSingle();
-    if (!plant) { releaseLock(lockKey); return res.status(400).json({ error: 'Planta no encontrada' }); }
-
-    // 🛡️ Verificar hCaptcha en CADA venta
+    // 🛡️ Verificar hCaptcha PRIMERO
     if (!hcaptchaToken) {
       releaseLock(lockKey);
-      return res.status(403).json({
-        error: 'HCAPTCHA_REQUIRED',
-        message: 'Verificá que sos humano para vender.',
-        sitekey: HCAPTCHA_SITE_KEY
-      });
+      return res.status(403).json({ error: 'HCAPTCHA_REQUIRED', message: 'Verificá que sos humano para vender.', sitekey: HCAPTCHA_SITE_KEY });
     }
     const verifyResult = await verificarHCaptcha(hcaptchaToken, req.ip);
     if (!verifyResult.success) {
       releaseLock(lockKey);
-      return res.status(403).json({
-        error: 'HCAPTCHA_FAILED',
-        message: 'Verificación fallida. Intentá de nuevo.',
-        sitekey: HCAPTCHA_SITE_KEY
-      });
+      return res.status(403).json({ error: 'HCAPTCHA_FAILED', message: 'Verificación fallida. Intentá de nuevo.', sitekey: HCAPTCHA_SITE_KEY });
     }
     console.log(`✅ hCaptcha verificado (SELL) para ${userId}`);
+
+    // 🔒 Re-leer la planta DESPUÉS del captcha
+    const { data: plant } = await supabase.from('plants').select('*').eq('id', plantId).eq('user_id', userId).maybeSingle();
+    if (!plant) { releaseLock(lockKey); return res.status(400).json({ error: 'Planta no encontrada o ya vendida' }); }
 
     const level = PLANT_LEVELS[plant.level];
     if (!level.canSell) { releaseLock(lockKey); return res.status(400).json({ error: '❌ La planta ' + level.name + ' no se puede vender.' }); }
     const sellValue = getSellPrice(plant);
     if (sellValue <= 0) { releaseLock(lockKey); return res.status(400).json({ error: 'La planta ya no tiene valor de venta. Dejala cumplir su ciclo.' }); }
 
+    // 🔒 DELETE atómico
+    const { data: deleted, error: delErr } = await supabase
+      .from('plants')
+      .delete()
+      .eq('id', plantId)
+      .eq('user_id', userId)
+      .select();
+
+    if (delErr || !deleted || deleted.length === 0) {
+      releaseLock(lockKey);
+      return res.status(400).json({ error: 'La planta ya fue vendida' });
+    }
+
+    // Actualizar balance después del delete exitoso
     const user = await ensureUser(userId);
     const newBalance = parseFloat(user.balance) + sellValue;
     await supabase.from('users_balance').update({ balance: newBalance }).eq('user_id', userId);
-    await supabase.from('plants').delete().eq('id', plantId).eq('user_id', userId);
 
-    // 🔒 Cooldown del slot: el usuario no puede comprar otra planta por 20s
     const cooldownUntil = Math.floor(Date.now() / 1000) + SELL_SLOT_COOLDOWN;
     await supabase.from('users_balance').update({ plant_slot_cooldown_until: cooldownUntil }).eq('user_id', userId);
 
-    const ageMinutes = Math.floor((Date.now()/1000 - plant.created_at) / 60);
+    const ageMinutes = Math.floor((Date.now() / 1000 - plant.created_at) / 60);
     await addHistory(userId, 'plant_sell', sellValue, 'Vendiste ' + level.name + ' (minuto ' + ageMinutes + ')', null, null);
+
     releaseLock(lockKey);
     res.json({
       success: true,
@@ -1053,7 +1131,6 @@ app.post('/sell-plant', requireAuth, async (req, res) => {
   } catch (error) { releaseLock(lockKey); res.status(500).json({ error: 'Error: ' + error.message }); }
 });
 
-// ==== REFUND PLANT (con lock) ====
 app.post('/refund-plant', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { plantId } = req.body;
@@ -1068,7 +1145,6 @@ app.post('/refund-plant', requireAuth, async (req, res) => {
   else res.status(400).json({ error: result.error });
 });
 
-// ==== MY PLANTS (devuelve cooldown restante) ====
 app.get('/my-plants/:userId', requireAuth, async (req, res) => {
   try {
     const userId = req.userId;
@@ -1304,8 +1380,9 @@ app.listen(process.env.PORT || 3000, () => {
   console.log('🎁 Referidos: +' + REFERRAL_REWARD + ' JHOAL por referido válido');
   console.log('🛡️ hCaptcha DADOS: aleatorio entre ' + CAPTCHA_DICE_MIN_BETS + ' y ' + CAPTCHA_DICE_MAX_BETS + ' tiradas');
   console.log('🛡️ hCaptcha HUERTO: en cada cosecha, compra y venta');
-  console.log('🔒 Locks anti-doble-click: ACTIVADOS');
+  console.log('🔒 Locks anti-doble-click: ACTIVADOS en bet, withdraw, move-to-game, buy, sell, harvest, water, refund');
   console.log('⏳ Cooldown de slot al vender: ' + SELL_SLOT_COOLDOWN + 's');
+  console.log('⏳ Cooldown entre retiros: ' + WITHDRAW_COOLDOWN + 's');
   console.log('🎲 Dados: x0=42% | x1.1=45% | x2=6% | x4=3% | x6=2% | x8=1% | x10=1%');
   console.log('🧹 Limpieza automática de plantas: ACTIVADA');
   cleanupOldPlants();
