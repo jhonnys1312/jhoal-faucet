@@ -61,7 +61,7 @@ const HCAPTCHA_VERIFY_URL = 'https://api.hcaptcha.com/siteverify';
 
 // Usuarios que ya verificaron hCaptcha (userId -> timestamp)
 const userVerifiedCaptcha = new Map();
-const CAPTCHA_VERIFICATION_TTL = 5 * 60 * 1000;   // 5 minutos de validez
+const CAPTCHA_VERIFICATION_TTL = 0;
 
 // Captcha en DADOS: aleatorio entre 1 y 10 tiradas
 const CAPTCHA_DICE_MIN_BETS = 1;
