@@ -73,6 +73,10 @@ const MOON_MAX_PER_DAY = 5;
 const AD_REWARD_AMOUNT = 5;
 const AD_COOLDOWN = 10 * 60;
 
+// ==== CAPTCHA EN DADOS ====
+const CAPTCHA_ROLLS_MIN = 5;
+const CAPTCHA_ROLLS_MAX = 10;
+
 const provider = new ethers.JsonRpcProvider(RPC_LIST[0]);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 
@@ -157,11 +161,8 @@ function scheduleNextMoon() {
   const remainingMin = MOON_MIN_PER_DAY - moonState.eventsToday;
   const hoursLeftToday = 24 - new Date().getUTCHours();
   let delay;
-  if (remainingMin > 0 && hoursLeftToday <= remainingMin) {
-    delay = randInt(60, 1800);
-  } else {
-    delay = randInt(1800, 5 * 3600);
-  }
+  if (remainingMin > 0 && hoursLeftToday <= remainingMin) delay = randInt(60, 1800);
+  else delay = randInt(1800, 5 * 3600);
   moonState.nextEventAt = now + delay;
 }
 
@@ -202,17 +203,9 @@ function deactivateMoon() {
 function tickMoon() {
   const now = Math.floor(Date.now() / 1000);
   const key = todayKeyUTC();
-  if (moonState.todayKey !== key) {
-    moonState.todayKey = key;
-    moonState.eventsToday = 0;
-  }
-  if (moonState.active && now >= moonState.endsAt) {
-    deactivateMoon();
-    return;
-  }
-  if (!moonState.active && moonState.nextEventAt > 0 && now >= moonState.nextEventAt) {
-    activateMoon();
-  }
+  if (moonState.todayKey !== key) { moonState.todayKey = key; moonState.eventsToday = 0; }
+  if (moonState.active && now >= moonState.endsAt) { deactivateMoon(); return; }
+  if (!moonState.active && moonState.nextEventAt > 0 && now >= moonState.nextEventAt) activateMoon();
 }
 
 moonState.todayKey = todayKeyUTC();
@@ -243,14 +236,11 @@ function scheduleBlessing() {
     const randomHour = randInt(0, 23);
     const randomMin = randInt(0, 59);
     console.log(`👑 Bendición del Faraón programada para hoy a las ${randomHour}:${randomMin}`);
-
     const now = new Date();
     const targetTime = new Date();
     targetTime.setUTCHours(randomHour, randomMin, 0, 0);
-
     let msUntilEvent = targetTime.getTime() - now.getTime();
     if (msUntilEvent < 0) msUntilEvent += 24 * 60 * 60 * 1000;
-
     setTimeout(activateBlessing, msUntilEvent);
   }
 }
@@ -261,7 +251,6 @@ function activateBlessing() {
   blessingState.endsAt = Date.now() + BLESSING_DURATION;
   console.log('👑 ¡BENDICIÓN DEL FARAÓN ACTIVA! Fruto x2');
   notificarBendicion();
-
   setTimeout(() => {
     blessingState.active = false;
     console.log('👑 Bendición del Faraón terminada.');
@@ -300,10 +289,7 @@ async function checkDeposits() {
     const { data: users, error } = await supabase.from('users_balance')
       .select('user_id, deposit_address, wallet_balance, last_deposit_block')
       .not('deposit_address', 'is', null);
-    if (error || !users || users.length === 0) {
-      monitorRunning = false;
-      return;
-    }
+    if (error || !users || users.length === 0) { monitorRunning = false; return; }
     const toBlock = currentBlock - 3;
     for (const u of users) {
       try {
@@ -359,9 +345,7 @@ function validateInitData(initData) {
     if (!hash) return null;
     params.delete('hash');
     const dataCheckArr = [];
-    for (const [key, value] of params.entries()) {
-      dataCheckArr.push(key + '=' + value);
-    }
+    for (const [key, value] of params.entries()) dataCheckArr.push(key + '=' + value);
     dataCheckArr.sort();
     const dataCheckString = dataCheckArr.join('\n');
     const secretKey = crypto.createHmac('sha256', 'WebAppData').update(BOT_TOKEN).digest();
@@ -373,9 +357,7 @@ function validateInitData(initData) {
     if (!userJson) return null;
     const userObj = JSON.parse(userJson);
     return userObj.id ? String(userObj.id) : null;
-  } catch (e) {
-    return null;
-  }
+  } catch (e) { return null; }
 }
 
 function requireAuth(req, res, next) {
@@ -423,13 +405,8 @@ function getPlantStatus(plant) {
   const lifetimeLeft = PLANT_LIFETIME_SECONDS - ageSeconds;
   const daysLeft = Math.max(0, Math.floor(lifetimeLeft / 86400));
 
-  if (lifetimeLeft <= 0) {
-    return { status: 'expired', value: 0, minutesLeft: 0, progress: 0, canRefund: false, daysLeft: 0, expiresAt: createdAt + PLANT_LIFETIME_SECONDS };
-  }
-
-  if (plant.status === 'dry' || !plant.last_watered) {
-    return { status: 'dry', value: 0, minutesLeft: 0, progress: 0, canRefund: false, daysLeft, expiresAt: createdAt + PLANT_LIFETIME_SECONDS };
-  }
+  if (lifetimeLeft <= 0) return { status: 'expired', value: 0, minutesLeft: 0, progress: 0, canRefund: false, daysLeft: 0, expiresAt: createdAt + PLANT_LIFETIME_SECONDS };
+  if (plant.status === 'dry' || !plant.last_watered) return { status: 'dry', value: 0, minutesLeft: 0, progress: 0, canRefund: false, daysLeft, expiresAt: createdAt + PLANT_LIFETIME_SECONDS };
 
   const moonMult = parseFloat(plant.moon_multiplier || 1) || 1;
   const effectiveGrowTime = GROW_TIME_MIN / moonMult;
@@ -443,9 +420,7 @@ function getPlantStatus(plant) {
   const elapsedSinceReady = elapsed - effectiveGrowTime;
   const perfectDuration = PERFECT_WINDOW - GROW_TIME_MIN;
 
-  if (elapsedSinceReady <= perfectDuration) {
-    return { status: 'ready', value: level.fruitValue, minutesLeft: Math.ceil(perfectDuration - elapsedSinceReady), progress: 100, canRefund: false, moonBoost: moonMult > 1, daysLeft, expiresAt: createdAt + PLANT_LIFETIME_SECONDS };
-  }
+  if (elapsedSinceReady <= perfectDuration) return { status: 'ready', value: level.fruitValue, minutesLeft: Math.ceil(perfectDuration - elapsedSinceReady), progress: 100, canRefund: false, moonBoost: moonMult > 1, daysLeft, expiresAt: createdAt + PLANT_LIFETIME_SECONDS };
 
   const witheringTotal = ROT_TIME - PERFECT_WINDOW;
   const witheringElapsed = elapsedSinceReady - perfectDuration;
@@ -480,8 +455,9 @@ function spinRoulette() {
   else return 10;
 }
 
-// ==== CAPTCHA ANTI-BOT ====
-const captchaStore = new Map();
+// ==== CAPTCHA (SOLO DADOS) ====
+const captchaStore = new Map(); // userId -> { answer, expiresAt }
+const rollCounter = new Map();  // userId -> { count, nextCaptchaAt }
 const CAPTCHA_EXPIRY_MS = 60 * 1000;
 
 function generateCaptcha(userId) {
@@ -502,29 +478,24 @@ function generateCaptcha(userId) {
 function verifyCaptcha(userId, userAnswer) {
   const entry = captchaStore.get(String(userId));
   if (!entry) return { ok: false, error: 'Captcha no generado o expirado' };
-  if (entry.expiresAt < Date.now()) {
-    captchaStore.delete(String(userId));
-    return { ok: false, error: 'Captcha expirado' };
-  }
-  if (String(userAnswer).trim() !== entry.answer) {
-    return { ok: false, error: 'Respuesta incorrecta' };
-  }
+  if (entry.expiresAt < Date.now()) { captchaStore.delete(String(userId)); return { ok: false, error: 'Captcha expirado' }; }
+  if (String(userAnswer).trim() !== entry.answer) return { ok: false, error: 'Respuesta incorrecta' };
   captchaStore.delete(String(userId));
   return { ok: true };
 }
 
-function requireCaptcha(req, res, next) {
-  const captchaAnswer = req.body.captchaAnswer;
-  const check = verifyCaptcha(req.userId, captchaAnswer);
-  if (!check.ok) {
-    const nuevo = generateCaptcha(req.userId);
-    return res.status(400).json({
-      error: '🛡️ ' + check.error,
-      captchaRequired: true,
-      newQuestion: nuevo.question
-    });
-  }
-  next();
+function resetRollCounter(userId) {
+  const nextAt = randInt(CAPTCHA_ROLLS_MIN, CAPTCHA_ROLLS_MAX);
+  rollCounter.set(String(userId), { count: 0, nextCaptchaAt: nextAt });
+}
+
+function shouldShowCaptcha(userId) {
+  const key = String(userId);
+  if (!rollCounter.has(key)) resetRollCounter(key);
+  const state = rollCounter.get(key);
+  state.count += 1;
+  if (state.count >= state.nextCaptchaAt) return true;
+  return false;
 }
 
 async function getUser(userId) {
@@ -570,19 +541,14 @@ async function refundPlant(userId, plantId) {
     });
     await supabase.from('plants').update({ status: 'dry', last_watered: null, moon_multiplier: 1 }).eq('id', plantId).eq('user_id', userId);
     return { success: true, amount: refundAmount, message: '¡Recibiste ' + refundAmount.toFixed(2) + ' JHOAL de reembolso (90% del riego)!' };
-  } catch (e) {
-    return { success: false, error: e.message };
-  }
+  } catch (e) { return { success: false, error: e.message }; }
 }
 
 async function cleanupExpiredPlants() {
   try {
     const now = Math.floor(Date.now() / 1000);
     const limiteExpiracion = now - PLANT_LIFETIME_SECONDS;
-    const { data: expiradas } = await supabase
-      .from('plants')
-      .select('id, user_id, level, created_at')
-      .lt('created_at', limiteExpiracion);
+    const { data: expiradas } = await supabase.from('plants').select('id, user_id, level, created_at').lt('created_at', limiteExpiracion);
     if (!expiradas || expiradas.length === 0) return;
     console.log(`🧹 ${expiradas.length} plantas expiradas detectadas`);
     for (const p of expiradas) {
@@ -618,9 +584,7 @@ async function otorgarRecompensaReferido(referrerId, referredId) {
     if (yaExiste) return { success: false, error: 'Ya se pagó este referido' };
 
     const referredUser = await ensureUser(referredId);
-    if (!referredUser.total_claimed || parseFloat(referredUser.total_claimed) < 1) {
-      return { success: false, error: 'El referido aún no reclama el faucet' };
-    }
+    if (!referredUser.total_claimed || parseFloat(referredUser.total_claimed) < 1) return { success: false, error: 'El referido aún no reclama el faucet' };
 
     const { error: insErr } = await supabase.from('referrals').insert({
       referrer_id: referrerId, referred_id: referredId,
@@ -655,9 +619,7 @@ async function intentarPagarReferido(userId) {
     const { data: pendiente } = await supabase.from('referrals_pending').select('*').eq('referred_id', userId).maybeSingle();
     if (!pendiente) return;
     const result = await otorgarRecompensaReferido(pendiente.referrer_id, userId);
-    if (result.success) {
-      await supabase.from('referrals_pending').delete().eq('referred_id', userId);
-    }
+    if (result.success) await supabase.from('referrals_pending').delete().eq('referred_id', userId);
   } catch (e) { console.error('Error intentarPagarReferido:', e); }
 }
 
@@ -775,8 +737,8 @@ app.post('/move-to-game', requireAuth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// 🛡️ FAUCET
-app.post('/claim', requireAuth, requireCaptcha, async (req, res) => {
+// FAUCET sin captcha
+app.post('/claim', requireAuth, async (req, res) => {
   const userId = req.userId;
   try {
     const user = await ensureUser(userId);
@@ -789,15 +751,13 @@ app.post('/claim', requireAuth, requireCaptcha, async (req, res) => {
     const newClaimed = parseFloat(user.total_claimed || 0) + 1;
     await supabase.from('users_balance').update({ balance: newBalance, total_claimed: newClaimed, last_claim: now }).eq('user_id', userId);
     await addHistory(userId, 'faucet', 1, 'Reclamo del faucet', null, null);
-
     intentarPagarReferido(userId);
-
     res.json({ success: true, amount: 1, message: '¡1 JHOAL añadido a tu saldo!' });
   } catch (error) { res.status(500).json({ error: 'Error: ' + error.message }); }
 });
 
-// 🛡️ ANUNCIO
-app.post('/claim-ad-reward-manual', requireAuth, requireCaptcha, async (req, res) => {
+// ANUNCIO sin captcha
+app.post('/claim-ad-reward-manual', requireAuth, async (req, res) => {
   const userId = req.userId;
   try {
     const user = await ensureUser(userId);
@@ -841,12 +801,43 @@ app.get('/balance-game/:userId', requireAuth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// 🛡️ DADOS
-app.post('/bet', requireAuth, requireCaptcha, async (req, res) => {
+// 🎲 DADOS con captcha aleatorio cada 5-10 tiradas
+app.post('/bet', requireAuth, async (req, res) => {
   const userId = req.userId;
-  const { amount } = req.body;
+  const { amount, captchaAnswer } = req.body;
   if (!amount) return res.status(400).json({ error: 'Faltan datos' });
   if (amount < MIN_BET || amount > MAX_BET) return res.status(400).json({ error: 'Apuesta inválida (' + MIN_BET + '-' + MAX_BET + ')' });
+
+  // 🛡️ ¿Toca captcha?
+  const tocaCaptcha = shouldShowCaptcha(userId);
+
+  if (tocaCaptcha) {
+    // Si el usuario no mandó respuesta → pedir captcha y rechazar la tirada
+    if (!captchaAnswer) {
+      const nuevo = generateCaptcha(userId);
+      // Reiniciar contador para que después de resolver tenga otras 5-10 tiradas
+      resetRollCounter(userId);
+      return res.status(400).json({
+        error: '🛡️ Verificación anti-bot: resolvé la operación',
+        captchaRequired: true,
+        newQuestion: nuevo.question
+      });
+    }
+    // Si mandó respuesta → validar
+    const check = verifyCaptcha(userId, captchaAnswer);
+    if (!check.ok) {
+      const nuevo = generateCaptcha(userId);
+      resetRollCounter(userId);
+      return res.status(400).json({
+        error: '🛡️ ' + check.error,
+        captchaRequired: true,
+        newQuestion: nuevo.question
+      });
+    }
+    // Captcha OK → reiniciar contador para las próximas 5-10 tiradas
+    resetRollCounter(userId);
+  }
+
   try {
     const user = await ensureUser(userId);
     if (parseFloat(user.balance) < amount) return res.status(400).json({ error: 'Saldo insuficiente' });
@@ -879,8 +870,8 @@ app.get('/bet-history/:userId', requireAuth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// 🛡️ RETIRO
-app.post('/withdraw', requireAuth, requireCaptcha, async (req, res) => {
+// RETIRO sin captcha
+app.post('/withdraw', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { wallet: userWallet, amount } = req.body;
   if (!userWallet || !amount) return res.status(400).json({ error: 'Faltan datos' });
@@ -905,8 +896,8 @@ app.get('/deposit-info', (req, res) => {
   res.json({ success: true, depositWallet: wallet.address, tokenAddress: TOKEN_ADDRESS, minDeposit: 1 });
 });
 
-// 🛡️ COMPRAR PLANTA
-app.post('/buy-plant', requireAuth, requireCaptcha, async (req, res) => {
+// COMPRAR PLANTA sin captcha
+app.post('/buy-plant', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { level } = req.body;
   if (!level) return res.status(400).json({ error: 'Faltan datos' });
@@ -926,8 +917,8 @@ app.post('/buy-plant', requireAuth, requireCaptcha, async (req, res) => {
   } catch (error) { res.status(500).json({ error: 'Error: ' + error.message }); }
 });
 
-// 🛡️ REGAR PLANTA
-app.post('/water-plant', requireAuth, requireCaptcha, async (req, res) => {
+// REGAR PLANTA sin captcha
+app.post('/water-plant', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { plantId } = req.body;
   if (!plantId) return res.status(400).json({ error: 'Faltan datos' });
@@ -952,8 +943,8 @@ app.post('/water-plant', requireAuth, requireCaptcha, async (req, res) => {
   } catch (error) { res.status(500).json({ error: 'Error: ' + error.message }); }
 });
 
-// 🛡️ COSECHAR
-app.post('/harvest', requireAuth, requireCaptcha, async (req, res) => {
+// COSECHAR sin captcha
+app.post('/harvest', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { plantId } = req.body;
   if (!plantId) return res.status(400).json({ error: 'Faltan datos' });
@@ -979,8 +970,8 @@ app.post('/harvest', requireAuth, requireCaptcha, async (req, res) => {
   } catch (error) { res.status(500).json({ error: 'Error: ' + error.message }); }
 });
 
-// 🛡️ VENDER PLANTA
-app.post('/sell-plant', requireAuth, requireCaptcha, async (req, res) => {
+// VENDER PLANTA sin captcha
+app.post('/sell-plant', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { plantId } = req.body;
   if (!plantId) return res.status(400).json({ error: 'Faltan datos' });
@@ -1001,8 +992,8 @@ app.post('/sell-plant', requireAuth, requireCaptcha, async (req, res) => {
   } catch (error) { res.status(500).json({ error: 'Error: ' + error.message }); }
 });
 
-// 🛡️ REEMBOLSO
-app.post('/refund-plant', requireAuth, requireCaptcha, async (req, res) => {
+// REEMBOLSO sin captcha
+app.post('/refund-plant', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { plantId } = req.body;
   if (!plantId) return res.status(400).json({ error: 'Faltan datos' });
@@ -1102,7 +1093,7 @@ app.get('/huerto-warning', (req, res) => {
 });
 
 app.get('/', (req, res) => {
-  res.json({ status: 'Horus Faucet + Dados + Huerto + Historial + Luna Llena + Bendición + AdsGram + Referidos + Captcha en todo funcionando' });
+  res.json({ status: 'Horus Faucet + Dados (con captcha random 5-10) + Huerto + Historial + Luna Llena + Bendición + AdsGram + Referidos funcionando' });
 });
 
 // ==== BOT PRINCIPAL ====
@@ -1150,7 +1141,7 @@ if (BOT_TOKEN) {
       '🌕 Atento a la *Luna Llena*\n' +
       '👑 Atento a la *Bendición del Faraón*\n' +
       '🎁 Gana *1000 JHOAL* por cada amigo que invites\n' +
-      '🛡️ Sistema anti-bot activado\n' +
+      '🛡️ Sistema anti-bot activado en dados\n' +
       '📜 Mirá tu *Historial*\n\n' +
       '👉 Toca "Abrir Horus Faucet" para empezar.',
       { parse_mode: 'Markdown',
@@ -1259,7 +1250,7 @@ app.listen(process.env.PORT || 3000, () => {
   console.log('Bot de soporte:', SUPPORT_BOT_TOKEN ? 'SÍ' : 'NO');
   console.log('Supabase:', SUPABASE_URL ? 'SÍ' : 'NO');
   console.log('🎲 Dados: x0=42% | x1.1=45% | x2=6% | x4=3% | x6=2% | x8=1% | x10=1%');
-  console.log('🛡️ Captcha anti-bot: ACTIVADO en faucet, dados, anuncios, retiro y huerto');
+  console.log('🛡️ Captcha anti-bot: SOLO en dados, cada ' + CAPTCHA_ROLLS_MIN + '-' + CAPTCHA_ROLLS_MAX + ' tiradas aleatorias');
 
   cleanupOldPlants();
   cleanupExpiredPlants();
