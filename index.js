@@ -135,6 +135,9 @@ const MOON_MAX_PER_DAY = 5;
 const AD_REWARD_AMOUNT = 5;
 const AD_COOLDOWN = 10 * 60;
 
+// ==== COOLDOWN DE SLOT AL VENDER ====
+const SELL_SLOT_COOLDOWN = 20; // segundos
+
 const provider = new ethers.JsonRpcProvider(RPC_LIST[0]);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 
@@ -849,17 +852,49 @@ app.post('/withdraw', requireAuth, async (req, res) => {
 
 app.get('/deposit-info', (req, res) => res.json({ success: true, depositWallet: wallet.address, tokenAddress: TOKEN_ADDRESS, minDeposit: 1 }));
 
-// ==== BUY PLANT (con lock) ====
+// ==== BUY PLANT (con lock + hCaptcha + cooldown de slot) ====
 app.post('/buy-plant', requireAuth, async (req, res) => {
   const userId = req.userId;
-  const { level } = req.body;
+  const { level, hcaptchaToken } = req.body;
   if (!level || !PLANT_LEVELS[level]) return res.status(400).json({ error: 'Nivel inválido' });
 
   const lockKey = `buy_${userId}`;
   if (!acquireLock(lockKey)) return res.status(429).json({ error: '⏳ Compra en proceso. Esperá.' });
 
   try {
+    // 🛡️ Verificar hCaptcha en CADA compra
+    if (!hcaptchaToken) {
+      releaseLock(lockKey);
+      return res.status(403).json({
+        error: 'HCAPTCHA_REQUIRED',
+        message: 'Verificá que sos humano para comprar.',
+        sitekey: HCAPTCHA_SITE_KEY
+      });
+    }
+    const verifyResult = await verificarHCaptcha(hcaptchaToken, req.ip);
+    if (!verifyResult.success) {
+      releaseLock(lockKey);
+      return res.status(403).json({
+        error: 'HCAPTCHA_FAILED',
+        message: 'Verificación fallida. Intentá de nuevo.',
+        sitekey: HCAPTCHA_SITE_KEY
+      });
+    }
+    console.log(`✅ hCaptcha verificado (BUY) para ${userId}`);
+
     const user = await ensureUser(userId);
+
+    // 🔒 Verificar cooldown del slot (por venta reciente)
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (user.plant_slot_cooldown_until && user.plant_slot_cooldown_until > nowSec) {
+      const remaining = user.plant_slot_cooldown_until - nowSec;
+      releaseLock(lockKey);
+      return res.status(429).json({
+        error: '⏳ Esperá ' + remaining + 's para comprar otra planta (cooldown por venta).',
+        cooldownRemaining: remaining
+      });
+    }
+
     const { count } = await supabase.from('plants').select('*', { count: 'exact', head: true }).eq('user_id', userId);
     if (count >= MAX_PLANTS) { releaseLock(lockKey); return res.status(400).json({ error: 'Máximo ' + MAX_PLANTS + ' plantas por usuario' }); }
     const plantInfo = PLANT_LEVELS[level];
@@ -958,10 +993,10 @@ app.post('/harvest', requireAuth, async (req, res) => {
   } catch (error) { releaseLock(lockKey); res.status(500).json({ error: 'Error: ' + error.message }); }
 });
 
-// ==== SELL PLANT (con lock) ====
+// ==== SELL PLANT (con lock + hCaptcha + cooldown de slot 20s) ====
 app.post('/sell-plant', requireAuth, async (req, res) => {
   const userId = req.userId;
-  const { plantId } = req.body;
+  const { plantId, hcaptchaToken } = req.body;
   if (!plantId) return res.status(400).json({ error: 'Faltan datos' });
 
   const lockKey = `sell_${plantId}`;
@@ -970,18 +1005,51 @@ app.post('/sell-plant', requireAuth, async (req, res) => {
   try {
     const { data: plant } = await supabase.from('plants').select('*').eq('id', plantId).eq('user_id', userId).maybeSingle();
     if (!plant) { releaseLock(lockKey); return res.status(400).json({ error: 'Planta no encontrada' }); }
+
+    // 🛡️ Verificar hCaptcha en CADA venta
+    if (!hcaptchaToken) {
+      releaseLock(lockKey);
+      return res.status(403).json({
+        error: 'HCAPTCHA_REQUIRED',
+        message: 'Verificá que sos humano para vender.',
+        sitekey: HCAPTCHA_SITE_KEY
+      });
+    }
+    const verifyResult = await verificarHCaptcha(hcaptchaToken, req.ip);
+    if (!verifyResult.success) {
+      releaseLock(lockKey);
+      return res.status(403).json({
+        error: 'HCAPTCHA_FAILED',
+        message: 'Verificación fallida. Intentá de nuevo.',
+        sitekey: HCAPTCHA_SITE_KEY
+      });
+    }
+    console.log(`✅ hCaptcha verificado (SELL) para ${userId}`);
+
     const level = PLANT_LEVELS[plant.level];
     if (!level.canSell) { releaseLock(lockKey); return res.status(400).json({ error: '❌ La planta ' + level.name + ' no se puede vender.' }); }
     const sellValue = getSellPrice(plant);
     if (sellValue <= 0) { releaseLock(lockKey); return res.status(400).json({ error: 'La planta ya no tiene valor de venta. Dejala cumplir su ciclo.' }); }
+
     const user = await ensureUser(userId);
     const newBalance = parseFloat(user.balance) + sellValue;
     await supabase.from('users_balance').update({ balance: newBalance }).eq('user_id', userId);
     await supabase.from('plants').delete().eq('id', plantId).eq('user_id', userId);
+
+    // 🔒 Cooldown del slot: el usuario no puede comprar otra planta por 20s
+    const cooldownUntil = Math.floor(Date.now() / 1000) + SELL_SLOT_COOLDOWN;
+    await supabase.from('users_balance').update({ plant_slot_cooldown_until: cooldownUntil }).eq('user_id', userId);
+
     const ageMinutes = Math.floor((Date.now()/1000 - plant.created_at) / 60);
     await addHistory(userId, 'plant_sell', sellValue, 'Vendiste ' + level.name + ' (minuto ' + ageMinutes + ')', null, null);
     releaseLock(lockKey);
-    res.json({ success: true, value: sellValue, message: '¡Vendiste por ' + sellValue.toLocaleString() + ' JHOAL!' });
+    res.json({
+      success: true,
+      value: sellValue,
+      cooldownUntil: cooldownUntil,
+      cooldownSeconds: SELL_SLOT_COOLDOWN,
+      message: '¡Vendiste por ' + sellValue.toLocaleString() + ' JHOAL! Esperá ' + SELL_SLOT_COOLDOWN + 's para comprar otra.'
+    });
   } catch (error) { releaseLock(lockKey); res.status(500).json({ error: 'Error: ' + error.message }); }
 });
 
@@ -1000,9 +1068,11 @@ app.post('/refund-plant', requireAuth, async (req, res) => {
   else res.status(400).json({ error: result.error });
 });
 
+// ==== MY PLANTS (devuelve cooldown restante) ====
 app.get('/my-plants/:userId', requireAuth, async (req, res) => {
   try {
     const userId = req.userId;
+    const user = await ensureUser(userId);
     const { data: plants } = await supabase.from('plants').select('*').eq('user_id', userId).order('created_at', { ascending: true });
     const plantsWithStatus = (plants || []).map(function(p) {
       const status = getPlantStatus(p);
@@ -1024,11 +1094,18 @@ app.get('/my-plants/:userId', requireAuth, async (req, res) => {
         moonBoost: status.moonBoost || false, daysLeft: status.daysLeft || 0, expiresAt: status.expiresAt || null
       };
     });
+
+    const nowSec = Math.floor(Date.now() / 1000);
+    const cooldownRemaining = (user.plant_slot_cooldown_until && user.plant_slot_cooldown_until > nowSec)
+      ? user.plant_slot_cooldown_until - nowSec
+      : 0;
+
     res.json({
       success: true, plants: plantsWithStatus, count: plantsWithStatus.length,
       maxPlants: MAX_PLANTS, plantLevels: PLANT_LEVELS, lifetimeDays: PLANT_LIFETIME_DAYS,
       moon: { active: moonState.active, endsAt: moonState.endsAt, multiplier: MOON_GROWTH_MULTIPLIER },
-      blessing: { active: blessingState.active, endsAt: blessingState.endsAt, multiplier: BLESSING_FRUIT_MULTIPLIER }
+      blessing: { active: blessingState.active, endsAt: blessingState.endsAt, multiplier: BLESSING_FRUIT_MULTIPLIER },
+      plantSlotCooldownRemaining: cooldownRemaining
     });
   } catch (error) { res.status(500).json({ error: 'Error: ' + error.message }); }
 });
@@ -1226,8 +1303,9 @@ app.listen(process.env.PORT || 3000, () => {
   console.log('Wallet:', wallet.address);
   console.log('🎁 Referidos: +' + REFERRAL_REWARD + ' JHOAL por referido válido');
   console.log('🛡️ hCaptcha DADOS: aleatorio entre ' + CAPTCHA_DICE_MIN_BETS + ' y ' + CAPTCHA_DICE_MAX_BETS + ' tiradas');
-  console.log('🛡️ hCaptcha HUERTO: en cada cosecha');
+  console.log('🛡️ hCaptcha HUERTO: en cada cosecha, compra y venta');
   console.log('🔒 Locks anti-doble-click: ACTIVADOS');
+  console.log('⏳ Cooldown de slot al vender: ' + SELL_SLOT_COOLDOWN + 's');
   console.log('🎲 Dados: x0=42% | x1.1=45% | x2=6% | x4=3% | x6=2% | x8=1% | x10=1%');
   console.log('🧹 Limpieza automática de plantas: ACTIVADA');
   cleanupOldPlants();
