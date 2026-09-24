@@ -57,6 +57,36 @@ const REFERRAL_REWARD = 1000;
 const REFERRAL_BOT_USERNAME = process.env.REFERRAL_BOT_USERNAME || 'Jhoal_faucetbot';
 const REFERRAL_BANNER_URL = process.env.REFERRAL_BANNER_URL || 'https://i.imgur.com/xoIBdWv.png';
 
+// ==== CAPTCHA ANTI-BOT ====
+const CAPTCHA_EXPIRY_MS = 30 * 1000;   // 30 segundos para responder
+const CAPTCHA_MIN_BETS = 5;            // mínimo de tiradas antes del captcha
+const CAPTCHA_MAX_BETS = 10;           // máximo de tiradas antes del captcha
+const captchaStore = new Map();        // token -> { answer, userId, expiresAt, verified, verifiedAt }
+const userBetCounters = new Map();     // userId -> tiradas actuales
+const userCaptchaThresholds = new Map(); // userId -> umbral aleatorio (5-10)
+
+function getCaptchaThreshold(userId) {
+  if (!userCaptchaThresholds.has(userId)) {
+    const t = Math.floor(Math.random() * (CAPTCHA_MAX_BETS - CAPTCHA_MIN_BETS + 1)) + CAPTCHA_MIN_BETS;
+    userCaptchaThresholds.set(userId, t);
+    console.log(`🎲 Nuevo umbral captcha para ${userId}: cada ${t} tiradas`);
+  }
+  return userCaptchaThresholds.get(userId);
+}
+
+function generateCaptcha() {
+  const a = Math.floor(Math.random() * 8) + 2;   // 2-9
+  const b = Math.floor(Math.random() * 8) + 2;   // 2-9
+  const ops = ['+', '-', '*'];
+  const op = ops[Math.floor(Math.random() * ops.length)];
+  let answer;
+  if (op === '+') answer = a + b;
+  else if (op === '-') answer = a - b;
+  else answer = a * b;
+  const symbol = op === '*' ? '×' : op;
+  return { question: a + ' ' + symbol + ' ' + b, answer: String(answer) };
+}
+
 // ==== MONITOR DE DEPÓSITOS ====
 const MONITOR_START_BLOCK = 122925000;
 const BATCH_SIZE = 100;
@@ -72,10 +102,6 @@ const MOON_MAX_PER_DAY = 5;
 // ==== ADSGRAM ====
 const AD_REWARD_AMOUNT = 5;
 const AD_COOLDOWN = 10 * 60;
-
-// ==== CAPTCHA EN DADOS ====
-const CAPTCHA_ROLLS_MIN = 5;
-const CAPTCHA_ROLLS_MAX = 10;
 
 const provider = new ethers.JsonRpcProvider(RPC_LIST[0]);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
@@ -99,9 +125,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 // ==== ENCRIPTACIÓN ====
 const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY;
-if (!ENCRYPTION_KEY) {
-  console.warn('⚠️ ENCRYPTION_KEY no está configurada.');
-}
+if (!ENCRYPTION_KEY) console.warn('⚠️ ENCRYPTION_KEY no está configurada.');
 
 function encryptPrivateKey(pk) {
   if (!ENCRYPTION_KEY) throw new Error('ENCRYPTION_KEY no configurada');
@@ -127,34 +151,20 @@ function decryptPrivateKey(encrypted) {
 }
 
 // ==== ESTADO LUNA LLENA ====
-const moonState = {
-  active: false,
-  startedAt: 0,
-  endsAt: 0,
-  nextEventAt: 0,
-  eventsToday: 0,
-  todayKey: ''
-};
+const moonState = { active: false, startedAt: 0, endsAt: 0, nextEventAt: 0, eventsToday: 0, todayKey: '' };
 
 function todayKeyUTC() {
   const d = new Date();
   return d.getUTCFullYear() + '-' + String(d.getUTCMonth() + 1).padStart(2, '0') + '-' + String(d.getUTCDate()).padStart(2, '0');
 }
-
-function randInt(min, max) {
-  return Math.floor(Math.random() * (max - min + 1)) + min;
-}
+function randInt(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
 
 function scheduleNextMoon() {
   const now = Math.floor(Date.now() / 1000);
   const key = todayKeyUTC();
-  if (moonState.todayKey !== key) {
-    moonState.todayKey = key;
-    moonState.eventsToday = 0;
-  }
+  if (moonState.todayKey !== key) { moonState.todayKey = key; moonState.eventsToday = 0; }
   if (moonState.eventsToday >= MOON_MAX_PER_DAY) {
-    const tomorrow = new Date();
-    tomorrow.setUTCHours(24, 0, 0, 0);
+    const tomorrow = new Date(); tomorrow.setUTCHours(24, 0, 0, 0);
     moonState.nextEventAt = Math.floor(tomorrow.getTime() / 1000) + randInt(0, 3600);
     return;
   }
@@ -168,8 +178,7 @@ function scheduleNextMoon() {
 
 function activateMoon() {
   const now = Math.floor(Date.now() / 1000);
-  moonState.active = true;
-  moonState.startedAt = now;
+  moonState.active = true; moonState.startedAt = now;
   moonState.endsAt = now + MOON_DURATION_MIN * 60;
   moonState.eventsToday += 1;
   console.log('🌕 LUNA LLENA ACTIVADA hasta', new Date(moonState.endsAt * 1000).toISOString());
@@ -192,14 +201,7 @@ async function notificarLunaLlena() {
   } catch (e) {}
 }
 
-function deactivateMoon() {
-  moonState.active = false;
-  moonState.startedAt = 0;
-  moonState.endsAt = 0;
-  console.log('🌑 Luna llena terminada');
-  scheduleNextMoon();
-}
-
+function deactivateMoon() { moonState.active = false; moonState.startedAt = 0; moonState.endsAt = 0; scheduleNextMoon(); }
 function tickMoon() {
   const now = Math.floor(Date.now() / 1000);
   const key = todayKeyUTC();
@@ -207,37 +209,24 @@ function tickMoon() {
   if (moonState.active && now >= moonState.endsAt) { deactivateMoon(); return; }
   if (!moonState.active && moonState.nextEventAt > 0 && now >= moonState.nextEventAt) activateMoon();
 }
-
 moonState.todayKey = todayKeyUTC();
 scheduleNextMoon();
 setInterval(tickMoon, 30 * 1000);
 
-// ==== ESTADO BENDICIÓN DEL FARAÓN ====
+// ==== BENDICIÓN DEL FARAÓN ====
 const BLESSING_DURATION = 30 * 60 * 1000;
 const BLESSING_FRUIT_MULTIPLIER = 2;
-
-const blessingState = {
-  active: false,
-  startedAt: 0,
-  endsAt: 0,
-  eventScheduledToday: false,
-  todayKey: ''
-};
+const blessingState = { active: false, startedAt: 0, endsAt: 0, eventScheduledToday: false, todayKey: '' };
 
 function scheduleBlessing() {
   const key = todayKeyUTC();
-  if (blessingState.todayKey !== key) {
-    blessingState.todayKey = key;
-    blessingState.eventScheduledToday = false;
-    blessingState.active = false;
-  }
+  if (blessingState.todayKey !== key) { blessingState.todayKey = key; blessingState.eventScheduledToday = false; blessingState.active = false; }
   if (!blessingState.eventScheduledToday) {
     blessingState.eventScheduledToday = true;
     const randomHour = randInt(0, 23);
     const randomMin = randInt(0, 59);
-    console.log(`👑 Bendición del Faraón programada para hoy a las ${randomHour}:${randomMin}`);
-    const now = new Date();
-    const targetTime = new Date();
+    console.log(`👑 Bendición programada para hoy a las ${randomHour}:${randomMin}`);
+    const now = new Date(); const targetTime = new Date();
     targetTime.setUTCHours(randomHour, randomMin, 0, 0);
     let msUntilEvent = targetTime.getTime() - now.getTime();
     if (msUntilEvent < 0) msUntilEvent += 24 * 60 * 60 * 1000;
@@ -246,16 +235,10 @@ function scheduleBlessing() {
 }
 
 function activateBlessing() {
-  blessingState.active = true;
-  blessingState.startedAt = Date.now();
-  blessingState.endsAt = Date.now() + BLESSING_DURATION;
+  blessingState.active = true; blessingState.startedAt = Date.now(); blessingState.endsAt = Date.now() + BLESSING_DURATION;
   console.log('👑 ¡BENDICIÓN DEL FARAÓN ACTIVA! Fruto x2');
   notificarBendicion();
-  setTimeout(() => {
-    blessingState.active = false;
-    console.log('👑 Bendición del Faraón terminada.');
-    scheduleBlessing();
-  }, BLESSING_DURATION);
+  setTimeout(() => { blessingState.active = false; scheduleBlessing(); }, BLESSING_DURATION);
 }
 
 async function notificarBendicion() {
@@ -273,7 +256,6 @@ async function notificarBendicion() {
     }
   } catch (e) {}
 }
-
 scheduleBlessing();
 
 // ==== MONITOR DE DEPÓSITOS ====
@@ -304,8 +286,7 @@ async function checkDeposits() {
             const batchLogs = await provider.getLogs({
               address: TOKEN_ADDRESS,
               topics: [TRANSFER_TOPIC, null, ethers.zeroPadValue(u.deposit_address.toLowerCase(), 32)],
-              fromBlock: batchStart,
-              toBlock: batchEnd
+              fromBlock: batchStart, toBlock: batchEnd
             });
             allLogs.push(...batchLogs);
           } catch (batchErr) {}
@@ -332,7 +313,6 @@ async function checkDeposits() {
   } catch (e) {}
   monitorRunning = false;
 }
-
 setInterval(checkDeposits, 60 * 1000);
 setTimeout(checkDeposits, 15 * 1000);
 
@@ -377,7 +357,6 @@ const PLANT_LEVELS = {
   premium: { name: 'Premium', emoji: '🌳', price: 30000, waterCost: 120, fruitValue: 375, sellPrice: 61200, canSell: true  },
   pro:     { name: 'Pro',     emoji: '🌴', price: 40000, waterCost: 160, fruitValue: 500, sellPrice: 0,     canSell: false }
 };
-
 const MAX_PLANTS = 12;
 const GROW_TIME_MIN = 25;
 const PERFECT_WINDOW = 35;
@@ -404,33 +383,25 @@ function getPlantStatus(plant) {
   const ageSeconds = now - createdAt;
   const lifetimeLeft = PLANT_LIFETIME_SECONDS - ageSeconds;
   const daysLeft = Math.max(0, Math.floor(lifetimeLeft / 86400));
-
   if (lifetimeLeft <= 0) return { status: 'expired', value: 0, minutesLeft: 0, progress: 0, canRefund: false, daysLeft: 0, expiresAt: createdAt + PLANT_LIFETIME_SECONDS };
   if (plant.status === 'dry' || !plant.last_watered) return { status: 'dry', value: 0, minutesLeft: 0, progress: 0, canRefund: false, daysLeft, expiresAt: createdAt + PLANT_LIFETIME_SECONDS };
-
   const moonMult = parseFloat(plant.moon_multiplier || 1) || 1;
   const effectiveGrowTime = GROW_TIME_MIN / moonMult;
   const elapsed = (now - plant.last_watered) / 60;
-
   if (elapsed < effectiveGrowTime) {
     const progress = Math.floor((elapsed / effectiveGrowTime) * 100);
     return { status: 'growing', value: 0, minutesLeft: Math.ceil(effectiveGrowTime - elapsed), progress: Math.min(progress, 99), canRefund: false, moonBoost: moonMult > 1, daysLeft, expiresAt: createdAt + PLANT_LIFETIME_SECONDS };
   }
-
   const elapsedSinceReady = elapsed - effectiveGrowTime;
   const perfectDuration = PERFECT_WINDOW - GROW_TIME_MIN;
-
   if (elapsedSinceReady <= perfectDuration) return { status: 'ready', value: level.fruitValue, minutesLeft: Math.ceil(perfectDuration - elapsedSinceReady), progress: 100, canRefund: false, moonBoost: moonMult > 1, daysLeft, expiresAt: createdAt + PLANT_LIFETIME_SECONDS };
-
   const witheringTotal = ROT_TIME - PERFECT_WINDOW;
   const witheringElapsed = elapsedSinceReady - perfectDuration;
-
   if (witheringElapsed <= witheringTotal) {
     const withering = witheringElapsed / witheringTotal;
     const value = level.fruitValue * (1 - withering * 0.1);
     return { status: 'withering', value: Math.max(0, value), minutesLeft: Math.ceil(witheringTotal - witheringElapsed), progress: 100, canRefund: false, moonBoost: moonMult > 1, daysLeft, expiresAt: createdAt + PLANT_LIFETIME_SECONDS };
   }
-
   return { status: 'rotten', value: 0, minutesLeft: 0, progress: 0, canRefund: true, moonBoost: moonMult > 1, daysLeft, expiresAt: createdAt + PLANT_LIFETIME_SECONDS };
 }
 
@@ -443,7 +414,6 @@ function timeAgo(timestamp) {
   return 'hace ' + Math.floor(seconds / 86400) + 'd';
 }
 
-// 🎲 PROBABILIDADES: x0=42% | x1.1=45% | x2=6% | x4=3% | x6=2% | x8=1% | x10=1%
 function spinRoulette() {
   const random = Math.random() * 100;
   if (random < 42) return 0;
@@ -453,49 +423,6 @@ function spinRoulette() {
   else if (random < 98) return 6;
   else if (random < 99) return 8;
   else return 10;
-}
-
-// ==== CAPTCHA (SOLO DADOS) ====
-const captchaStore = new Map(); // userId -> { answer, expiresAt }
-const rollCounter = new Map();  // userId -> { count, nextCaptchaAt }
-const CAPTCHA_EXPIRY_MS = 60 * 1000;
-
-function generateCaptcha(userId) {
-  const ops = ['+', '-', '×'];
-  const op = ops[Math.floor(Math.random() * ops.length)];
-  let a, b, answer;
-  if (op === '+') { a = randInt(2, 20); b = randInt(2, 20); answer = a + b; }
-  else if (op === '-') { a = randInt(5, 25); b = randInt(1, a - 1); answer = a - b; }
-  else { a = randInt(2, 9); b = randInt(2, 9); answer = a * b; }
-  const question = `${a} ${op} ${b}`;
-  captchaStore.set(String(userId), { answer: String(answer), expiresAt: Date.now() + CAPTCHA_EXPIRY_MS });
-  for (const [key, val] of captchaStore.entries()) {
-    if (val.expiresAt < Date.now()) captchaStore.delete(key);
-  }
-  return { question };
-}
-
-function verifyCaptcha(userId, userAnswer) {
-  const entry = captchaStore.get(String(userId));
-  if (!entry) return { ok: false, error: 'Captcha no generado o expirado' };
-  if (entry.expiresAt < Date.now()) { captchaStore.delete(String(userId)); return { ok: false, error: 'Captcha expirado' }; }
-  if (String(userAnswer).trim() !== entry.answer) return { ok: false, error: 'Respuesta incorrecta' };
-  captchaStore.delete(String(userId));
-  return { ok: true };
-}
-
-function resetRollCounter(userId) {
-  const nextAt = randInt(CAPTCHA_ROLLS_MIN, CAPTCHA_ROLLS_MAX);
-  rollCounter.set(String(userId), { count: 0, nextCaptchaAt: nextAt });
-}
-
-function shouldShowCaptcha(userId) {
-  const key = String(userId);
-  if (!rollCounter.has(key)) resetRollCounter(key);
-  const state = rollCounter.get(key);
-  state.count += 1;
-  if (state.count >= state.nextCaptchaAt) return true;
-  return false;
 }
 
 async function getUser(userId) {
@@ -536,8 +463,7 @@ async function refundPlant(userId, plantId) {
     await supabase.from('history').insert({
       user_id: userId, type: 'plant_refund', amount: refundAmount,
       description: 'Reembolso 90% del riego (' + level.name + ')',
-      metadata: String(plantId), tx_hash: null,
-      created_at: Math.floor(Date.now() / 1000)
+      metadata: String(plantId), tx_hash: null, created_at: Math.floor(Date.now() / 1000)
     });
     await supabase.from('plants').update({ status: 'dry', last_watered: null, moon_multiplier: 1 }).eq('id', plantId).eq('user_id', userId);
     return { success: true, amount: refundAmount, message: '¡Recibiste ' + refundAmount.toFixed(2) + ' JHOAL de reembolso (90% del riego)!' };
@@ -556,7 +482,7 @@ async function cleanupExpiredPlants() {
       const nombreNivel = level ? level.name : p.level;
       await supabase.from('history').insert({
         user_id: p.user_id, type: 'plant_expired', amount: 0,
-        description: '💀 Tu planta ' + nombreNivel + ' ha expirado (30 días). ¡Ya puedes sembrar otra! 🌱',
+        description: '💀 Tu planta ' + nombreNivel + ' ha expirado (30 días). ¡Ya puedes sembrar otra planta en su lugar! 🌱',
         metadata: String(p.id), tx_hash: null, created_at: now
       });
     }
@@ -573,6 +499,7 @@ async function cleanupOldPlants() {
     if (sinFecha && sinFecha.length > 0) {
       const ids = sinFecha.map(p => p.id);
       await supabase.from('plants').update({ created_at: now }).in('id', ids);
+      console.log('✅ Fechas asignadas a', sinFecha.length, 'plantas viejas');
     }
   } catch (e) { console.error('Error cleanupOldPlants:', e); }
 }
@@ -582,23 +509,17 @@ async function otorgarRecompensaReferido(referrerId, referredId) {
   try {
     const { data: yaExiste } = await supabase.from('referrals').select('id').eq('referred_id', referredId).maybeSingle();
     if (yaExiste) return { success: false, error: 'Ya se pagó este referido' };
-
     const referredUser = await ensureUser(referredId);
     if (!referredUser.total_claimed || parseFloat(referredUser.total_claimed) < 1) return { success: false, error: 'El referido aún no reclama el faucet' };
-
     const { error: insErr } = await supabase.from('referrals').insert({
-      referrer_id: referrerId, referred_id: referredId,
-      reward: REFERRAL_REWARD, created_at: Math.floor(Date.now() / 1000)
+      referrer_id: referrerId, referred_id: referredId, reward: REFERRAL_REWARD, created_at: Math.floor(Date.now() / 1000)
     });
     if (insErr) return { success: false, error: insErr.message };
-
     const referrer = await ensureUser(referrerId);
     const nuevoBalance = parseFloat(referrer.balance || 0) + REFERRAL_REWARD;
     await supabase.from('users_balance').update({ balance: nuevoBalance }).eq('user_id', referrerId);
     await addHistory(referrerId, 'referral_reward', REFERRAL_REWARD, '🎁 Recompensa por referido (' + referredId + ')', null, null);
-
     console.log(`🎁 Referido pagado: ${referrerId} +${REFERRAL_REWARD} JHOAL por ${referredId}`);
-
     if (bot && referrer.chat_id) {
       try {
         await bot.sendMessage(referrer.chat_id,
@@ -608,10 +529,7 @@ async function otorgarRecompensaReferido(referrerId, referredId) {
       } catch (e) {}
     }
     return { success: true };
-  } catch (e) {
-    console.error('Error otorgarRecompensaReferido:', e);
-    return { success: false, error: e.message };
-  }
+  } catch (e) { return { success: false, error: e.message }; }
 }
 
 async function intentarPagarReferido(userId) {
@@ -624,28 +542,61 @@ async function intentarPagarReferido(userId) {
 }
 
 // ==== ENDPOINTS ====
-
-app.post('/captcha/new', requireAuth, (req, res) => {
-  try {
-    const data = generateCaptcha(req.userId);
-    res.json({ success: true, question: data.question });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
 app.get('/moon-status', (req, res) => {
   const now = Math.floor(Date.now() / 1000);
-  res.json({ success: true, active: moonState.active, startedAt: moonState.startedAt, endsAt: moonState.endsAt,
-    secondsLeft: moonState.active ? Math.max(0, moonState.endsAt - now) : 0,
-    multiplier: MOON_GROWTH_MULTIPLIER, durationMinutes: MOON_DURATION_MIN, eventsToday: moonState.eventsToday });
+  res.json({ success: true, active: moonState.active, startedAt: moonState.startedAt, endsAt: moonState.endsAt, secondsLeft: moonState.active ? Math.max(0, moonState.endsAt - now) : 0, multiplier: MOON_GROWTH_MULTIPLIER, durationMinutes: MOON_DURATION_MIN, eventsToday: moonState.eventsToday });
 });
 
 app.get('/blessing-status', (req, res) => {
   const now = Date.now();
-  res.json({ success: true, active: blessingState.active, startedAt: blessingState.startedAt, endsAt: blessingState.endsAt,
-    secondsLeft: blessingState.active ? Math.max(0, Math.floor((blessingState.endsAt - now) / 1000)) : 0,
-    multiplier: BLESSING_FRUIT_MULTIPLIER });
+  res.json({ success: true, active: blessingState.active, startedAt: blessingState.startedAt, endsAt: blessingState.endsAt, secondsLeft: blessingState.active ? Math.max(0, Math.floor((blessingState.endsAt - now) / 1000)) : 0, multiplier: BLESSING_FRUIT_MULTIPLIER });
 });
 
+// ==== CAPTCHA ENDPOINTS ====
+app.post('/captcha/generate', requireAuth, async (req, res) => {
+  try {
+    const userId = req.userId;
+    for (const [k, v] of captchaStore.entries()) if (v.expiresAt < Date.now()) captchaStore.delete(k);
+    const { question, answer } = generateCaptcha();
+    const token = crypto.randomBytes(16).toString('hex');
+    captchaStore.set(token, { answer, userId, expiresAt: Date.now() + CAPTCHA_EXPIRY_MS, verified: false });
+    res.json({ success: true, token, question, expiresInSeconds: 30 });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/captcha/verify', requireAuth, async (req, res) => {
+  try {
+    const userId = req.userId;
+    const { token, answer } = req.body;
+    if (!token || answer === undefined || answer === null || answer === '') return res.status(400).json({ error: 'Faltan datos' });
+    const c = captchaStore.get(token);
+    if (!c) return res.status(400).json({ error: 'Captcha expirado o inválido' });
+    if (c.userId !== userId) return res.status(400).json({ error: 'Captcha no válido para este usuario' });
+    if (c.expiresAt < Date.now()) { captchaStore.delete(token); return res.status(400).json({ error: 'Captcha expirado' }); }
+    if (String(answer).trim() !== c.answer) {
+      captchaStore.delete(token);
+      return res.status(400).json({ error: 'Respuesta incorrecta' });
+    }
+    captchaStore.set(token, { ...c, verified: true, verifiedAt: Date.now() });
+    res.json({ success: true, message: 'Captcha verificado' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/captcha/status/:userId', requireAuth, async (req, res) => {
+  try {
+    const userId = req.userId;
+    const count = userBetCounters.get(userId) || 0;
+    const threshold = getCaptchaThreshold(userId);
+    res.json({
+      success: true,
+      betsSinceCaptcha: count,
+      nextCaptchaAt: threshold,
+      requiresCaptcha: count >= threshold
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ==== REFERIDOS ENDPOINTS ====
 app.post('/register-referral', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { referrerId } = req.body;
@@ -666,8 +617,7 @@ app.post('/register-referral', requireAuth, async (req, res) => {
 app.get('/my-referrals/:userId', requireAuth, async (req, res) => {
   const userId = req.userId;
   try {
-    const { data: referidos } = await supabase.from('referrals').select('referred_id, reward, created_at')
-      .eq('referrer_id', userId).order('created_at', { ascending: false });
+    const { data: referidos } = await supabase.from('referrals').select('referred_id, reward, created_at').eq('referrer_id', userId).order('created_at', { ascending: false });
     const total = (referidos || []).reduce((s, r) => s + parseFloat(r.reward || 0), 0);
     res.json({
       success: true,
@@ -719,10 +669,7 @@ app.post('/move-to-game', requireAuth, async (req, res) => {
     if (realBalance < amount) return res.status(400).json({ error: 'La wallet no tiene fondos suficientes' });
     const bnbNeeded = ethers.parseEther('0.000002');
     const bnbBalance = await provider.getBalance(user.deposit_address);
-    if (bnbBalance < bnbNeeded) {
-      const bnbTx = await wallet.sendTransaction({ to: user.deposit_address, value: bnbNeeded });
-      await bnbTx.wait();
-    }
+    if (bnbBalance < bnbNeeded) { const bnbTx = await wallet.sendTransaction({ to: user.deposit_address, value: bnbNeeded }); await bnbTx.wait(); }
     const pk = decryptPrivateKey(user.deposit_private_key);
     const userSigner = new ethers.Wallet(pk, provider);
     const userToken = new ethers.Contract(TOKEN_ADDRESS, ABI, userSigner);
@@ -737,7 +684,6 @@ app.post('/move-to-game', requireAuth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// FAUCET sin captcha
 app.post('/claim', requireAuth, async (req, res) => {
   const userId = req.userId;
   try {
@@ -756,7 +702,6 @@ app.post('/claim', requireAuth, async (req, res) => {
   } catch (error) { res.status(500).json({ error: 'Error: ' + error.message }); }
 });
 
-// ANUNCIO sin captcha
 app.post('/claim-ad-reward-manual', requireAuth, async (req, res) => {
   const userId = req.userId;
   try {
@@ -794,48 +739,47 @@ app.get('/balance-game/:userId', requireAuth, async (req, res) => {
     const user = await getUser(req.userId);
     if (!user) return res.json({ success: true, balance: 0, wallet_balance: 0, total_claimed: 0, total_won: 0, total_lost: 0, last_claim: 0, last_ad_reward: 0 });
     res.json({
-      success: true, balance: parseFloat(user.balance), wallet_balance: parseFloat(user.wallet_balance || 0),
-      total_claimed: parseFloat(user.total_claimed || 0), total_won: parseFloat(user.total_won || 0),
-      total_lost: parseFloat(user.total_lost || 0), last_claim: user.last_claim || 0, last_ad_reward: user.last_ad_reward || 0
+      success: true,
+      balance: parseFloat(user.balance),
+      wallet_balance: parseFloat(user.wallet_balance || 0),
+      total_claimed: parseFloat(user.total_claimed || 0),
+      total_won: parseFloat(user.total_won || 0),
+      total_lost: parseFloat(user.total_lost || 0),
+      last_claim: user.last_claim || 0,
+      last_ad_reward: user.last_ad_reward || 0
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// 🎲 DADOS con captcha aleatorio cada 5-10 tiradas
 app.post('/bet', requireAuth, async (req, res) => {
   const userId = req.userId;
-  const { amount, captchaAnswer } = req.body;
+  const { amount, captchaToken } = req.body;
   if (!amount) return res.status(400).json({ error: 'Faltan datos' });
   if (amount < MIN_BET || amount > MAX_BET) return res.status(400).json({ error: 'Apuesta inválida (' + MIN_BET + '-' + MAX_BET + ')' });
 
-  // 🛡️ ¿Toca captcha?
-  const tocaCaptcha = shouldShowCaptcha(userId);
+  // ==== VALIDAR CAPTCHA (umbral aleatorio 5-10) ====
+  const currentCount = userBetCounters.get(userId) || 0;
+  const threshold = getCaptchaThreshold(userId);
+  const needsCaptcha = currentCount >= threshold;
 
-  if (tocaCaptcha) {
-    // Si el usuario no mandó respuesta → pedir captcha y rechazar la tirada
-    if (!captchaAnswer) {
-      const nuevo = generateCaptcha(userId);
-      // Reiniciar contador para que después de resolver tenga otras 5-10 tiradas
-      resetRollCounter(userId);
-      return res.status(400).json({
-        error: '🛡️ Verificación anti-bot: resolvé la operación',
-        captchaRequired: true,
-        newQuestion: nuevo.question
-      });
+  if (needsCaptcha) {
+    if (!captchaToken) {
+      return res.status(403).json({ error: 'CAPTCHA_REQUIRED', message: 'Necesitás resolver el captcha anti-bot para seguir tirando.' });
     }
-    // Si mandó respuesta → validar
-    const check = verifyCaptcha(userId, captchaAnswer);
-    if (!check.ok) {
-      const nuevo = generateCaptcha(userId);
-      resetRollCounter(userId);
-      return res.status(400).json({
-        error: '🛡️ ' + check.error,
-        captchaRequired: true,
-        newQuestion: nuevo.question
-      });
+    const c = captchaStore.get(captchaToken);
+    if (!c || !c.verified || c.userId !== userId) {
+      return res.status(403).json({ error: 'CAPTCHA_REQUIRED', message: 'Captcha inválido. Resolvé uno nuevo.' });
     }
-    // Captcha OK → reiniciar contador para las próximas 5-10 tiradas
-    resetRollCounter(userId);
+    if (Date.now() - c.verifiedAt > CAPTCHA_EXPIRY_MS) {
+      captchaStore.delete(captchaToken);
+      return res.status(403).json({ error: 'CAPTCHA_REQUIRED', message: 'Captcha expirado. Resolvé uno nuevo.' });
+    }
+    // ✅ Consumir captcha, resetear contador y sortear nuevo umbral aleatorio
+    captchaStore.delete(captchaToken);
+    userBetCounters.set(userId, 0);
+    userCaptchaThresholds.delete(userId);
+  } else {
+    userBetCounters.set(userId, currentCount + 1);
   }
 
   try {
@@ -870,7 +814,6 @@ app.get('/bet-history/:userId', requireAuth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// RETIRO sin captcha
 app.post('/withdraw', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { wallet: userWallet, amount } = req.body;
@@ -892,16 +835,12 @@ app.post('/withdraw', requireAuth, async (req, res) => {
   } catch (error) { res.status(500).json({ error: 'Error: ' + error.message }); }
 });
 
-app.get('/deposit-info', (req, res) => {
-  res.json({ success: true, depositWallet: wallet.address, tokenAddress: TOKEN_ADDRESS, minDeposit: 1 });
-});
+app.get('/deposit-info', (req, res) => res.json({ success: true, depositWallet: wallet.address, tokenAddress: TOKEN_ADDRESS, minDeposit: 1 }));
 
-// COMPRAR PLANTA sin captcha
 app.post('/buy-plant', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { level } = req.body;
-  if (!level) return res.status(400).json({ error: 'Faltan datos' });
-  if (!PLANT_LEVELS[level]) return res.status(400).json({ error: 'Nivel inválido' });
+  if (!level || !PLANT_LEVELS[level]) return res.status(400).json({ error: 'Nivel inválido' });
   try {
     const user = await ensureUser(userId);
     const { count } = await supabase.from('plants').select('*', { count: 'exact', head: true }).eq('user_id', userId);
@@ -917,7 +856,6 @@ app.post('/buy-plant', requireAuth, async (req, res) => {
   } catch (error) { res.status(500).json({ error: 'Error: ' + error.message }); }
 });
 
-// REGAR PLANTA sin captcha
 app.post('/water-plant', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { plantId } = req.body;
@@ -926,7 +864,7 @@ app.post('/water-plant', requireAuth, async (req, res) => {
     const { data: plant } = await supabase.from('plants').select('*').eq('id', plantId).eq('user_id', userId).maybeSingle();
     if (!plant) return res.status(400).json({ error: 'Planta no encontrada' });
     const status = getPlantStatus(plant);
-    if (status.status === 'expired') return res.status(400).json({ error: '🌱 Esta planta ya cumplió su ciclo.' });
+    if (status.status === 'expired') return res.status(400).json({ error: '🌱 Esta planta ya cumplió su ciclo. Plantá una nueva semilla.' });
     if (status.status !== 'dry' && status.status !== 'rotten') return res.status(400).json({ error: 'La planta todavía tiene fruto o está creciendo' });
     const user = await ensureUser(userId);
     const level = PLANT_LEVELS[plant.level];
@@ -943,7 +881,6 @@ app.post('/water-plant', requireAuth, async (req, res) => {
   } catch (error) { res.status(500).json({ error: 'Error: ' + error.message }); }
 });
 
-// COSECHAR sin captcha
 app.post('/harvest', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { plantId } = req.body;
@@ -970,7 +907,6 @@ app.post('/harvest', requireAuth, async (req, res) => {
   } catch (error) { res.status(500).json({ error: 'Error: ' + error.message }); }
 });
 
-// VENDER PLANTA sin captcha
 app.post('/sell-plant', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { plantId } = req.body;
@@ -981,7 +917,7 @@ app.post('/sell-plant', requireAuth, async (req, res) => {
     const level = PLANT_LEVELS[plant.level];
     if (!level.canSell) return res.status(400).json({ error: '❌ La planta ' + level.name + ' no se puede vender.' });
     const sellValue = getSellPrice(plant);
-    if (sellValue <= 0) return res.status(400).json({ error: 'La planta ya no tiene valor de venta.' });
+    if (sellValue <= 0) return res.status(400).json({ error: 'La planta ya no tiene valor de venta. Dejala cumplir su ciclo.' });
     const user = await ensureUser(userId);
     const newBalance = parseFloat(user.balance) + sellValue;
     await supabase.from('users_balance').update({ balance: newBalance }).eq('user_id', userId);
@@ -992,7 +928,6 @@ app.post('/sell-plant', requireAuth, async (req, res) => {
   } catch (error) { res.status(500).json({ error: 'Error: ' + error.message }); }
 });
 
-// REEMBOLSO sin captcha
 app.post('/refund-plant', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { plantId } = req.body;
@@ -1006,7 +941,6 @@ app.get('/my-plants/:userId', requireAuth, async (req, res) => {
   try {
     const userId = req.userId;
     const { data: plants } = await supabase.from('plants').select('*').eq('user_id', userId).order('created_at', { ascending: true });
-
     const plantsWithStatus = (plants || []).map(function(p) {
       const status = getPlantStatus(p);
       const level = PLANT_LEVELS[p.level];
@@ -1020,15 +954,13 @@ app.get('/my-plants/:userId', requireAuth, async (req, res) => {
         status: status.status, value: status.value,
         minutesLeft: status.minutesLeft || 0, progress: status.progress || 0,
         waterCost: level.waterCost, fruitValue: level.fruitValue,
-        sellPrice: sellValue, sellPercentage: sellPercentage,
-        originalSellPrice: level.price, canSell: level.canSell && sellValue > 0,
-        lastWatered: p.last_watered, canRefund: status.canRefund || false,
+        sellPrice: sellValue, sellPercentage: sellPercentage, originalSellPrice: level.price,
+        canSell: level.canSell && sellValue > 0, lastWatered: p.last_watered,
+        canRefund: status.canRefund || false,
         refundAmount: status.canRefund ? (level.waterCost * 0.9) : 0,
-        moonBoost: status.moonBoost || false, daysLeft: status.daysLeft || 0,
-        expiresAt: status.expiresAt || null
+        moonBoost: status.moonBoost || false, daysLeft: status.daysLeft || 0, expiresAt: status.expiresAt || null
       };
     });
-
     res.json({
       success: true, plants: plantsWithStatus, count: plantsWithStatus.length,
       maxPlants: MAX_PLANTS, plantLevels: PLANT_LEVELS, lifetimeDays: PLANT_LIFETIME_DAYS,
@@ -1085,23 +1017,19 @@ app.get('/balance', async (req, res) => {
 
 app.get('/huerto-warning', (req, res) => {
   res.json({
-    success: true,
-    title: '⚠️ AVISO IMPORTANTE – HUERTO DE HORUS ⚠️',
+    success: true, title: '⚠️ AVISO IMPORTANTE – HUERTO DE HORUS ⚠️',
     message: '🌱 El que no cosecha, PIERDE.\nLas plantas duran solo 30 días. Si no las RIEGAS y cosechás a tiempo, el fruto se pudre.\n💰 Podés reclamar el 90% del riego si se pudre.\n📉 El precio de venta de la planta baja cada minuto.\n👀 Estate atento a tus plantas.',
     lifetimeDays: PLANT_LIFETIME_DAYS, refundPercent: 90
   });
 });
 
-app.get('/', (req, res) => {
-  res.json({ status: 'Horus Faucet + Dados (con captcha random 5-10) + Huerto + Historial + Luna Llena + Bendición + AdsGram + Referidos funcionando' });
-});
+app.get('/', (req, res) => res.json({ status: 'Horus Faucet + Dados + Huerto + Historial + Luna Llena + Bendición + AdsGram + Referidos + Captcha funcionando' }));
 
 // ==== BOT PRINCIPAL ====
 let bot = null;
 if (BOT_TOKEN) {
   bot = new TelegramBot(BOT_TOKEN, { polling: true });
   console.log('Bot principal iniciado');
-
   bot.on('polling_error', (error) => {
     if (error.code === 'ETELEGRAM' && error.message.includes('409')) console.log('⚠️ Conflicto de polling');
     else console.log('⚠️ Polling error:', error.code);
@@ -1112,7 +1040,6 @@ if (BOT_TOKEN) {
     const userId = String(msg.from.id);
     const name = msg.from.first_name || 'guerrero';
     const payload = (match[1] || '').trim();
-
     if (payload && payload.startsWith('ref_')) {
       const referrerId = payload.replace('ref_', '').trim();
       if (referrerId && referrerId !== userId) {
@@ -1121,16 +1048,13 @@ if (BOT_TOKEN) {
           if (!yaPagado) {
             const { data: yaPendiente } = await supabase.from('referrals_pending').select('id').eq('referred_id', userId).maybeSingle();
             if (!yaPendiente) {
-              await supabase.from('referrals_pending').insert({
-                referrer_id: String(referrerId), referred_id: userId, created_at: Math.floor(Date.now() / 1000)
-              });
-              console.log(`🔗 Referido pendiente desde /start: ${referrerId} ← ${userId}`);
+              await supabase.from('referrals_pending').insert({ referrer_id: String(referrerId), referred_id: userId, created_at: Math.floor(Date.now() / 1000) });
+              console.log(`🔗 Referido pendiente: ${referrerId} ← ${userId}`);
             }
           }
         } catch (e) { console.error('Error registrando referido en /start:', e); }
       }
     }
-
     bot.sendMessage(chatId,
       '⚱ *HORUS FAUCET - La ofrenda del Dios Horus* 🦅\n\n' +
       '¡Bienvenido, ' + name + '!\n\n' +
@@ -1141,11 +1065,9 @@ if (BOT_TOKEN) {
       '🌕 Atento a la *Luna Llena*\n' +
       '👑 Atento a la *Bendición del Faraón*\n' +
       '🎁 Gana *1000 JHOAL* por cada amigo que invites\n' +
-      '🛡️ Sistema anti-bot activado en dados\n' +
       '📜 Mirá tu *Historial*\n\n' +
       '👉 Toca "Abrir Horus Faucet" para empezar.',
-      { parse_mode: 'Markdown',
-        reply_markup: { inline_keyboard: [[{ text: '🏛 Abrir Horus Faucet', web_app: { url: MINI_APP_URL } }]] } }
+      { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '🏛 Abrir Horus Faucet', web_app: { url: MINI_APP_URL } }]] } }
     );
   });
 
@@ -1172,7 +1094,7 @@ if (BOT_TOKEN) {
         reply_markup: { inline_keyboard: [
           [{ text: '📤 Compartir enlace', url: 'https://t.me/share/url?url=' + encodeURIComponent(link) + '&text=' + encodeURIComponent('🎁 Gana 1000 JHOAL gratis en Horus Faucet 🏛') }],
           [{ text: '🏛 Abrir Horus Faucet', web_app: { url: MINI_APP_URL } }]
-        ]}
+        ] }
       });
     } catch (e) {
       await bot.sendMessage(msg.chat.id, texto, {
@@ -1180,7 +1102,7 @@ if (BOT_TOKEN) {
         reply_markup: { inline_keyboard: [
           [{ text: '📤 Compartir enlace', url: 'https://t.me/share/url?url=' + encodeURIComponent(link) + '&text=' + encodeURIComponent('🎁 Gana 1000 JHOAL gratis en Horus Faucet 🏛') }],
           [{ text: '🏛 Abrir Horus Faucet', web_app: { url: MINI_APP_URL } }]
-        ]}
+        ] }
       });
     }
   });
@@ -1215,24 +1137,17 @@ if (BOT_TOKEN) {
 if (SUPPORT_BOT_TOKEN && SUPPORT_CHAT_ID) {
   const supportBot = new TelegramBot(SUPPORT_BOT_TOKEN, { polling: true });
   console.log('Bot de soporte iniciado');
-
   supportBot.onText(/\/start/, (msg) => {
-    const chatId = msg.chat.id;
-    const name = msg.from.first_name || 'usuario';
-    supportBot.sendMessage(chatId,
-      '🆘 *SOPORTE HORUS FAUCET*\n\n¡Hola, ' + name + '!\n\nPodés enviarme texto, fotos, videos, audios o documentos.\n\nTe vamos a responder a la brevedad.',
+    supportBot.sendMessage(msg.chat.id,
+      '🆘 *SOPORTE HORUS FAUCET*\n\n¡Hola, ' + (msg.from.first_name || 'usuario') + '!\n\nPodés enviarme texto, fotos, videos, audios o documentos.\n\nTe vamos a responder a la brevedad.',
       { parse_mode: 'Markdown' }
     );
   });
-
   supportBot.on('message', (msg) => {
     const chatId = msg.chat.id;
     const text = msg.text;
     if (text && text.startsWith('/')) return;
-    const userName = msg.from.first_name || 'Usuario';
-    const userUsername = msg.from.username ? '@' + msg.from.username : 'sin username';
-    const userId = msg.from.id;
-    const header = '📩 *NUEVO MENSAJE DE SOPORTE*\n\n👤 De: ' + userName + '\n🔗 Username: ' + userUsername + '\n🆔 ID: `' + userId + '`\n\n';
+    const header = '📩 *NUEVO MENSAJE DE SOPORTE*\n\n👤 De: ' + (msg.from.first_name || 'Usuario') + '\n🔗 Username: ' + (msg.from.username ? '@' + msg.from.username : 'sin username') + '\n🆔 ID: `' + msg.from.id + '`\n\n';
     try {
       if (msg.text) {
         supportBot.sendMessage(SUPPORT_CHAT_ID, header + '💬 Mensaje:\n' + msg.text, { parse_mode: 'Markdown' });
@@ -1246,12 +1161,10 @@ if (SUPPORT_BOT_TOKEN && SUPPORT_CHAT_ID) {
 app.listen(process.env.PORT || 3000, () => {
   console.log('Horus Faucet corriendo en puerto', process.env.PORT || 3000);
   console.log('Wallet:', wallet.address);
-  console.log('Bot principal:', BOT_TOKEN ? 'SÍ' : 'NO');
-  console.log('Bot de soporte:', SUPPORT_BOT_TOKEN ? 'SÍ' : 'NO');
-  console.log('Supabase:', SUPABASE_URL ? 'SÍ' : 'NO');
+  console.log('🎁 Referidos: +' + REFERRAL_REWARD + ' JHOAL por referido válido');
+  console.log('🛡️ Captcha Anti-Bot: entre ' + CAPTCHA_MIN_BETS + ' y ' + CAPTCHA_MAX_BETS + ' tiradas | expira en ' + (CAPTCHA_EXPIRY_MS/1000) + 's');
   console.log('🎲 Dados: x0=42% | x1.1=45% | x2=6% | x4=3% | x6=2% | x8=1% | x10=1%');
-  console.log('🛡️ Captcha anti-bot: SOLO en dados, cada ' + CAPTCHA_ROLLS_MIN + '-' + CAPTCHA_ROLLS_MAX + ' tiradas aleatorias');
-
+  console.log('🧹 Limpieza automática de plantas: ACTIVADA');
   cleanupOldPlants();
   cleanupExpiredPlants();
   setInterval(cleanupExpiredPlants, 5 * 60 * 1000);
