@@ -54,7 +54,7 @@ const MAX_BET = 1000;
 
 // ==== REFERIDOS ====
 const REFERRAL_REWARD = 1000;
-const REFERRAL_BOT_USERNAME = process.env.REFERRAL_BOT_USERNAME || 'JhoalFaucetBot';
+const REFERRAL_BOT_USERNAME = process.env.REFERRAL_BOT_USERNAME || 'Jhoal_faucetbot';
 const REFERRAL_BANNER_URL = process.env.REFERRAL_BANNER_URL || 'https://i.imgur.com/xoIBdWv.png';
 
 // ==== MONITOR DE DEPÓSITOS ====
@@ -468,12 +468,20 @@ function timeAgo(timestamp) {
   return 'hace ' + Math.floor(seconds / 86400) + 'd';
 }
 
+// 🎲 NUEVAS PROBABILIDADES:
+// x0   = 42%  (0  - 42)
+// x1.1 = 45%  (42 - 87)
+// x2   = 6%   (87 - 93)
+// x4   = 3%   (93 - 96)
+// x6   = 2%   (96 - 98)
+// x8   = 1%   (98 - 99)
+// x10  = 1%   (99 - 100)
 function spinRoulette() {
   const random = Math.random() * 100;
-  if (random < 37) return 0;
-  else if (random < 82) return 1.1;
-  else if (random < 90) return 2;
-  else if (random < 95) return 4;
+  if (random < 42) return 0;
+  else if (random < 87) return 1.1;
+  else if (random < 93) return 2;
+  else if (random < 96) return 4;
   else if (random < 98) return 6;
   else if (random < 99) return 8;
   else return 10;
@@ -1384,6 +1392,7 @@ app.listen(process.env.PORT || 3000, () => {
   console.log('🌱 Plantas duran ' + PLANT_LIFETIME_DAYS + ' días');
   console.log('📺 AdsGram: +' + AD_REWARD_AMOUNT + ' JHOAL cada ' + (AD_COOLDOWN/60) + ' min');
   console.log('🎁 Referidos: +' + REFERRAL_REWARD + ' JHOAL por referido válido');
+  console.log('🎲 Dados: x0=42% | x1.1=45% | x2=6% | x4=3% | x6=2% | x8=1% | x10=1%');
   console.log('🧹 Limpieza automática de plantas: ACTIVADA');
 
   cleanupOldPlants();
