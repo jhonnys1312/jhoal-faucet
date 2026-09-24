@@ -21,9 +21,7 @@ async function getProvider() {
     try {
       await currentProvider.getBlockNumber();
       return currentProvider;
-    } catch (e) {
-      currentProvider = null;
-    }
+    } catch (e) { currentProvider = null; }
   }
   for (const rpc of RPC_LIST) {
     try {
@@ -32,9 +30,7 @@ async function getProvider() {
       console.log('✅ RPC OK:', rpc);
       currentProvider = testProvider;
       return testProvider;
-    } catch (e) {
-      console.log('❌ RPC falló:', rpc);
-    }
+    } catch (e) { console.log('❌ RPC falló:', rpc); }
   }
   throw new Error('Ningún RPC funciona');
 }
@@ -58,37 +54,69 @@ const REFERRAL_REWARD = 1000;
 const REFERRAL_BOT_USERNAME = process.env.REFERRAL_BOT_USERNAME || 'Jhoal_faucetbot';
 const REFERRAL_BANNER_URL = process.env.REFERRAL_BANNER_URL || 'https://i.imgur.com/xoIBdWv.png';
 
-// ==== CAPTCHA ANTI-BOT ====
-const CAPTCHA_EXPIRY_MS = 30 * 1000;
-const CAPTCHA_MIN_BETS = 5;
-const CAPTCHA_MAX_BETS = 10;
-// userId -> { question, answer, expiresAt }
-const captchaStore = new Map();
-// userId -> tiradas desde el último captcha
-const userBetCounters = new Map();
-// userId -> umbral aleatorio (5-10)
-const userCaptchaThresholds = new Map();
+// ==== HCAPTCHA ====
+const HCAPTCHA_SECRET_KEY = process.env.HCAPTCHA_SECRET_KEY;
+const HCAPTCHA_SITE_KEY = process.env.HCAPTCHA_SITE_KEY || 'b264c464-eab2-4734-9ad8-ce7aa24a8346';
+const HCAPTCHA_VERIFY_URL = 'https://api.hcaptcha.com/siteverify';
 
-function getCaptchaThreshold(userId) {
-  if (!userCaptchaThresholds.has(userId)) {
-    const t = Math.floor(Math.random() * (CAPTCHA_MAX_BETS - CAPTCHA_MIN_BETS + 1)) + CAPTCHA_MIN_BETS;
-    userCaptchaThresholds.set(userId, t);
-    console.log(`🎲 Nuevo umbral captcha para ${userId}: cada ${t} tiradas`);
+// Usuarios que ya verificaron hCaptcha (userId -> timestamp)
+const userVerifiedCaptcha = new Map();
+const CAPTCHA_VERIFICATION_TTL = 5 * 60 * 1000;   // 5 minutos de validez
+
+// Captcha en DADOS: aleatorio entre 1 y 10 tiradas
+const CAPTCHA_DICE_MIN_BETS = 1;
+const CAPTCHA_DICE_MAX_BETS = 10;
+const userDiceBetCounters = new Map();
+const userDiceCaptchaThresholds = new Map();
+
+function getDiceCaptchaThreshold(userId) {
+  if (!userDiceCaptchaThresholds.has(userId)) {
+    const t = Math.floor(Math.random() * (CAPTCHA_DICE_MAX_BETS - CAPTCHA_DICE_MIN_BETS + 1)) + CAPTCHA_DICE_MIN_BETS;
+    userDiceCaptchaThresholds.set(userId, t);
+    console.log(`🎲 Nuevo umbral captcha DADOS para ${userId}: cada ${t} tiradas`);
   }
-  return userCaptchaThresholds.get(userId);
+  return userDiceCaptchaThresholds.get(userId);
 }
 
-function generateCaptcha() {
-  const a = Math.floor(Math.random() * 8) + 2;
-  const b = Math.floor(Math.random() * 8) + 2;
-  const ops = ['+', '-', '*'];
-  const op = ops[Math.floor(Math.random() * ops.length)];
-  let answer;
-  if (op === '+') answer = a + b;
-  else if (op === '-') answer = a - b;
-  else answer = a * b;
-  const symbol = op === '*' ? '×' : op;
-  return { question: a + ' ' + symbol + ' ' + b, answer: String(answer) };
+// ==== ANTI-DUPLICADO (race condition) ====
+const operationsInProgress = new Map();
+function acquireLock(key) {
+  if (operationsInProgress.has(key)) return false;
+  operationsInProgress.set(key, Date.now());
+  return true;
+}
+function releaseLock(key) { operationsInProgress.delete(key); }
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, v] of operationsInProgress.entries()) {
+    if (now - v > 30000) operationsInProgress.delete(k);
+  }
+}, 30000);
+
+async function verificarHCaptcha(token, remoteip) {
+  if (!HCAPTCHA_SECRET_KEY) {
+    console.warn('⚠️ HCAPTCHA_SECRET_KEY no configurada. Saltando verificación.');
+    return { success: true };
+  }
+  try {
+    const params = new URLSearchParams({
+      secret: HCAPTCHA_SECRET_KEY,
+      response: token,
+      remoteip: remoteip || '',
+      sitekey: HCAPTCHA_SITE_KEY
+    });
+    const res = await fetch(HCAPTCHA_VERIFY_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: params
+    });
+    const data = await res.json();
+    console.log('🛡️ hCaptcha verify:', data.success, data['error-codes'] || '');
+    return data;
+  } catch (e) {
+    console.error('Error verificando hCaptcha:', e);
+    return { success: false, 'error-codes': ['internal-error'] };
+  }
 }
 
 // ==== MONITOR DE DEPÓSITOS ====
@@ -556,30 +584,20 @@ app.get('/blessing-status', (req, res) => {
   res.json({ success: true, active: blessingState.active, startedAt: blessingState.startedAt, endsAt: blessingState.endsAt, secondsLeft: blessingState.active ? Math.max(0, Math.floor((blessingState.endsAt - now) / 1000)) : 0, multiplier: BLESSING_FRUIT_MULTIPLIER });
 });
 
-// ==== CAPTCHA (SISTEMA SIMPLE SIN TOKENS) ====
-// El frontend pide una pregunta, el backend la genera y la guarda por userId
-// El frontend envía la respuesta junto con el /bet y el backend la valida.
-
-app.post('/captcha/new', requireAuth, async (req, res) => {
-  try {
-    const userId = req.userId;
-    const { question, answer } = generateCaptcha();
-    captchaStore.set(userId, { question, answer, expiresAt: Date.now() + CAPTCHA_EXPIRY_MS });
-    console.log(`🛡️ Captcha para ${userId}: ${question} = ${answer}`);
-    res.json({ success: true, question, expiresInSeconds: 30 });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
+// ==== HCAPTCHA STATUS ====
 app.get('/captcha/status/:userId', requireAuth, async (req, res) => {
   try {
     const userId = req.userId;
-    const count = userBetCounters.get(userId) || 0;
-    const threshold = getCaptchaThreshold(userId);
+    const count = userDiceBetCounters.get(userId) || 0;
+    const threshold = getDiceCaptchaThreshold(userId);
+    const verifiedAt = userVerifiedCaptcha.get(userId);
+    const isVerified = verifiedAt && (Date.now() - verifiedAt) < CAPTCHA_VERIFICATION_TTL;
     res.json({
       success: true,
       betsSinceCaptcha: count,
       nextCaptchaAt: threshold,
-      requiresCaptcha: count >= threshold
+      isVerified,
+      requiresCaptcha: count >= threshold && !isVerified
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -739,53 +757,41 @@ app.get('/balance-game/:userId', requireAuth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ==== BET CON CAPTCHA SIMPLE ====
+// ==== BET CON HCAPTCHA ====
 app.post('/bet', requireAuth, async (req, res) => {
   const userId = req.userId;
-  const { amount, captchaAnswer } = req.body;
+  const { amount, hcaptchaToken } = req.body;
   if (!amount) return res.status(400).json({ error: 'Faltan datos' });
   if (amount < MIN_BET || amount > MAX_BET) return res.status(400).json({ error: 'Apuesta inválida (' + MIN_BET + '-' + MAX_BET + ')' });
 
-  const currentCount = userBetCounters.get(userId) || 0;
-  const threshold = getCaptchaThreshold(userId);
-  const needsCaptcha = currentCount >= threshold;
+  const currentCount = userDiceBetCounters.get(userId) || 0;
+  const threshold = getDiceCaptchaThreshold(userId);
+  const verifiedAt = userVerifiedCaptcha.get(userId);
+  const isVerified = verifiedAt && (Date.now() - verifiedAt) < CAPTCHA_VERIFICATION_TTL;
+  const needsCaptcha = currentCount >= threshold && !isVerified;
 
   if (needsCaptcha) {
-    // Buscar captcha pendiente para este usuario
-    const c = captchaStore.get(userId);
-    if (!c) {
-      // No hay captcha → generar uno y avisar
-      const gen = generateCaptcha();
-      captchaStore.set(userId, { question: gen.question, answer: gen.answer, expiresAt: Date.now() + CAPTCHA_EXPIRY_MS });
-      console.log(`🛡️ Captcha nuevo para ${userId}: ${gen.question} = ${gen.answer}`);
-      return res.json({ success: false, captchaRequired: true, newQuestion: gen.question });
+    if (!hcaptchaToken) {
+      return res.status(403).json({
+        error: 'HCAPTCHA_REQUIRED',
+        message: 'Necesitás verificar que sos humano para seguir tirando.',
+        sitekey: HCAPTCHA_SITE_KEY
+      });
     }
-    if (c.expiresAt < Date.now()) {
-      captchaStore.delete(userId);
-      const gen = generateCaptcha();
-      captchaStore.set(userId, { question: gen.question, answer: gen.answer, expiresAt: Date.now() + CAPTCHA_EXPIRY_MS });
-      console.log(`🛡️ Captcha expirado, nuevo para ${userId}: ${gen.question} = ${gen.answer}`);
-      return res.json({ success: false, captchaRequired: true, newQuestion: gen.question });
+    const verifyResult = await verificarHCaptcha(hcaptchaToken, req.ip);
+    if (!verifyResult.success) {
+      return res.status(403).json({
+        error: 'HCAPTCHA_FAILED',
+        message: 'Verificación fallida. Intentá de nuevo.',
+        sitekey: HCAPTCHA_SITE_KEY
+      });
     }
-    // Si no llegó respuesta → pedirla
-    if (captchaAnswer === undefined || captchaAnswer === null || captchaAnswer === '') {
-      return res.json({ success: false, captchaRequired: true, newQuestion: c.question });
-    }
-    // Validar respuesta
-    if (String(captchaAnswer).trim() !== c.answer) {
-      captchaStore.delete(userId);
-      const gen = generateCaptcha();
-      captchaStore.set(userId, { question: gen.question, answer: gen.answer, expiresAt: Date.now() + CAPTCHA_EXPIRY_MS });
-      console.log(`❌ Captcha incorrecto para ${userId}. Nuevo: ${gen.question} = ${gen.answer}`);
-      return res.json({ success: false, captchaRequired: true, newQuestion: gen.question, error: 'Respuesta incorrecta' });
-    }
-    // ✅ Captcha correcto
-    console.log(`✅ Captcha correcto para ${userId}`);
-    captchaStore.delete(userId);
-    userBetCounters.set(userId, 0);
-    userCaptchaThresholds.delete(userId);
+    userVerifiedCaptcha.set(userId, Date.now());
+    userDiceBetCounters.set(userId, 0);
+    userDiceCaptchaThresholds.delete(userId);
+    console.log(`✅ hCaptcha verificado (DADOS) para ${userId}`);
   } else {
-    userBetCounters.set(userId, currentCount + 1);
+    userDiceBetCounters.set(userId, currentCount + 1);
   }
 
   try {
@@ -843,38 +849,49 @@ app.post('/withdraw', requireAuth, async (req, res) => {
 
 app.get('/deposit-info', (req, res) => res.json({ success: true, depositWallet: wallet.address, tokenAddress: TOKEN_ADDRESS, minDeposit: 1 }));
 
+// ==== BUY PLANT (con lock) ====
 app.post('/buy-plant', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { level } = req.body;
   if (!level || !PLANT_LEVELS[level]) return res.status(400).json({ error: 'Nivel inválido' });
+
+  const lockKey = `buy_${userId}`;
+  if (!acquireLock(lockKey)) return res.status(429).json({ error: '⏳ Compra en proceso. Esperá.' });
+
   try {
     const user = await ensureUser(userId);
     const { count } = await supabase.from('plants').select('*', { count: 'exact', head: true }).eq('user_id', userId);
-    if (count >= MAX_PLANTS) return res.status(400).json({ error: 'Máximo ' + MAX_PLANTS + ' plantas por usuario' });
+    if (count >= MAX_PLANTS) { releaseLock(lockKey); return res.status(400).json({ error: 'Máximo ' + MAX_PLANTS + ' plantas por usuario' }); }
     const plantInfo = PLANT_LEVELS[level];
-    if (parseFloat(user.balance) < plantInfo.price) return res.status(400).json({ error: 'Saldo insuficiente. Necesitás ' + plantInfo.price + ' JHOAL' });
+    if (parseFloat(user.balance) < plantInfo.price) { releaseLock(lockKey); return res.status(400).json({ error: 'Saldo insuficiente. Necesitás ' + plantInfo.price + ' JHOAL' }); }
     const now = Math.floor(Date.now() / 1000);
     const newBalance = parseFloat(user.balance) - plantInfo.price;
     await supabase.from('users_balance').update({ balance: newBalance }).eq('user_id', userId);
     await supabase.from('plants').insert({ user_id: userId, level, status: 'dry', created_at: now, moon_multiplier: 1 });
     await addHistory(userId, 'plant_buy', -plantInfo.price, 'Compraste planta ' + plantInfo.name, null, null);
+    releaseLock(lockKey);
     res.json({ success: true, message: '¡Compraste una planta ' + plantInfo.name + '!', expiresInDays: PLANT_LIFETIME_DAYS });
-  } catch (error) { res.status(500).json({ error: 'Error: ' + error.message }); }
+  } catch (error) { releaseLock(lockKey); res.status(500).json({ error: 'Error: ' + error.message }); }
 });
 
+// ==== WATER PLANT (con lock) ====
 app.post('/water-plant', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { plantId } = req.body;
   if (!plantId) return res.status(400).json({ error: 'Faltan datos' });
+
+  const lockKey = `water_${plantId}`;
+  if (!acquireLock(lockKey)) return res.status(429).json({ error: '⏳ Ya estás regando. Esperá.' });
+
   try {
     const { data: plant } = await supabase.from('plants').select('*').eq('id', plantId).eq('user_id', userId).maybeSingle();
-    if (!plant) return res.status(400).json({ error: 'Planta no encontrada' });
+    if (!plant) { releaseLock(lockKey); return res.status(400).json({ error: 'Planta no encontrada' }); }
     const status = getPlantStatus(plant);
-    if (status.status === 'expired') return res.status(400).json({ error: '🌱 Esta planta ya cumplió su ciclo. Plantá una nueva semilla.' });
-    if (status.status !== 'dry' && status.status !== 'rotten') return res.status(400).json({ error: 'La planta todavía tiene fruto o está creciendo' });
+    if (status.status === 'expired') { releaseLock(lockKey); return res.status(400).json({ error: '🌱 Esta planta ya cumplió su ciclo. Plantá una nueva semilla.' }); }
+    if (status.status !== 'dry' && status.status !== 'rotten') { releaseLock(lockKey); return res.status(400).json({ error: 'La planta todavía tiene fruto o está creciendo' }); }
     const user = await ensureUser(userId);
     const level = PLANT_LEVELS[plant.level];
-    if (parseFloat(user.balance) < level.waterCost) return res.status(400).json({ error: 'Saldo insuficiente. Necesitás ' + level.waterCost + ' JHOAL' });
+    if (parseFloat(user.balance) < level.waterCost) { releaseLock(lockKey); return res.status(400).json({ error: 'Saldo insuficiente. Necesitás ' + level.waterCost + ' JHOAL' }); }
     const now = Math.floor(Date.now() / 1000);
     const newBalance = parseFloat(user.balance) - level.waterCost;
     const moonMult = moonState.active ? MOON_GROWTH_MULTIPLIER : 1;
@@ -883,22 +900,49 @@ app.post('/water-plant', requireAuth, async (req, res) => {
     await supabase.from('plants').update({ last_watered: now, status: 'growing', moon_multiplier: moonMult }).eq('id', plantId).eq('user_id', userId);
     const moonMsg = moonMult > 1 ? ' 🌕 ¡Luna Llena activa!' : '';
     await addHistory(userId, 'plant_water', -level.waterCost, 'Regaste ' + level.name + (moonMult > 1 ? ' (Luna Llena 🌕)' : ''), null, null);
+    releaseLock(lockKey);
     res.json({ success: true, message: '¡Regaste tu planta! Lista en ' + effectiveGrowTime + ' minutos.' + moonMsg, moonActive: moonMult > 1, growTimeMinutes: effectiveGrowTime });
-  } catch (error) { res.status(500).json({ error: 'Error: ' + error.message }); }
+  } catch (error) { releaseLock(lockKey); res.status(500).json({ error: 'Error: ' + error.message }); }
 });
 
+// ==== HARVEST (CON HCAPTCHA + LOCK) ====
 app.post('/harvest', requireAuth, async (req, res) => {
   const userId = req.userId;
-  const { plantId } = req.body;
+  const { plantId, hcaptchaToken } = req.body;
   if (!plantId) return res.status(400).json({ error: 'Faltan datos' });
+
+  const lockKey = `harvest_${plantId}`;
+  if (!acquireLock(lockKey)) return res.status(429).json({ error: '⏳ Ya estás cosechando. Esperá un momento.' });
+
   try {
     const { data: plant } = await supabase.from('plants').select('*').eq('id', plantId).eq('user_id', userId).maybeSingle();
-    if (!plant) return res.status(400).json({ error: 'Planta no encontrada' });
+    if (!plant) { releaseLock(lockKey); return res.status(400).json({ error: 'Planta no encontrada' }); }
     const status = getPlantStatus(plant);
-    if (status.status === 'expired') return res.status(400).json({ error: '🌱 Esta planta ya cumplió su ciclo.' });
-    if (status.status !== 'ready' && status.status !== 'withering') return res.status(400).json({ error: 'Todavía no podés cosechar esta planta' });
+    if (status.status === 'expired') { releaseLock(lockKey); return res.status(400).json({ error: '🌱 Esta planta ya cumplió su ciclo.' }); }
+    if (status.status !== 'ready' && status.status !== 'withering') { releaseLock(lockKey); return res.status(400).json({ error: 'Todavía no podés cosechar esta planta' }); }
     let value = status.value;
-    if (value <= 0) return res.status(400).json({ error: 'El fruto está podrido' });
+    if (value <= 0) { releaseLock(lockKey); return res.status(400).json({ error: 'El fruto está podrido' }); }
+
+    // 🛡️ Verificar hCaptcha en CADA cosecha
+    if (!hcaptchaToken) {
+      releaseLock(lockKey);
+      return res.status(403).json({
+        error: 'HCAPTCHA_REQUIRED',
+        message: 'Verificá que sos humano para cosechar.',
+        sitekey: HCAPTCHA_SITE_KEY
+      });
+    }
+    const verifyResult = await verificarHCaptcha(hcaptchaToken, req.ip);
+    if (!verifyResult.success) {
+      releaseLock(lockKey);
+      return res.status(403).json({
+        error: 'HCAPTCHA_FAILED',
+        message: 'Verificación fallida. Intentá de nuevo.',
+        sitekey: HCAPTCHA_SITE_KEY
+      });
+    }
+    console.log(`✅ hCaptcha verificado (HARVEST) para ${userId}`);
+
     let multiplicadorBendicion = 1;
     if (blessingState.active) { multiplicadorBendicion = BLESSING_FRUIT_MULTIPLIER; value = value * multiplicadorBendicion; }
     const user = await ensureUser(userId);
@@ -909,36 +953,49 @@ app.post('/harvest', requireAuth, async (req, res) => {
     const level = PLANT_LEVELS[plant.level];
     const msg = multiplicadorBendicion > 1 ? ' 👑 ¡Bendición del Faraón x2 aplicada!' : '';
     await addHistory(userId, 'plant_harvest', value, 'Cosechaste ' + level.name + msg, null, null);
+    releaseLock(lockKey);
     res.json({ success: true, value, message: '¡Cosechaste ' + value.toFixed(2) + ' JHOAL!' + msg });
-  } catch (error) { res.status(500).json({ error: 'Error: ' + error.message }); }
+  } catch (error) { releaseLock(lockKey); res.status(500).json({ error: 'Error: ' + error.message }); }
 });
 
+// ==== SELL PLANT (con lock) ====
 app.post('/sell-plant', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { plantId } = req.body;
   if (!plantId) return res.status(400).json({ error: 'Faltan datos' });
+
+  const lockKey = `sell_${plantId}`;
+  if (!acquireLock(lockKey)) return res.status(429).json({ error: '⏳ Venta en proceso. Esperá.' });
+
   try {
     const { data: plant } = await supabase.from('plants').select('*').eq('id', plantId).eq('user_id', userId).maybeSingle();
-    if (!plant) return res.status(400).json({ error: 'Planta no encontrada' });
+    if (!plant) { releaseLock(lockKey); return res.status(400).json({ error: 'Planta no encontrada' }); }
     const level = PLANT_LEVELS[plant.level];
-    if (!level.canSell) return res.status(400).json({ error: '❌ La planta ' + level.name + ' no se puede vender.' });
+    if (!level.canSell) { releaseLock(lockKey); return res.status(400).json({ error: '❌ La planta ' + level.name + ' no se puede vender.' }); }
     const sellValue = getSellPrice(plant);
-    if (sellValue <= 0) return res.status(400).json({ error: 'La planta ya no tiene valor de venta. Dejala cumplir su ciclo.' });
+    if (sellValue <= 0) { releaseLock(lockKey); return res.status(400).json({ error: 'La planta ya no tiene valor de venta. Dejala cumplir su ciclo.' }); }
     const user = await ensureUser(userId);
     const newBalance = parseFloat(user.balance) + sellValue;
     await supabase.from('users_balance').update({ balance: newBalance }).eq('user_id', userId);
     await supabase.from('plants').delete().eq('id', plantId).eq('user_id', userId);
     const ageMinutes = Math.floor((Date.now()/1000 - plant.created_at) / 60);
     await addHistory(userId, 'plant_sell', sellValue, 'Vendiste ' + level.name + ' (minuto ' + ageMinutes + ')', null, null);
+    releaseLock(lockKey);
     res.json({ success: true, value: sellValue, message: '¡Vendiste por ' + sellValue.toLocaleString() + ' JHOAL!' });
-  } catch (error) { res.status(500).json({ error: 'Error: ' + error.message }); }
+  } catch (error) { releaseLock(lockKey); res.status(500).json({ error: 'Error: ' + error.message }); }
 });
 
+// ==== REFUND PLANT (con lock) ====
 app.post('/refund-plant', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { plantId } = req.body;
   if (!plantId) return res.status(400).json({ error: 'Faltan datos' });
+
+  const lockKey = `refund_${plantId}`;
+  if (!acquireLock(lockKey)) return res.status(429).json({ error: '⏳ Reembolso en proceso. Esperá.' });
+
   const result = await refundPlant(userId, plantId);
+  releaseLock(lockKey);
   if (result.success) res.json({ success: true, amount: result.amount, message: result.message });
   else res.status(400).json({ error: result.error });
 });
@@ -1029,7 +1086,7 @@ app.get('/huerto-warning', (req, res) => {
   });
 });
 
-app.get('/', (req, res) => res.json({ status: 'Horus Faucet + Dados + Huerto + Historial + Luna Llena + Bendición + AdsGram + Referidos + Captcha funcionando' }));
+app.get('/', (req, res) => res.json({ status: 'Horus Faucet + Dados + Huerto + Historial + Luna Llena + Bendición + AdsGram + Referidos + hCaptcha funcionando' }));
 
 // ==== BOT PRINCIPAL ====
 let bot = null;
@@ -1168,7 +1225,9 @@ app.listen(process.env.PORT || 3000, () => {
   console.log('Horus Faucet corriendo en puerto', process.env.PORT || 3000);
   console.log('Wallet:', wallet.address);
   console.log('🎁 Referidos: +' + REFERRAL_REWARD + ' JHOAL por referido válido');
-  console.log('🛡️ Captcha Anti-Bot: entre ' + CAPTCHA_MIN_BETS + ' y ' + CAPTCHA_MAX_BETS + ' tiradas | expira en ' + (CAPTCHA_EXPIRY_MS/1000) + 's');
+  console.log('🛡️ hCaptcha DADOS: aleatorio entre ' + CAPTCHA_DICE_MIN_BETS + ' y ' + CAPTCHA_DICE_MAX_BETS + ' tiradas');
+  console.log('🛡️ hCaptcha HUERTO: en cada cosecha');
+  console.log('🔒 Locks anti-doble-click: ACTIVADOS');
   console.log('🎲 Dados: x0=42% | x1.1=45% | x2=6% | x4=3% | x6=2% | x8=1% | x10=1%');
   console.log('🧹 Limpieza automática de plantas: ACTIVADA');
   cleanupOldPlants();
