@@ -48,7 +48,7 @@ const SUPPORT_USERNAME = 'JhoalSupportbot';
 const COOLDOWN = 30 * 60;
 const MIN_BET = 0.1;
 const MAX_BET = 1000;
-const WITHDRAW_COOLDOWN = 5 * 60; // 5 minutos entre retiros
+const WITHDRAW_COOLDOWN = 5 * 60;
 
 // ==== REFERIDOS ====
 const REFERRAL_REWARD = 1000;
@@ -134,8 +134,8 @@ const MOON_MAX_PER_DAY = 5;
 const AD_REWARD_AMOUNT = 5;
 const AD_COOLDOWN = 10 * 60;
 
-// ==== COOLDOWN DE SLOT AL VENDER ====
-const SELL_SLOT_COOLDOWN = 20;
+// ==== COOLDOWN DE COMPRA (anti-spam) ====
+const BUY_COOLDOWN = 10;
 
 const provider = new ethers.JsonRpcProvider(RPC_LIST[0]);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
@@ -386,10 +386,10 @@ function requireAuth(req, res, next) {
 
 // ==== HUERTO ====
 const PLANT_LEVELS = {
-  basic:   { name: 'Básica',  emoji: '🌱', price: 10000, waterCost: 40,  fruitValue: 125, sellPrice: 20400, canSell: true  },
-  medium:  { name: 'Media',   emoji: '🌿', price: 20000, waterCost: 80,  fruitValue: 250, sellPrice: 40800, canSell: true  },
-  premium: { name: 'Premium', emoji: '🌳', price: 30000, waterCost: 120, fruitValue: 375, sellPrice: 61200, canSell: true  },
-  pro:     { name: 'Pro',     emoji: '🌴', price: 40000, waterCost: 160, fruitValue: 500, sellPrice: 0,     canSell: false }
+  basic:   { name: 'Básica',  emoji: '🌱', price: 10000, waterCost: 40,  fruitValue: 125 },
+  medium:  { name: 'Media',   emoji: '🌿', price: 20000, waterCost: 80,  fruitValue: 250 },
+  premium: { name: 'Premium', emoji: '🌳', price: 30000, waterCost: 120, fruitValue: 375 },
+  pro:     { name: 'Pro',     emoji: '🌴', price: 40000, waterCost: 160, fruitValue: 500 }
 };
 const MAX_PLANTS = 12;
 const GROW_TIME_MIN = 25;
@@ -398,17 +398,6 @@ const ROT_TIME = 60;
 const PLANT_LIFETIME_DAYS = 30;
 const PLANT_LIFETIME_SECONDS = PLANT_LIFETIME_DAYS * 24 * 60 * 60;
 const LIFETIME_MINUTES = PLANT_LIFETIME_DAYS * 24 * 60;
-
-function getSellPrice(plant) {
-  const level = PLANT_LEVELS[plant.level];
-  if (!level.canSell) return 0;
-  const now = Math.floor(Date.now() / 1000);
-  const createdAt = plant.created_at || now;
-  const ageMinutes = Math.max(0, (now - createdAt) / 60);
-  if (ageMinutes >= LIFETIME_MINUTES) return 0;
-  const percentage = 1 - (ageMinutes / LIFETIME_MINUTES);
-  return Math.max(0, Math.floor(level.price * percentage));
-}
 
 function getPlantStatus(plant) {
   const now = Math.floor(Date.now() / 1000);
@@ -450,7 +439,7 @@ function timeAgo(timestamp) {
 
 function spinRoulette() {
   const random = Math.random() * 100;
-  if (random < 42) return 0;
+  if (random < 46) return 0;
   else if (random < 87) return 1.1;
   else if (random < 93) return 2;
   else if (random < 96) return 4;
@@ -667,7 +656,6 @@ app.post('/move-to-game', requireAuth, async (req, res) => {
   const { amount } = req.body;
   if (!amount || amount <= 0) return res.status(400).json({ error: 'Cantidad inválida' });
 
-  // 🔒 Lock por usuario
   const lockKey = `move_${userId}`;
   if (!acquireLock(lockKey)) return res.status(429).json({ error: '⏳ Movimiento en proceso. Esperá.' });
 
@@ -769,7 +757,6 @@ app.post('/bet', requireAuth, async (req, res) => {
   if (!amount) return res.status(400).json({ error: 'Faltan datos' });
   if (amount < MIN_BET || amount > MAX_BET) return res.status(400).json({ error: 'Apuesta inválida (' + MIN_BET + '-' + MAX_BET + ')' });
 
-  // 🔒 Lock anti doble-click
   const lockKey = `bet_${userId}`;
   if (!acquireLock(lockKey)) return res.status(429).json({ error: '⏳ Apuesta en proceso. Esperá.' });
 
@@ -838,7 +825,7 @@ app.get('/bet-history/:userId', requireAuth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ==== WITHDRAW CON LOCK + ATOMIC UPDATE + REVERT ====
+// ==== WITHDRAW ====
 app.post('/withdraw', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { wallet: userWallet, amount } = req.body;
@@ -850,7 +837,6 @@ app.post('/withdraw', requireAuth, async (req, res) => {
   if (!acquireLock(lockKey)) return res.status(429).json({ error: '⏳ Ya hay un retiro en proceso. Esperá.' });
 
   try {
-    // Cooldown de retiros
     const { data: recent } = await supabase
       .from('withdrawals')
       .select('created_at')
@@ -877,7 +863,6 @@ app.post('/withdraw', requireAuth, async (req, res) => {
     const newBalance = previousBalance - amount;
     const newWithdrawn = previousWithdrawn + amount;
 
-    // 🔒 Debitar atómicamente
     const { data: updated, error: updErr } = await supabase
       .from('users_balance')
       .update({ balance: newBalance, total_withdrawn: newWithdrawn })
@@ -890,7 +875,6 @@ app.post('/withdraw', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'Saldo insuficiente o retiro duplicado' });
     }
 
-    // 💸 Enviar TX
     let tx;
     try {
       const amountWei = ethers.parseUnits(amount.toString(), 18);
@@ -925,7 +909,6 @@ app.post('/withdraw', requireAuth, async (req, res) => {
   }
 });
 
-// ==== CONSULTAR RETIROS PENDIENTES ====
 app.get('/withdrawals/pending/:userId', requireAuth, async (req, res) => {
   try {
     const userId = req.userId;
@@ -943,7 +926,7 @@ app.get('/withdrawals/pending/:userId', requireAuth, async (req, res) => {
 
 app.get('/deposit-info', (req, res) => res.json({ success: true, depositWallet: wallet.address, tokenAddress: TOKEN_ADDRESS, minDeposit: 1 }));
 
-// ==== BUY PLANT (lock + hCaptcha + cooldown de slot) ====
+// ==== BUY PLANT (lock + hCaptcha + cooldown de compra) ====
 app.post('/buy-plant', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { level, hcaptchaToken } = req.body;
@@ -967,11 +950,11 @@ app.post('/buy-plant', requireAuth, async (req, res) => {
     const user = await ensureUser(userId);
 
     const nowSec = Math.floor(Date.now() / 1000);
-    if (user.plant_slot_cooldown_until && user.plant_slot_cooldown_until > nowSec) {
-      const remaining = user.plant_slot_cooldown_until - nowSec;
+    if (user.plant_buy_cooldown_until && user.plant_buy_cooldown_until > nowSec) {
+      const remaining = user.plant_buy_cooldown_until - nowSec;
       releaseLock(lockKey);
       return res.status(429).json({
-        error: '⏳ Esperá ' + remaining + 's para comprar otra planta (cooldown por venta).',
+        error: '⏳ Esperá ' + remaining + 's para comprar otra planta.',
         cooldownRemaining: remaining
       });
     }
@@ -985,8 +968,10 @@ app.post('/buy-plant', requireAuth, async (req, res) => {
     await supabase.from('users_balance').update({ balance: newBalance }).eq('user_id', userId);
     await supabase.from('plants').insert({ user_id: userId, level, status: 'dry', created_at: now, moon_multiplier: 1 });
     await addHistory(userId, 'plant_buy', -plantInfo.price, 'Compraste planta ' + plantInfo.name, null, null);
+    const buyCooldownUntil = nowSec + BUY_COOLDOWN;
+    await supabase.from('users_balance').update({ plant_buy_cooldown_until: buyCooldownUntil }).eq('user_id', userId);
     releaseLock(lockKey);
-    res.json({ success: true, message: '¡Compraste una planta ' + plantInfo.name + '!', expiresInDays: PLANT_LIFETIME_DAYS });
+    res.json({ success: true, message: '¡Compraste una planta ' + plantInfo.name + '!', expiresInDays: PLANT_LIFETIME_DAYS, cooldownSeconds: BUY_COOLDOWN });
   } catch (error) { releaseLock(lockKey); res.status(500).json({ error: 'Error: ' + error.message }); }
 });
 
@@ -1065,70 +1050,11 @@ app.post('/harvest', requireAuth, async (req, res) => {
   } catch (error) { releaseLock(lockKey); res.status(500).json({ error: 'Error: ' + error.message }); }
 });
 
-// ==== SELL PLANT (lock + hCaptcha + DELETE atómico + cooldown de slot) ====
+// ==== SELL PLANT (DESHABILITADO) ====
 app.post('/sell-plant', requireAuth, async (req, res) => {
-  const userId = req.userId;
-  const { plantId, hcaptchaToken } = req.body;
-  if (!plantId) return res.status(400).json({ error: 'Faltan datos' });
-
-  const lockKey = `sell_${plantId}`;
-  if (!acquireLock(lockKey)) return res.status(429).json({ error: '⏳ Venta en proceso. Esperá.' });
-
-  try {
-    // 🛡️ Verificar hCaptcha PRIMERO
-    if (!hcaptchaToken) {
-      releaseLock(lockKey);
-      return res.status(403).json({ error: 'HCAPTCHA_REQUIRED', message: 'Verificá que sos humano para vender.', sitekey: HCAPTCHA_SITE_KEY });
-    }
-    const verifyResult = await verificarHCaptcha(hcaptchaToken, req.ip);
-    if (!verifyResult.success) {
-      releaseLock(lockKey);
-      return res.status(403).json({ error: 'HCAPTCHA_FAILED', message: 'Verificación fallida. Intentá de nuevo.', sitekey: HCAPTCHA_SITE_KEY });
-    }
-    console.log(`✅ hCaptcha verificado (SELL) para ${userId}`);
-
-    // 🔒 Re-leer la planta DESPUÉS del captcha
-    const { data: plant } = await supabase.from('plants').select('*').eq('id', plantId).eq('user_id', userId).maybeSingle();
-    if (!plant) { releaseLock(lockKey); return res.status(400).json({ error: 'Planta no encontrada o ya vendida' }); }
-
-    const level = PLANT_LEVELS[plant.level];
-    if (!level.canSell) { releaseLock(lockKey); return res.status(400).json({ error: '❌ La planta ' + level.name + ' no se puede vender.' }); }
-    const sellValue = getSellPrice(plant);
-    if (sellValue <= 0) { releaseLock(lockKey); return res.status(400).json({ error: 'La planta ya no tiene valor de venta. Dejala cumplir su ciclo.' }); }
-
-    // 🔒 DELETE atómico
-    const { data: deleted, error: delErr } = await supabase
-      .from('plants')
-      .delete()
-      .eq('id', plantId)
-      .eq('user_id', userId)
-      .select();
-
-    if (delErr || !deleted || deleted.length === 0) {
-      releaseLock(lockKey);
-      return res.status(400).json({ error: 'La planta ya fue vendida' });
-    }
-
-    // Actualizar balance después del delete exitoso
-    const user = await ensureUser(userId);
-    const newBalance = parseFloat(user.balance) + sellValue;
-    await supabase.from('users_balance').update({ balance: newBalance }).eq('user_id', userId);
-
-    const cooldownUntil = Math.floor(Date.now() / 1000) + SELL_SLOT_COOLDOWN;
-    await supabase.from('users_balance').update({ plant_slot_cooldown_until: cooldownUntil }).eq('user_id', userId);
-
-    const ageMinutes = Math.floor((Date.now() / 1000 - plant.created_at) / 60);
-    await addHistory(userId, 'plant_sell', sellValue, 'Vendiste ' + level.name + ' (minuto ' + ageMinutes + ')', null, null);
-
-    releaseLock(lockKey);
-    res.json({
-      success: true,
-      value: sellValue,
-      cooldownUntil: cooldownUntil,
-      cooldownSeconds: SELL_SLOT_COOLDOWN,
-      message: '¡Vendiste por ' + sellValue.toLocaleString() + ' JHOAL! Esperá ' + SELL_SLOT_COOLDOWN + 's para comprar otra.'
-    });
-  } catch (error) { releaseLock(lockKey); res.status(500).json({ error: 'Error: ' + error.message }); }
+  return res.status(400).json({
+    error: '🚫 La venta de plantas está deshabilitada. Las plantas duran 30 días y luego expiran automáticamente.'
+  });
 });
 
 app.post('/refund-plant', requireAuth, async (req, res) => {
@@ -1145,6 +1071,7 @@ app.post('/refund-plant', requireAuth, async (req, res) => {
   else res.status(400).json({ error: result.error });
 });
 
+// ==== MY PLANTS ====
 app.get('/my-plants/:userId', requireAuth, async (req, res) => {
   try {
     const userId = req.userId;
@@ -1153,18 +1080,14 @@ app.get('/my-plants/:userId', requireAuth, async (req, res) => {
     const plantsWithStatus = (plants || []).map(function(p) {
       const status = getPlantStatus(p);
       const level = PLANT_LEVELS[p.level];
-      const sellValue = getSellPrice(p);
-      const now = Math.floor(Date.now() / 1000);
-      const createdAt = p.created_at || now;
-      const ageMinutes = Math.max(0, (now - createdAt) / 60);
-      const sellPercentage = level.canSell ? Math.max(0, Math.round((1 - ageMinutes / LIFETIME_MINUTES) * 100)) : 0;
       return {
         id: p.id, level: p.level, levelName: level.name, emoji: level.emoji,
         status: status.status, value: status.value,
         minutesLeft: status.minutesLeft || 0, progress: status.progress || 0,
         waterCost: level.waterCost, fruitValue: level.fruitValue,
-        sellPrice: sellValue, sellPercentage: sellPercentage, originalSellPrice: level.price,
-        canSell: level.canSell && sellValue > 0, lastWatered: p.last_watered,
+        originalPrice: level.price,
+        canSell: false,
+        lastWatered: p.last_watered,
         canRefund: status.canRefund || false,
         refundAmount: status.canRefund ? (level.waterCost * 0.9) : 0,
         moonBoost: status.moonBoost || false, daysLeft: status.daysLeft || 0, expiresAt: status.expiresAt || null
@@ -1172,8 +1095,8 @@ app.get('/my-plants/:userId', requireAuth, async (req, res) => {
     });
 
     const nowSec = Math.floor(Date.now() / 1000);
-    const cooldownRemaining = (user.plant_slot_cooldown_until && user.plant_slot_cooldown_until > nowSec)
-      ? user.plant_slot_cooldown_until - nowSec
+    const buyCooldownRemaining = (user.plant_buy_cooldown_until && user.plant_buy_cooldown_until > nowSec)
+      ? user.plant_buy_cooldown_until - nowSec
       : 0;
 
     res.json({
@@ -1181,7 +1104,7 @@ app.get('/my-plants/:userId', requireAuth, async (req, res) => {
       maxPlants: MAX_PLANTS, plantLevels: PLANT_LEVELS, lifetimeDays: PLANT_LIFETIME_DAYS,
       moon: { active: moonState.active, endsAt: moonState.endsAt, multiplier: MOON_GROWTH_MULTIPLIER },
       blessing: { active: blessingState.active, endsAt: blessingState.endsAt, multiplier: BLESSING_FRUIT_MULTIPLIER },
-      plantSlotCooldownRemaining: cooldownRemaining
+      plantBuyCooldownRemaining: buyCooldownRemaining
     });
   } catch (error) { res.status(500).json({ error: 'Error: ' + error.message }); }
 });
@@ -1234,8 +1157,8 @@ app.get('/balance', async (req, res) => {
 app.get('/huerto-warning', (req, res) => {
   res.json({
     success: true, title: '⚠️ AVISO IMPORTANTE – HUERTO DE HORUS ⚠️',
-    message: '🌱 El que no cosecha, PIERDE.\nLas plantas duran solo 30 días. Si no las RIEGAS y cosechás a tiempo, el fruto se pudre.\n💰 Podés reclamar el 90% del riego si se pudre.\n📉 El precio de venta de la planta baja cada minuto.\n👀 Estate atento a tus plantas.',
-    lifetimeDays: PLANT_LIFETIME_DAYS, refundPercent: 90
+    message: '🌱 El que no cosecha, PIERDE.\nLas plantas duran solo 30 días y luego expiran automáticamente.\nSi no las RIEGAS y cosechás a tiempo, el fruto se pudre.\n💰 Podés reclamar el 90% del riego si se pudre.\n🚫 La venta de plantas está deshabilitada.\n👀 Estate atento a tus plantas.',
+    lifetimeDays: PLANT_LIFETIME_DAYS, refundPercent: 90, sellEnabled: false
   });
 });
 
@@ -1379,11 +1302,12 @@ app.listen(process.env.PORT || 3000, () => {
   console.log('Wallet:', wallet.address);
   console.log('🎁 Referidos: +' + REFERRAL_REWARD + ' JHOAL por referido válido');
   console.log('🛡️ hCaptcha DADOS: aleatorio entre ' + CAPTCHA_DICE_MIN_BETS + ' y ' + CAPTCHA_DICE_MAX_BETS + ' tiradas');
-  console.log('🛡️ hCaptcha HUERTO: en cada cosecha, compra y venta');
-  console.log('🔒 Locks anti-doble-click: ACTIVADOS en bet, withdraw, move-to-game, buy, sell, harvest, water, refund');
-  console.log('⏳ Cooldown de slot al vender: ' + SELL_SLOT_COOLDOWN + 's');
+  console.log('🛡️ hCaptcha HUERTO: en cada cosecha y compra');
+  console.log('🔒 Locks anti-doble-click: ACTIVADOS');
+  console.log('⏳ Cooldown de compra de plantas: ' + BUY_COOLDOWN + 's');
+  console.log('🚫 Venta de plantas: DESHABILITADA');
   console.log('⏳ Cooldown entre retiros: ' + WITHDRAW_COOLDOWN + 's');
-  console.log('🎲 Dados: x0=42% | x1.1=45% | x2=6% | x4=3% | x6=2% | x8=1% | x10=1%');
+  console.log('🎲 Dados: x0=46% | x1.1=41% | x2=6% | x4=3% | x6=2% | x8=1% | x10=1% | EV=0.991');
   console.log('🧹 Limpieza automática de plantas: ACTIVADA');
   cleanupOldPlants();
   cleanupExpiredPlants();
