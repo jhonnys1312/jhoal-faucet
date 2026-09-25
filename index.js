@@ -137,6 +137,40 @@ const AD_COOLDOWN = 10 * 60;
 // ==== COOLDOWN DE COMPRA (anti-spam) ====
 const BUY_COOLDOWN = 10;
 
+// ==== PREDICCIONES DE LOS DIOSES ====
+const PREDICTION_ROUND_DURATION = 5 * 60;         // 5 min total del ciclo
+const PREDICTION_WINDOW = 3 * 60;                 // 3 min para predecir
+const PREDICTION_COOLDOWN = 2 * 60;               // 2 min de cooldown
+const PREDICTION_BLOCK_LAST_SECONDS = 15;         // Bloquear últimos 15s
+const PREDICTION_BASE_POOL = 10;                  // Pool base 10 JHOAL
+const PREDICTION_AD_REWARD = 5;                   // +5 por anuncio visto
+const PREDICTION_RANGE = 50;                      // Rango ±$50
+const PREDICTION_AD_COOLDOWN = 5 * 60;            // 5 min entre anuncios
+const BURN_WALLET = '0x000000000000000000000000000000000000dEaD';
+const BINANCE_BTC_URL = 'https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT';
+
+let btcPriceCache = { price: 0, updatedAt: 0 };
+const BTC_CACHE_MS = 15 * 1000;
+
+async function getBTCPrice() {
+  const now = Date.now();
+  if (now - btcPriceCache.updatedAt < BTC_CACHE_MS && btcPriceCache.price > 0) {
+    return btcPriceCache.price;
+  }
+  try {
+    const r = await fetch(BINANCE_BTC_URL);
+    const data = await r.json();
+    const price = parseFloat(data.price);
+    if (price > 0) {
+      btcPriceCache = { price, updatedAt: now };
+      return price;
+    }
+  } catch (e) {
+    console.error('Error BTC:', e.message);
+  }
+  return btcPriceCache.price || 0;
+}
+
 const provider = new ethers.JsonRpcProvider(RPC_LIST[0]);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 
@@ -564,6 +598,285 @@ async function intentarPagarReferido(userId) {
   } catch (e) { console.error('Error intentarPagarReferido:', e); }
 }
 
+// ==== SISTEMA DE RONDAS DE PREDICCIÓN ====
+let predictionLoopRunning = false;
+
+function getPredictionRoundNumber() {
+  return Math.floor(Date.now() / 1000 / PREDICTION_ROUND_DURATION);
+}
+
+async function ensurePredictionRound() {
+  const roundNumber = getPredictionRoundNumber();
+  try {
+    const { data: existing } = await supabase
+      .from('prediction_rounds')
+      .select('*')
+      .eq('round_number', roundNumber)
+      .maybeSingle();
+
+    if (existing) return existing;
+
+    const price = await getBTCPrice();
+    if (!price || price <= 0) return null;
+
+    const now = Math.floor(Date.now() / 1000);
+    const startedAt = roundNumber * PREDICTION_ROUND_DURATION;
+    const closesAt = startedAt + PREDICTION_WINDOW;
+
+    const { data: lastRound } = await supabase
+      .from('prediction_rounds')
+      .select('accumulated_pool')
+      .eq('status', 'resolved')
+      .order('round_number', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    let accumulated = 0;
+    if (lastRound && lastRound.accumulated_pool > 0) {
+      accumulated = parseFloat(lastRound.accumulated_pool);
+    }
+
+    const totalPool = PREDICTION_BASE_POOL + accumulated;
+
+    const { data: newRound, error } = await supabase
+      .from('prediction_rounds')
+      .insert({
+        round_number: roundNumber,
+        start_price: price,
+        base_pool: PREDICTION_BASE_POOL,
+        accumulated_pool: accumulated,
+        ads_pool: 0,
+        total_pool: totalPool,
+        status: 'open',
+        started_at: startedAt,
+        closes_at: closesAt,
+        created_at: now
+      })
+      .select()
+      .maybeSingle();
+
+    if (error) {
+      const { data: fallback } = await supabase
+        .from('prediction_rounds')
+        .select('*')
+        .eq('round_number', roundNumber)
+        .maybeSingle();
+      return fallback;
+    }
+
+    console.log(`🔮 Ronda #${roundNumber} | Pool: ${totalPool} JHOAL | BTC: $${price.toLocaleString()}`);
+    return newRound;
+  } catch (e) {
+    console.error('Error ensurePredictionRound:', e.message);
+    return null;
+  }
+}
+
+async function resolvePredictionRounds() {
+  try {
+    const now = Math.floor(Date.now() / 1000);
+    const { data: pending } = await supabase
+      .from('prediction_rounds')
+      .select('*')
+      .eq('status', 'open')
+      .lt('closes_at', now - 5);
+
+    if (!pending || pending.length === 0) return;
+
+    for (const round of pending) {
+      const lockKey = `resolve_round_${round.id}`;
+      if (!acquireLock(lockKey)) continue;
+
+      try {
+        const endPrice = await getBTCPrice();
+        if (!endPrice || endPrice <= 0) { releaseLock(lockKey); continue; }
+
+        const result = endPrice > round.start_price ? 'up' : (endPrice < round.start_price ? 'down' : 'tie');
+
+        const { data: preds } = await supabase
+          .from('predictions')
+          .select('*')
+          .eq('round_id', round.id);
+
+        const allPreds = preds || [];
+
+        const processedPreds = allPreds.map(p => {
+          const predicted = parseFloat(p.predicted_price);
+          const distance = Math.abs(endPrice - predicted);
+          let percentPremium = 0;
+          let isWinner = false;
+
+          if (distance <= PREDICTION_RANGE) {
+            percentPremium = 100 - (distance / PREDICTION_RANGE) * 100;
+            isWinner = true;
+          }
+
+          return { ...p, distance, percentPremium, isWinner };
+        });
+
+        const winners = processedPreds.filter(p => p.isWinner);
+        const winnersCount = winners.length;
+        const totalPool = parseFloat(round.total_pool);
+        let distributed = 0;
+        let burned = 0;
+        let accumulatedNext = 0;
+
+        if (winnersCount > 0) {
+          const sumPercents = winners.reduce((s, w) => s + w.percentPremium, 0);
+
+          for (const w of winners) {
+            const share = (w.percentPremium / sumPercents) * totalPool;
+            const payout = Math.floor(share * 100) / 100;
+
+            const user = await ensureUser(w.user_id);
+            const newBalance = parseFloat(user.balance) + payout;
+            const newWon = parseFloat(user.total_prediction_won || 0) + payout;
+
+            await supabase.from('users_balance')
+              .update({ balance: newBalance, total_prediction_won: newWon })
+              .eq('user_id', w.user_id);
+
+            await supabase.from('predictions')
+              .update({ distance: w.distance, percent_premium: w.percentPremium, won: true, payout })
+              .eq('id', w.id);
+
+            await addHistory(w.user_id, 'prediction_win', payout,
+              `🔮 Ganaste en Predicciones Ronda #${round.round_number} (dist $${w.distance.toFixed(2)}, ${w.percentPremium.toFixed(1)}%)`,
+              null, null);
+
+            distributed += payout;
+
+            if (bot && user.chat_id) {
+              try {
+                await bot.sendMessage(user.chat_id,
+                  `🔮 *¡GANASTE EN LOS DIOSES!*\n\n` +
+                  `📊 Ronda #${round.round_number}\n` +
+                  `📍 Precio final: $${endPrice.toLocaleString()}\n` +
+                  `🎯 Tu predicción: $${w.predicted_price}\n` +
+                  `📏 Distancia: $${w.distance.toFixed(2)}\n` +
+                  `💰 Ganaste: *${payout.toFixed(2)} JHOAL*`,
+                  { parse_mode: 'Markdown' }
+                );
+              } catch (e) {}
+            }
+          }
+
+          const losers = processedPreds.filter(p => !p.isWinner);
+          for (const l of losers) {
+            await supabase.from('predictions')
+              .update({ distance: l.distance, percent_premium: 0, won: false, payout: 0 })
+              .eq('id', l.id);
+          }
+
+          console.log(`✅ Ronda #${round.round_number} | Ganadores: ${winnersCount} | Repartido: ${distributed.toFixed(2)}`);
+        } else {
+          const burnAmount = Math.floor(totalPool * 0.10 * 100) / 100;
+          const accumulateAmount = totalPool - burnAmount;
+          burned = burnAmount;
+          accumulatedNext = accumulateAmount;
+
+          if (burnAmount > 0) {
+            await supabase.from('burn_wallet').insert({
+              amount: burnAmount,
+              source: 'prediction_loss',
+              created_at: now
+            });
+          }
+
+          for (const p of processedPreds) {
+            await supabase.from('predictions')
+              .update({ distance: p.distance, percent_premium: 0, won: false, payout: 0 })
+              .eq('id', p.id);
+          }
+
+          console.log(`💀 Ronda #${round.round_number} | Nadie ganó | Quemado: ${burnAmount} | Acumulado: ${accumulateAmount}`);
+        }
+
+        await supabase.from('prediction_rounds').update({
+          end_price: endPrice,
+          result: result,
+          distributed: distributed,
+          burned: burned,
+          accumulated_pool: accumulatedNext,
+          winners_count: winnersCount,
+          status: 'resolved',
+          resolved_at: now
+        }).eq('id', round.id).eq('status', 'open');
+
+      } catch (e) {
+        console.error(`Error resolviendo ronda #${round.round_number}:`, e.message);
+      } finally {
+        releaseLock(lockKey);
+      }
+    }
+  } catch (e) {
+    console.error('Error resolvePredictionRounds:', e.message);
+  }
+}
+
+async function predictionLoop() {
+  if (predictionLoopRunning) return;
+  predictionLoopRunning = true;
+  try {
+    await ensurePredictionRound();
+    await resolvePredictionRounds();
+  } catch (e) {
+    console.error('Error predictionLoop:', e.message);
+  }
+  predictionLoopRunning = false;
+}
+
+// ==== ENVÍO DE QUEMA ON-CHAIN ====
+let burnSendRunning = false;
+
+async function sendPendingBurns() {
+  if (burnSendRunning) return;
+  burnSendRunning = true;
+  try {
+    const { data: pending } = await supabase
+      .from('burn_wallet')
+      .select('*')
+      .is('sent_at', null)
+      .order('created_at', { ascending: true });
+
+    if (!pending || pending.length === 0) { burnSendRunning = false; return; }
+
+    const totalBurn = pending.reduce((s, b) => s + parseFloat(b.amount), 0);
+    if (totalBurn <= 0) { burnSendRunning = false; return; }
+
+    console.log(`🔥 Enviando ${totalBurn.toFixed(2)} JHOAL a quema...`);
+
+    const amountWei = ethers.parseUnits(totalBurn.toFixed(18), 18);
+    const tx = await token.transfer(BURN_WALLET, amountWei);
+    await tx.wait();
+
+    const now = Math.floor(Date.now() / 1000);
+    for (const b of pending) {
+      await supabase.from('burn_wallet')
+        .update({ sent_at: now, tx_hash: tx.hash })
+        .eq('id', b.id);
+    }
+
+    await addHistory('SYSTEM', 'burn', -totalBurn,
+      `🔥 Quema enviada a ${BURN_WALLET.slice(0, 8)}...`, null, tx.hash);
+
+    console.log(`🔥 Quema enviada: ${totalBurn.toFixed(2)} JHOAL | TX: ${tx.hash}`);
+  } catch (e) {
+    console.error('Error en sendPendingBurns:', e.message);
+  }
+  burnSendRunning = false;
+}
+
+function scheduleBurnAtMidnight() {
+  const now = new Date();
+  const nextMidnightUTC = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 0, 0, 0));
+  const msUntilMidnight = nextMidnightUTC.getTime() - now.getTime();
+  setTimeout(async () => {
+    await sendPendingBurns();
+    scheduleBurnAtMidnight();
+  }, msUntilMidnight);
+}
+
 // ==== ENDPOINTS ====
 app.get('/moon-status', (req, res) => {
   const now = Math.floor(Date.now() / 1000);
@@ -750,7 +1063,7 @@ app.get('/balance-game/:userId', requireAuth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ==== BET CON HCAPTCHA + LOCK ====
+// ==== BET ====
 app.post('/bet', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { amount, hcaptchaToken } = req.body;
@@ -926,7 +1239,7 @@ app.get('/withdrawals/pending/:userId', requireAuth, async (req, res) => {
 
 app.get('/deposit-info', (req, res) => res.json({ success: true, depositWallet: wallet.address, tokenAddress: TOKEN_ADDRESS, minDeposit: 1 }));
 
-// ==== BUY PLANT (lock + hCaptcha + cooldown de compra) ====
+// ==== BUY PLANT ====
 app.post('/buy-plant', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { level, hcaptchaToken } = req.body;
@@ -975,7 +1288,7 @@ app.post('/buy-plant', requireAuth, async (req, res) => {
   } catch (error) { releaseLock(lockKey); res.status(500).json({ error: 'Error: ' + error.message }); }
 });
 
-// ==== WATER PLANT (lock) ====
+// ==== WATER PLANT ====
 app.post('/water-plant', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { plantId } = req.body;
@@ -1006,7 +1319,7 @@ app.post('/water-plant', requireAuth, async (req, res) => {
   } catch (error) { releaseLock(lockKey); res.status(500).json({ error: 'Error: ' + error.message }); }
 });
 
-// ==== HARVEST (hCaptcha + lock) ====
+// ==== HARVEST ====
 app.post('/harvest', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { plantId, hcaptchaToken } = req.body;
@@ -1071,7 +1384,6 @@ app.post('/refund-plant', requireAuth, async (req, res) => {
   else res.status(400).json({ error: result.error });
 });
 
-// ==== MY PLANTS ====
 app.get('/my-plants/:userId', requireAuth, async (req, res) => {
   try {
     const userId = req.userId;
@@ -1118,7 +1430,7 @@ app.get('/history/:userId', requireAuth, async (req, res) => {
     if (type && type !== 'all') query = query.eq('type', type);
     const { data: history } = await query;
     const { data: allHistory } = await supabase.from('history').select('type, amount').eq('user_id', userId);
-    let summary = { faucet: 0, dice: 0, deposit: 0, withdraw: 0, garden: 0, referral: 0, total: 0 };
+    let summary = { faucet: 0, dice: 0, deposit: 0, withdraw: 0, garden: 0, referral: 0, prediction: 0, total: 0 };
     (allHistory || []).forEach(function(h) {
       const amount = parseFloat(h.amount) || 0;
       if (h.type === 'faucet') summary.faucet += amount;
@@ -1126,6 +1438,7 @@ app.get('/history/:userId', requireAuth, async (req, res) => {
       else if (h.type === 'deposit' || h.type === 'deposit_game') summary.deposit += amount;
       else if (h.type === 'withdraw') summary.withdraw += amount;
       else if (h.type === 'referral_reward') summary.referral += amount;
+      else if (h.type && h.type.startsWith('prediction_')) summary.prediction += amount;
       else if (h.type && h.type.startsWith('plant_')) summary.garden += amount;
       summary.total += amount;
     });
@@ -1162,7 +1475,255 @@ app.get('/huerto-warning', (req, res) => {
   });
 });
 
-app.get('/', (req, res) => res.json({ status: 'Horus Faucet + Dados + Huerto + Historial + Luna Llena + Bendición + AdsGram + Referidos + hCaptcha funcionando' }));
+app.get('/', (req, res) => res.json({ status: 'Horus Faucet + Dados + Huerto + Historial + Luna Llena + Bendición + AdsGram + Referidos + Predicciones + hCaptcha funcionando' }));
+
+// ==== ENDPOINTS DE PREDICCIÓN ====
+
+app.get('/btc-price', async (req, res) => {
+  try {
+    const price = await getBTCPrice();
+    res.json({ success: true, price });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/prediction/current', requireAuth, async (req, res) => {
+  try {
+    const userId = req.userId;
+    const round = await ensurePredictionRound();
+    if (!round) return res.status(500).json({ error: 'No hay ronda activa' });
+
+    const now = Math.floor(Date.now() / 1000);
+    const { data: userPred } = await supabase
+      .from('predictions')
+      .select('*')
+      .eq('round_id', round.id)
+      .eq('user_id', userId)
+      .maybeSingle();
+
+    const user = await ensureUser(userId);
+    const lastAd = user.last_prediction_ad || 0;
+    const adValid = (now - lastAd) < PREDICTION_AD_COOLDOWN;
+    const adCooldownRemaining = adValid ? 0 : Math.max(0, PREDICTION_AD_COOLDOWN - (now - lastAd));
+
+    const { count: totalPreds } = await supabase
+      .from('predictions')
+      .select('*', { count: 'exact', head: true })
+      .eq('round_id', round.id);
+
+    const { data: burns } = await supabase
+      .from('burn_wallet')
+      .select('amount');
+    const totalBurned = (burns || []).reduce((s, b) => s + parseFloat(b.amount), 0);
+
+    res.json({
+      success: true,
+      round: {
+        id: round.id,
+        number: round.round_number,
+        startPrice: parseFloat(round.start_price),
+        currentPrice: await getBTCPrice(),
+        secondsLeft: Math.max(0, round.closes_at - now),
+        totalPool: parseFloat(round.total_pool),
+        basePool: parseFloat(round.base_pool),
+        accumulatedPool: parseFloat(round.accumulated_pool),
+        adsPool: parseFloat(round.ads_pool),
+        range: PREDICTION_RANGE,
+        status: round.status,
+        totalPredictions: totalPreds || 0,
+        canPredict: now < (round.closes_at - PREDICTION_BLOCK_LAST_SECONDS)
+      },
+      userPrediction: userPred ? {
+        predictedPrice: parseFloat(userPred.predicted_price),
+        won: userPred.won,
+        payout: parseFloat(userPred.payout || 0)
+      } : null,
+      adValid,
+      adCooldownRemaining,
+      totalBurned: Math.floor(totalBurned)
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/prediction/watch-ad', requireAuth, async (req, res) => {
+  const userId = req.userId;
+  const lockKey = `pred_ad_${userId}`;
+  if (!acquireLock(lockKey)) return res.status(429).json({ error: '⏳ Esperá un momento' });
+
+  try {
+    const user = await ensureUser(userId);
+    const now = Math.floor(Date.now() / 1000);
+
+    if (user.last_prediction_ad && now - user.last_prediction_ad < 60) {
+      const remaining = 60 - (now - user.last_prediction_ad);
+      releaseLock(lockKey);
+      return res.status(429).json({ error: `⏳ Esperá ${remaining}s antes de otro anuncio` });
+    }
+
+    const round = await ensurePredictionRound();
+    if (!round || round.status !== 'open') {
+      releaseLock(lockKey);
+      return res.status(400).json({ error: 'No hay ronda activa' });
+    }
+
+    const newAdsPool = parseFloat(round.ads_pool || 0) + PREDICTION_AD_REWARD;
+    const newTotalPool = parseFloat(round.total_pool || 0) + PREDICTION_AD_REWARD;
+
+    await supabase.from('prediction_rounds')
+      .update({ ads_pool: newAdsPool, total_pool: newTotalPool })
+      .eq('id', round.id);
+
+    await supabase.from('users_balance')
+      .update({ last_prediction_ad: now })
+      .eq('user_id', userId);
+
+    await addHistory(userId, 'prediction_ad', 0, '📺 Anuncio visto para predicción (+5 a la pool)', null, null);
+
+    releaseLock(lockKey);
+    res.json({
+      success: true,
+      message: `✅ +5 JHOAL a la pool. Pool actual: ${newTotalPool}`,
+      newPool: newTotalPool,
+      validFor: PREDICTION_AD_COOLDOWN
+    });
+  } catch (e) {
+    releaseLock(lockKey);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/prediction/bet', requireAuth, async (req, res) => {
+  const userId = req.userId;
+  const { predictedPrice } = req.body;
+
+  if (!predictedPrice || isNaN(predictedPrice) || predictedPrice <= 0) {
+    return res.status(400).json({ error: 'Precio inválido' });
+  }
+
+  const lockKey = `prediction_${userId}`;
+  if (!acquireLock(lockKey)) return res.status(429).json({ error: '⏳ Esperá un momento' });
+
+  try {
+    const user = await ensureUser(userId);
+    const now = Math.floor(Date.now() / 1000);
+
+    if (!user.last_prediction_ad || now - user.last_prediction_ad > PREDICTION_AD_COOLDOWN) {
+      releaseLock(lockKey);
+      return res.status(403).json({ error: 'AD_REQUIRED', message: '📺 Mirá un anuncio para predecir' });
+    }
+
+    const round = await ensurePredictionRound();
+    if (!round || round.status !== 'open') {
+      releaseLock(lockKey);
+      return res.status(400).json({ error: 'La ronda ya cerró' });
+    }
+
+    if (now >= round.closes_at) {
+      releaseLock(lockKey);
+      return res.status(400).json({ error: 'La ronda ya cerró' });
+    }
+    if (now >= round.closes_at - PREDICTION_BLOCK_LAST_SECONDS) {
+      releaseLock(lockKey);
+      return res.status(400).json({ error: '⏰ Últimos segundos. Esperá la próxima ronda.' });
+    }
+
+    const currentPrice = await getBTCPrice();
+    const minPrice = currentPrice * 0.8;
+    const maxPrice = currentPrice * 1.2;
+    if (predictedPrice < minPrice || predictedPrice > maxPrice) {
+      releaseLock(lockKey);
+      return res.status(400).json({
+        error: `El precio debe estar entre $${minPrice.toFixed(2)} y $${maxPrice.toFixed(2)}`
+      });
+    }
+
+    const { data: existing } = await supabase
+      .from('predictions')
+      .select('id')
+      .eq('round_id', round.id)
+      .eq('user_id', userId)
+      .maybeSingle();
+
+    if (existing) {
+      releaseLock(lockKey);
+      return res.status(400).json({ error: 'Ya hiciste tu predicción para esta ronda' });
+    }
+
+    await supabase.from('predictions').insert({
+      round_id: round.id,
+      user_id: userId,
+      predicted_price: predictedPrice,
+      created_at: now
+    });
+
+    await addHistory(userId, 'prediction_bet', 0,
+      `🔮 Predijiste $${predictedPrice} para Ronda #${round.round_number}`,
+      null, null);
+
+    releaseLock(lockKey);
+    res.json({
+      success: true,
+      message: `¡Predicción registrada! $${predictedPrice}`,
+      predictedPrice
+    });
+  } catch (e) {
+    releaseLock(lockKey);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/prediction/history/:userId', requireAuth, async (req, res) => {
+  try {
+    const userId = req.userId;
+    const { data } = await supabase
+      .from('predictions')
+      .select('*, prediction_rounds(round_number, result, end_price, start_price)')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false })
+      .limit(20);
+    res.json({ success: true, predictions: data || [] });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/prediction/last-winners', async (req, res) => {
+  try {
+    const { data: lastRound } = await supabase
+      .from('prediction_rounds')
+      .select('*')
+      .eq('status', 'resolved')
+      .order('round_number', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (!lastRound) return res.json({ success: true, winners: [], round: null });
+
+    const { data: preds } = await supabase
+      .from('predictions')
+      .select('user_id, predicted_price, distance, percent_premium, payout')
+      .eq('round_id', lastRound.id)
+      .eq('won', true)
+      .order('payout', { ascending: false })
+      .limit(10);
+
+    res.json({
+      success: true,
+      round: {
+        number: lastRound.round_number,
+        startPrice: parseFloat(lastRound.start_price),
+        endPrice: parseFloat(lastRound.end_price),
+        result: lastRound.result,
+        totalPool: parseFloat(lastRound.total_pool),
+        distributed: parseFloat(lastRound.distributed || 0)
+      },
+      winners: (preds || []).map(p => ({
+        userId: p.user_id,
+        predictedPrice: parseFloat(p.predicted_price),
+        distance: parseFloat(p.distance || 0),
+        percentPremium: parseFloat(p.percent_premium || 0),
+        payout: parseFloat(p.payout || 0)
+      }))
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 
 // ==== BOT PRINCIPAL ====
 let bot = null;
@@ -1201,6 +1762,7 @@ if (BOT_TOKEN) {
       '📺 Mirá anuncios y ganá *5 JHOAL extra*\n' +
       '🎲 Juega en *Los Dados de Horus*\n' +
       '🌱 Planta en el *Huerto de Horus*\n' +
+      '🔮 Predice el precio de BTC en *Predicciones de los Dioses*\n' +
       '🌕 Atento a la *Luna Llena*\n' +
       '👑 Atento a la *Bendición del Faraón*\n' +
       '🎁 Gana *1000 JHOAL* por cada amigo que invites\n' +
@@ -1308,9 +1870,18 @@ app.listen(process.env.PORT || 3000, () => {
   console.log('🚫 Venta de plantas: DESHABILITADA');
   console.log('⏳ Cooldown entre retiros: ' + WITHDRAW_COOLDOWN + 's');
   console.log('🎲 Dados: x0=46% | x1.1=41% | x2=6% | x4=3% | x6=2% | x8=1% | x10=1% | EV=0.991');
+  console.log('🔮 Predicciones: ACTIVADO (rondas 5 min, pool base 10, +5 por anuncio, rango ±$50)');
+  console.log('🔥 Wallet de quema: ' + BURN_WALLET);
+  console.log('🪙 BTC desde Binance con caché de 15s');
   console.log('🧹 Limpieza automática de plantas: ACTIVADA');
   cleanupOldPlants();
   cleanupExpiredPlants();
   setInterval(cleanupExpiredPlants, 5 * 60 * 1000);
   setInterval(cleanupOldPlants, 6 * 60 * 60 * 1000);
+
+  // Iniciar loops de predicción
+  predictionLoop();
+  setInterval(predictionLoop, 15 * 1000);
+  setInterval(sendPendingBurns, 60 * 60 * 1000);
+  scheduleBurnAtMidnight();
 });
