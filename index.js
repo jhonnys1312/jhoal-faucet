@@ -144,8 +144,8 @@ const PREDICTION_COOLDOWN = 2 * 60;
 const PREDICTION_BLOCK_LAST_SECONDS = 15;
 const PREDICTION_BASE_POOL = 10;
 const PREDICTION_AD_REWARD = 5;
-const PREDICTION_RANGE = 20;                 // ⬅️ CAMBIADO: 20 en vez de 50
-const PREDICTION_AD_COOLDOWN = 0;            // ⬅️ CAMBIADO: sin cooldown entre anuncios
+const PREDICTION_RANGE = 20;
+const PREDICTION_AD_COOLDOWN = 0;
 const BURN_WALLET = '0x000000000000000000000000000000000000dEaD';
 
 // ==== FUENTES DE PRECIO BTC (CoinGecko + Binance) ====
@@ -308,7 +308,6 @@ function tickMoon() {
 moonState.todayKey = todayKeyUTC();
 scheduleNextMoon();
 setInterval(tickMoon, 30 * 1000);
-
 // ==== BENDICIÓN DEL FARAÓN ====
 const BLESSING_DURATION = 30 * 60 * 1000;
 const BLESSING_FRUIT_MULTIPLIER = 2;
@@ -588,7 +587,6 @@ async function cleanupOldPlants() {
     }
   } catch (e) { console.error('Error cleanupOldPlants:', e); }
 }
-
 // ==== REFERIDOS HELPERS ====
 async function otorgarRecompensaReferido(referrerId, referredId) {
   try {
@@ -946,7 +944,6 @@ app.get('/captcha/status/:userId', requireAuth, async (req, res) => {
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
-
 app.post('/register-referral', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { referrerId } = req.body;
@@ -1179,7 +1176,6 @@ app.get('/bet-history/:userId', requireAuth, async (req, res) => {
     res.json({ success: true, bets: data || [] });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
-
 // ==== WITHDRAW ====
 app.post('/withdraw', requireAuth, async (req, res) => {
   const userId = req.userId;
@@ -1518,7 +1514,6 @@ app.get('/huerto-warning', (req, res) => {
 });
 
 app.get('/', (req, res) => res.json({ status: 'Horus Faucet + Dados + Huerto + Historial + Luna Llena + Bendición + AdsGram + Referidos + Predicciones + hCaptcha funcionando' }));
-
 // ==== ENDPOINTS DE PREDICCIÓN ====
 
 app.get('/btc-price', async (req, res) => {
@@ -1595,8 +1590,10 @@ app.get('/prediction/current', requireAuth, async (req, res) => {
 
     const user = await ensureUser(userId);
     const lastAd = user.last_prediction_ad || 0;
-    // ⚠️ SIN COOLDOWN: el anuncio vale durante toda la ronda actual
-    const adValid = lastAd >= round.started_at;
+    // ⚠️ El anuncio vale si fue visto en ESTA ronda O en los últimos 2.5 min (media ronda)
+    const adRecent = lastAd > 0 && (now - lastAd) <= (PREDICTION_ROUND_DURATION / 2);
+    const adThisRound = lastAd >= round.started_at;
+    const adValid = adThisRound || adRecent;
     const adCooldownRemaining = 0;
 
     const { count: totalPreds } = await supabase
@@ -1709,8 +1706,10 @@ app.post('/prediction/bet', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'No hay ronda activa. Esperá la próxima.' });
     }
 
-    // ⚠️ El anuncio debe haber sido visto DURANTE esta ronda
-    if (!user.last_prediction_ad || user.last_prediction_ad < round.started_at) {
+    // ⚠️ El anuncio vale si fue visto en ESTA ronda O en los últimos 2.5 min
+    const adRecent = user.last_prediction_ad && (now - user.last_prediction_ad) <= (PREDICTION_ROUND_DURATION / 2);
+    const adThisRound = user.last_prediction_ad && user.last_prediction_ad >= round.started_at;
+    if (!adRecent && !adThisRound) {
       releaseLock(lockKey);
       return res.status(403).json({ error: 'AD_REQUIRED', message: '📺 Mirá un anuncio para predecir' });
     }
@@ -1823,7 +1822,6 @@ app.get('/prediction/last-winners', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ==== BOT PRINCIPAL ====
 // ==== BOT PRINCIPAL ====
 let bot = null;
 if (BOT_TOKEN) {
@@ -1969,7 +1967,7 @@ app.listen(process.env.PORT || 3000, () => {
   console.log('🚫 Venta de plantas: DESHABILITADA');
   console.log('⏳ Cooldown entre retiros: ' + WITHDRAW_COOLDOWN + 's');
   console.log('🎲 Dados: x0=46% | x1.1=41% | x2=6% | x4=3% | x6=2% | x8=1% | x10=1% | EV=0.991');
-  console.log('🔮 Predicciones: rango ±$' + PREDICTION_RANGE + ' | SIN cooldown de anuncios | captcha obligatorio');
+  console.log('🔮 Predicciones: rango ±$' + PREDICTION_RANGE + ' | SIN cooldown de anuncios');
   console.log('🪙 BTC precio: CoinGecko (principal) + Binance (fallback)');
   console.log('🔥 Wallet de quema: ' + BURN_WALLET);
   console.log('🧹 Limpieza automática de plantas: ACTIVADA');
