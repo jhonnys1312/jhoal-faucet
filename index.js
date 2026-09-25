@@ -138,14 +138,14 @@ const AD_COOLDOWN = 10 * 60;
 const BUY_COOLDOWN = 10;
 
 // ==== PREDICCIONES DE LOS DIOSES ====
-const PREDICTION_ROUND_DURATION = 5 * 60;         // 5 min total del ciclo
-const PREDICTION_WINDOW = 3 * 60;                 // 3 min para predecir
-const PREDICTION_COOLDOWN = 2 * 60;               // 2 min de cooldown
-const PREDICTION_BLOCK_LAST_SECONDS = 15;         // Bloquear últimos 15s
-const PREDICTION_BASE_POOL = 10;                  // Pool base 10 JHOAL
-const PREDICTION_AD_REWARD = 5;                   // +5 por anuncio visto
-const PREDICTION_RANGE = 50;                      // Rango ±$50
-const PREDICTION_AD_COOLDOWN = 5 * 60;            // 5 min entre anuncios
+const PREDICTION_ROUND_DURATION = 5 * 60;
+const PREDICTION_WINDOW = 3 * 60;
+const PREDICTION_COOLDOWN = 2 * 60;
+const PREDICTION_BLOCK_LAST_SECONDS = 15;
+const PREDICTION_BASE_POOL = 10;
+const PREDICTION_AD_REWARD = 5;
+const PREDICTION_RANGE = 50;
+const PREDICTION_AD_COOLDOWN = 5 * 60;
 const BURN_WALLET = '0x000000000000000000000000000000000000dEaD';
 const BINANCE_BTC_URL = 'https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT';
 
@@ -166,7 +166,7 @@ async function getBTCPrice() {
       return price;
     }
   } catch (e) {
-    console.error('Error BTC:', e.message);
+    console.error('❌ Error BTC:', e.message);
   }
   return btcPriceCache.price || 0;
 }
@@ -617,7 +617,10 @@ async function ensurePredictionRound() {
     if (existing) return existing;
 
     const price = await getBTCPrice();
-    if (!price || price <= 0) return null;
+    if (!price || price <= 0) {
+      console.warn('⚠️ ensurePredictionRound: no se pudo obtener precio BTC');
+      return null;
+    }
 
     const now = Math.floor(Date.now() / 1000);
     const startedAt = roundNumber * PREDICTION_ROUND_DURATION;
@@ -656,6 +659,7 @@ async function ensurePredictionRound() {
       .maybeSingle();
 
     if (error) {
+      console.error('❌ Error creando ronda:', error.message);
       const { data: fallback } = await supabase
         .from('prediction_rounds')
         .select('*')
@@ -667,7 +671,7 @@ async function ensurePredictionRound() {
     console.log(`🔮 Ronda #${roundNumber} | Pool: ${totalPool} JHOAL | BTC: $${price.toLocaleString()}`);
     return newRound;
   } catch (e) {
-    console.error('Error ensurePredictionRound:', e.message);
+    console.error('❌ Error ensurePredictionRound:', e.message, e.stack);
     return null;
   }
 }
@@ -804,13 +808,13 @@ async function resolvePredictionRounds() {
         }).eq('id', round.id).eq('status', 'open');
 
       } catch (e) {
-        console.error(`Error resolviendo ronda #${round.round_number}:`, e.message);
+        console.error(`❌ Error resolviendo ronda #${round.round_number}:`, e.message);
       } finally {
         releaseLock(lockKey);
       }
     }
   } catch (e) {
-    console.error('Error resolvePredictionRounds:', e.message);
+    console.error('❌ Error resolvePredictionRounds:', e.message);
   }
 }
 
@@ -818,10 +822,13 @@ async function predictionLoop() {
   if (predictionLoopRunning) return;
   predictionLoopRunning = true;
   try {
-    await ensurePredictionRound();
+    const round = await ensurePredictionRound();
+    if (round) {
+      // Log silencioso, solo si es nueva ronda
+    }
     await resolvePredictionRounds();
   } catch (e) {
-    console.error('Error predictionLoop:', e.message);
+    console.error('❌ Error predictionLoop:', e.message);
   }
   predictionLoopRunning = false;
 }
@@ -1874,14 +1881,17 @@ app.listen(process.env.PORT || 3000, () => {
   console.log('🔥 Wallet de quema: ' + BURN_WALLET);
   console.log('🪙 BTC desde Binance con caché de 15s');
   console.log('🧹 Limpieza automática de plantas: ACTIVADA');
+
   cleanupOldPlants();
   cleanupExpiredPlants();
   setInterval(cleanupExpiredPlants, 5 * 60 * 1000);
   setInterval(cleanupOldPlants, 6 * 60 * 60 * 1000);
 
-  // Iniciar loops de predicción
+  // 🔮 Iniciar loops de predicción
   predictionLoop();
   setInterval(predictionLoop, 15 * 1000);
+
+  // 🔥 Iniciar envío de quema
   setInterval(sendPendingBurns, 60 * 60 * 1000);
   scheduleBurnAtMidnight();
 });
