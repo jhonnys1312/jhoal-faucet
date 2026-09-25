@@ -147,27 +147,57 @@ const PREDICTION_AD_REWARD = 5;
 const PREDICTION_RANGE = 50;
 const PREDICTION_AD_COOLDOWN = 5 * 60;
 const BURN_WALLET = '0x000000000000000000000000000000000000dEaD';
-const BINANCE_BTC_URL = 'https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT';
 
-let btcPriceCache = { price: 0, updatedAt: 0 };
-const BTC_CACHE_MS = 15 * 1000;
+// ==== FUENTES DE PRECIO BTC (CoinGecko + Binance) ====
+const BINANCE_BTC_URL = 'https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT';
+const COINGECKO_BTC_URL = 'https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd';
+
+let btcPriceCache = { price: 0, updatedAt: 0, source: 'none' };
+const BTC_CACHE_MS = 30 * 1000; // caché 30s (CoinGecko free es ~10-30 req/min)
+
+async function fetchBTCFromCoinGecko() {
+  try {
+    const r = await fetch(COINGECKO_BTC_URL, { headers: { 'accept': 'application/json' } });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const data = await r.json();
+    const price = data && data.bitcoin && data.bitcoin.usd;
+    if (price && price > 0) return parseFloat(price);
+  } catch (e) {
+    console.warn('⚠️ CoinGecko BTC falló:', e.message);
+  }
+  return 0;
+}
+
+async function fetchBTCFromBinance() {
+  try {
+    const r = await fetch(BINANCE_BTC_URL);
+    const data = await r.json();
+    const price = parseFloat(data.price);
+    if (price > 0) return price;
+  } catch (e) {
+    console.warn('⚠️ Binance BTC falló:', e.message);
+  }
+  return 0;
+}
 
 async function getBTCPrice() {
   const now = Date.now();
   if (now - btcPriceCache.updatedAt < BTC_CACHE_MS && btcPriceCache.price > 0) {
     return btcPriceCache.price;
   }
-  try {
-    const r = await fetch(BINANCE_BTC_URL);
-    const data = await r.json();
-    const price = parseFloat(data.price);
-    if (price > 0) {
-      btcPriceCache = { price, updatedAt: now };
-      return price;
-    }
-  } catch (e) {
-    console.error('❌ Error BTC:', e.message);
+  // 1) CoinGecko primero
+  let price = await fetchBTCFromCoinGecko();
+  let source = 'coingecko';
+  // 2) Fallback a Binance
+  if (!price || price <= 0) {
+    price = await fetchBTCFromBinance();
+    source = 'binance';
   }
+  if (price > 0) {
+    btcPriceCache = { price, updatedAt: now, source };
+    return price;
+  }
+  console.warn('⚠️ getBTCPrice: sin precio disponible, usando caché anterior');
   return btcPriceCache.price || 0;
 }
 
@@ -668,7 +698,7 @@ async function ensurePredictionRound() {
       return fallback;
     }
 
-    console.log(`🔮 Ronda #${roundNumber} | Pool: ${totalPool} JHOAL | BTC: $${price.toLocaleString()}`);
+    console.log(`🔮 Ronda #${roundNumber} | Pool: ${totalPool} JHOAL | BTC: $${price.toLocaleString()} [${btcPriceCache.source}]`);
     return newRound;
   } catch (e) {
     console.error('❌ Error ensurePredictionRound:', e.message, e.stack);
@@ -1486,10 +1516,19 @@ app.get('/', (req, res) => res.json({ status: 'Horus Faucet + Dados + Huerto + H
 
 // ==== ENDPOINTS DE PREDICCIÓN ====
 
+// BTC price (CoinGecko primero, Binance fallback)
 app.get('/btc-price', async (req, res) => {
   try {
     const price = await getBTCPrice();
-    res.json({ success: true, price });
+    res.json({ success: true, price, source: btcPriceCache.source });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Precio BTC sólo desde CoinGecko (para debug/uso directo)
+app.get('/btc-price-gecko', async (req, res) => {
+  try {
+    const price = await fetchBTCFromCoinGecko();
+    res.json({ success: price > 0, price, source: 'coingecko' });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -1529,6 +1568,7 @@ app.get('/prediction/current', requireAuth, async (req, res) => {
         number: round.round_number,
         startPrice: parseFloat(round.start_price),
         currentPrice: await getBTCPrice(),
+        priceSource: btcPriceCache.source,
         secondsLeft: Math.max(0, round.closes_at - now),
         totalPool: parseFloat(round.total_pool),
         basePool: parseFloat(round.base_pool),
@@ -1878,8 +1918,8 @@ app.listen(process.env.PORT || 3000, () => {
   console.log('⏳ Cooldown entre retiros: ' + WITHDRAW_COOLDOWN + 's');
   console.log('🎲 Dados: x0=46% | x1.1=41% | x2=6% | x4=3% | x6=2% | x8=1% | x10=1% | EV=0.991');
   console.log('🔮 Predicciones: ACTIVADO (rondas 5 min, pool base 10, +5 por anuncio, rango ±$50)');
+  console.log('🪙 BTC precio: CoinGecko (principal) + Binance (fallback)');
   console.log('🔥 Wallet de quema: ' + BURN_WALLET);
-  console.log('🪙 BTC desde Binance con caché de 15s');
   console.log('🧹 Limpieza automática de plantas: ACTIVADA');
 
   cleanupOldPlants();
