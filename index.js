@@ -12,7 +12,11 @@ app.use(express.json());
 
 // ==== CONFIG ====
 const RPC_LIST = [
-  'https://bsc-mainnet.nodereal.io/v1/05f8075daa504e9e97eab50c590ae8a2'
+const RPC_LIST = [
+  'https://bsc-dataseed.binance.org',
+  'https://bsc-dataseed1.defibit.io',
+  'https://bsc-dataseed1.ninicoin.io',
+  'https://bsc.publicnode.com'
 ];
 let currentProvider = null;
 
