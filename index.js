@@ -451,10 +451,10 @@ async function checkDeposits() {
 // Descomenta estas líneas SOLO después de:
 // 1. Haber reseteado last_deposit_block en Supabase
 // 2. Haber verificado que el bloque actual es correcto
- //  setInterval(checkDeposits, 15 * 60 * 1000);
- //  setTimeout(checkDeposits, 60 * 1000);
-
-console.log('⚠️ MONITOR DE DEPÓSITOS PAUSADO - Ver instrucciones en el código');
+   // ✅ MONITOR REACTIVADO
+setInterval(checkDeposits, 10 * 60 * 1000);
+setTimeout(checkDeposits, 60 * 1000);
+console.log('✅ Monitor de depósitos REACTIVADO');
 
 // ==== VALIDACIÓN INITDATA ====
 function validateInitData(initData) {
