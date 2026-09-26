@@ -11,13 +11,17 @@ app.use(cors());
 app.use(express.json());
 
 // ==== CONFIG ====
-// RPC públicos de BSC (sin cuota, sin API key)
+// RPC gestionado de NodeReal (capa gratuita) - Rápido y fiable
+const NODEREAL_HTTPS = 'https://bsc-mainnet.nodereal.io/v1/05f8075daa504e9e97eab50c590ae8a2';
+
+// Fallbacks públicos (solo por si NodeReal falla temporalmente)
 const RPC_LIST = [
+  NODEREAL_HTTPS,
   'https://bsc-dataseed.binance.org',
   'https://bsc-dataseed1.defibit.io',
-  'https://bsc-dataseed1.ninicoin.io',
   'https://bsc.publicnode.com'
 ];
+
 let currentProvider = null;
 
 async function getProvider() {
@@ -31,10 +35,12 @@ async function getProvider() {
     try {
       const testProvider = new ethers.JsonRpcProvider(rpc);
       await testProvider.getBlockNumber();
-      console.log('✅ RPC OK:', rpc);
+      console.log('✅ RPC OK:', rpc.substring(0, 60) + '...');
       currentProvider = testProvider;
       return testProvider;
-    } catch (e) { console.log('❌ RPC falló:', rpc); }
+    } catch (e) {
+      console.log('❌ RPC falló:', rpc.substring(0, 60) + '...');
+    }
   }
   throw new Error('Ningún RPC funciona');
 }
@@ -126,9 +132,9 @@ async function verificarHCaptcha(token, remoteip) {
 
 // ==== MONITOR DE DEPÓSITOS ====
 const MONITOR_START_BLOCK = 122925000;
-const BATCH_SIZE = 100;
-const BLOCKS_PER_CYCLE = 2000;
-const BATCH_DELAY_MS = 100;
+const BATCH_SIZE = 50;              // ✅ Reducido para no saturar RPC
+const BLOCKS_PER_CYCLE = 500;       // ✅ Reducido para no saturar RPC
+const BATCH_DELAY_MS = 500;         // ✅ Aumentado para respetar rate limit
 
 // ==== LUNA LLENA ====
 const MOON_GROWTH_MULTIPLIER = 1.9;
@@ -161,7 +167,8 @@ const BTC_CACHE_MS = 60 * 1000;
 let jhoalPriceCache = { price: 0, updatedAt: 0 };
 const JHOAL_CACHE_MS = 60 * 1000;
 
-const provider = new ethers.JsonRpcProvider(RPC_LIST[0]);
+// ✅ Usamos NodeReal como provider principal
+const provider = new ethers.JsonRpcProvider(NODEREAL_HTTPS);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 
 const ABI = [
@@ -376,6 +383,7 @@ async function notificarBendicion() {
   } catch (e) {}
 }
 scheduleBlessing();
+
 // ==== MONITOR DE DEPÓSITOS ====
 const ifaceTransfer = new ethers.Interface(['event Transfer(address indexed from, address indexed to, uint256 value)']);
 const TRANSFER_TOPIC = ethers.id('Transfer(address,address,uint256)');
@@ -385,7 +393,8 @@ async function checkDeposits() {
   if (monitorRunning) return;
   monitorRunning = true;
   try {
-    const currentBlock = await provider.getBlockNumber();
+    const currentProvider = await getProvider();
+    const currentBlock = await currentProvider.getBlockNumber();
     const { data: users, error } = await supabase.from('users_balance')
       .select('user_id, deposit_address, wallet_balance, last_deposit_block')
       .not('deposit_address', 'is', null);
@@ -401,13 +410,16 @@ async function checkDeposits() {
         while (batchStart <= maxToBlock) {
           const batchEnd = Math.min(batchStart + BATCH_SIZE - 1, maxToBlock);
           try {
-            const batchLogs = await provider.getLogs({
+            const batchLogs = await currentProvider.getLogs({
               address: TOKEN_ADDRESS,
               topics: [TRANSFER_TOPIC, null, ethers.zeroPadValue(u.deposit_address.toLowerCase(), 32)],
               fromBlock: batchStart, toBlock: batchEnd
             });
             allLogs.push(...batchLogs);
-          } catch (batchErr) {}
+          } catch (batchErr) {
+            console.warn(`⚠️ Batch falló (${batchStart}-${batchEnd}), esperando...`);
+            await new Promise(r => setTimeout(r, 2000));
+          }
           batchStart = batchEnd + 1;
           await new Promise(r => setTimeout(r, BATCH_DELAY_MS));
         }
@@ -426,13 +438,16 @@ async function checkDeposits() {
           await addHistory(u.user_id, 'deposit', amount, '💵 Depósito a wallet personal', null, txHash);
         }
         await new Promise(r => setTimeout(r, 500));
-      } catch (e) {}
+      } catch (e) {
+        console.warn('Error en user deposit check:', e.message);
+      }
     }
-  } catch (e) {}
+  } catch (e) { console.error('Error checkDeposits:', e.message); }
   monitorRunning = false;
 }
-setInterval(checkDeposits, 60 * 1000);
-setTimeout(checkDeposits, 15 * 1000);
+// ✅ Cada 3 minutos en vez de 1 minuto
+setInterval(checkDeposits, 3 * 60 * 1000);
+setTimeout(checkDeposits, 30 * 1000);
 
 // ==== VALIDACIÓN INITDATA ====
 function validateInitData(initData) {
@@ -935,6 +950,7 @@ function scheduleBurnAtMidnight() {
     scheduleBurnAtMidnight();
   }, msUntilMidnight);
 }
+
 // ==== ENDPOINTS ====
 app.get('/moon-status', (req, res) => {
   const now = Math.floor(Date.now() / 1000);
@@ -1375,7 +1391,7 @@ app.get('/history/:userId', requireAuth, async (req, res) => {
   } catch (error) { res.status(500).json({ error: 'Error: ' + error.message }); }
 });
 
-// ==== PRECIO JHOAL (desde PancakeSwap) ====
+// ==== PRECIO JHOAL ====
 app.get('/price', async (req, res) => {
   try {
     const price = await getJhoalPrice();
@@ -1384,12 +1400,12 @@ app.get('/price', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ==== PRECIO BTC (desde PancakeSwap) ====
+// ==== PRECIO BTC ====
 app.get('/btc-price', async (req, res) => {
   try {
     const price = await getBTCPrice();
     if (price <= 0) return res.status(500).json({ error: 'No se pudo obtener el precio BTC' });
-    res.json({ success: true, price, source: 'pancakeswap' });
+    res.json({ success: true, price, source: 'nodereal' });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -1409,7 +1425,7 @@ app.get('/huerto-warning', (req, res) => {
   });
 });
 
-app.get('/', (req, res) => res.json({ status: 'Horus Faucet + Dados + Huerto + Historial + Luna Llena + Bendición + AdsGram + Referidos + Predicciones + hCaptcha funcionando' }));
+app.get('/', (req, res) => res.json({ status: 'Horus Faucet + Dados + Huerto + Historial + Luna Llena + Bendición + AdsGram + Referidos + Predicciones + hCaptcha + NodeReal funcionando' }));
 
 // ==== ENDPOINTS DE PREDICCIÓN ====
 
@@ -1433,7 +1449,7 @@ app.get('/prediction/current', requireAuth, async (req, res) => {
         message: '⏳ Esperando la próxima ronda',
         round: {
           id: round.id, number: round.round_number, startPrice: parseFloat(round.start_price),
-          currentPrice: await getBTCPrice(), priceSource: 'pancakeswap', secondsLeft: 0,
+          currentPrice: await getBTCPrice(), priceSource: 'nodereal', secondsLeft: 0,
           totalPool: parseFloat(round.total_pool), basePool: parseFloat(round.base_pool),
           accumulatedPool: parseFloat(round.accumulated_pool), adsPool: parseFloat(round.ads_pool),
           range: PREDICTION_RANGE, status: 'closing', totalPredictions: 0, canPredict: false
@@ -1458,7 +1474,7 @@ app.get('/prediction/current', requireAuth, async (req, res) => {
       success: true, waitingNextRound: false, secondsUntilNextRound: 0,
       round: {
         id: round.id, number: round.round_number, startPrice: parseFloat(round.start_price),
-        currentPrice: await getBTCPrice(), priceSource: 'pancakeswap',
+        currentPrice: await getBTCPrice(), priceSource: 'nodereal',
         secondsLeft: Math.max(0, round.closes_at - now),
         totalPool: parseFloat(round.total_pool), basePool: parseFloat(round.base_pool),
         accumulatedPool: parseFloat(round.accumulated_pool), adsPool: parseFloat(round.ads_pool),
@@ -1705,10 +1721,11 @@ app.listen(process.env.PORT || 3000, () => {
   console.log('⏳ Cooldown entre retiros: ' + WITHDRAW_COOLDOWN + 's');
   console.log('🎲 Dados: x0=46% | x1.1=41% | x2=6% | x4=3% | x6=2% | x8=1% | x10=1% | EV=0.991');
   console.log('🔮 Predicciones: rango ±$' + PREDICTION_RANGE + ' | SIN cooldown de anuncios');
-  console.log('🪙 BTC: PancakeSwap BTCB/USDT');
+  console.log('🪙 BTC: NodeReal (RPC gestionado)');
   console.log('💰 JHOAL: PancakeSwap JHOAL/USDT');
   console.log('🔥 Wallet de quema: ' + BURN_WALLET);
   console.log('🧹 Limpieza automática de plantas: ACTIVADA');
+  console.log('🚀 RPC principal: NodeReal (100M CU gratis al mes)');
 
   cleanupOldPlants();
   cleanupExpiredPlants();
@@ -1718,6 +1735,5 @@ app.listen(process.env.PORT || 3000, () => {
   predictionLoop();
   setInterval(predictionLoop, 15 * 1000);
 
-  // setInterval(sendPendingBurns, 60 * 60 * 1000);  // Deshabilitado: solo se envía a medianoche
   scheduleBurnAtMidnight();
 });
