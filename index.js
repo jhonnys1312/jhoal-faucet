@@ -11,16 +11,15 @@ app.use(cors());
 app.use(express.json());
 
 // ==== CONFIG ====
-// RPCs gratuitos SIN límite mensual (solo rate limit por segundo)
-// 1RPC es el principal: sin API key, sin límite mensual, gratis
+// RPCs públicos de Binance (sin límite mensual agresivo)
 const RPC_LIST = [
-  'https://1rpc.io/bnb',                          // 1RPC - Sin API key, sin límite
-  'https://binance.llamarpc.com',                 // LlamaNodes - Sin API key
-  'https://bsc-dataseed.binance.org',             // Binance oficial
-  'https://bsc-dataseed1.defibit.io',             // Defibit
-  'https://bsc-dataseed1.ninicoin.io',            // Ninicoin
-  'https://bsc.publicnode.com',                   // PublicNode
-  'https://rpc.ankr.com/bsc'                      // Ankr
+  'https://bsc-dataseed.binance.org',
+  'https://bsc-dataseed1.defibit.io',
+  'https://bsc-dataseed1.ninicoin.io',
+  'https://bsc.publicnode.com',
+  'https://bsc-dataseed2.binance.org',
+  'https://bsc-dataseed3.binance.org',
+  'https://bsc-dataseed4.binance.org'
 ];
 
 let currentProvider = null;
@@ -36,11 +35,11 @@ async function getProvider() {
     try {
       const testProvider = new ethers.JsonRpcProvider(rpc);
       await testProvider.getBlockNumber();
-      console.log('✅ RPC OK:', rpc.substring(0, 60) + '...');
+      console.log('✅ RPC OK:', rpc);
       currentProvider = testProvider;
       return testProvider;
     } catch (e) {
-      console.log('❌ RPC falló:', rpc.substring(0, 60) + '...');
+      console.log('❌ RPC falló:', rpc);
     }
   }
   throw new Error('Ningún RPC funciona');
@@ -132,12 +131,12 @@ async function verificarHCaptcha(token, remoteip) {
 }
 
 // ==== MONITOR DE DEPÓSITOS ====
-// ⚠️ IMPORTANTE: MONITOR_START_BLOCK debe ser el bloque ACTUAL de BSC
-// Verifica en https://bscscan.com/blocks
-const MONITOR_START_BLOCK = 62400000;  // ⚠️ ACTUALIZAR al bloque actual
-const BATCH_SIZE = 25;                  // ✅ Reducido drásticamente
-const BLOCKS_PER_CYCLE = 250;           // ✅ Reducido drásticamente
-const BATCH_DELAY_MS = 1000;            // ✅ 1 segundo entre batches
+// ⚠️ ACTUALIZA ESTE NÚMERO AL BLOQUE ACTUAL DE BSC
+// Verifica en: https://bscscan.com/blocks
+const MONITOR_START_BLOCK = 124199300;
+const BATCH_SIZE = 50;
+const BLOCKS_PER_CYCLE = 500;
+const BATCH_DELAY_MS = 1000;
 
 // ==== LUNA LLENA ====
 const MOON_GROWTH_MULTIPLIER = 1.9;
@@ -170,8 +169,7 @@ const BTC_CACHE_MS = 60 * 1000;
 let jhoalPriceCache = { price: 0, updatedAt: 0 };
 const JHOAL_CACHE_MS = 60 * 1000;
 
-// ✅ Usamos 1RPC como provider principal (sin límite mensual)
-const provider = new ethers.JsonRpcProvider('https://1rpc.io/bnb');
+const provider = new ethers.JsonRpcProvider(RPC_LIST[0]);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 
 const ABI = [
@@ -387,7 +385,7 @@ async function notificarBendicion() {
 }
 scheduleBlessing();
 
-// ==== MONITOR DE DEPÓSITOS ====
+// ==== MONITOR DE DEPÓSITOS (PAUSADO TEMPORALMENTE) ====
 const ifaceTransfer = new ethers.Interface(['event Transfer(address indexed from, address indexed to, uint256 value)']);
 const TRANSFER_TOPIC = ethers.id('Transfer(address,address,uint256)');
 let monitorRunning = false;
@@ -448,9 +446,15 @@ async function checkDeposits() {
   } catch (e) { console.error('Error checkDeposits:', e.message); }
   monitorRunning = false;
 }
-// ✅ Cada 10 minutos (antes cada 3) para no saturar RPC
-setInterval(checkDeposits, 10 * 60 * 1000);
-setTimeout(checkDeposits, 60 * 1000);
+
+// ⚠️ MONITOR PAUSADO TEMPORALMENTE
+// Descomenta estas líneas SOLO después de:
+// 1. Haber reseteado last_deposit_block en Supabase
+// 2. Haber verificado que el bloque actual es correcto
+   setInterval(checkDeposits, 15 * 60 * 1000);
+   setTimeout(checkDeposits, 60 * 1000);
+
+console.log('⚠️ MONITOR DE DEPÓSITOS PAUSADO - Ver instrucciones en el código');
 
 // ==== VALIDACIÓN INITDATA ====
 function validateInitData(initData) {
@@ -1408,7 +1412,7 @@ app.get('/btc-price', async (req, res) => {
   try {
     const price = await getBTCPrice();
     if (price <= 0) return res.status(500).json({ error: 'No se pudo obtener el precio BTC' });
-    res.json({ success: true, price, source: '1rpc' });
+    res.json({ success: true, price, source: 'binance-public' });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -1428,7 +1432,7 @@ app.get('/huerto-warning', (req, res) => {
   });
 });
 
-app.get('/', (req, res) => res.json({ status: 'Horus Faucet + Dados + Huerto + Historial + Luna Llena + Bendición + AdsGram + Referidos + Predicciones + hCaptcha + 1RPC funcionando' }));
+app.get('/', (req, res) => res.json({ status: 'Horus Faucet + Dados + Huerto + Historial + Luna Llena + Bendición + AdsGram + Referidos + Predicciones + hCaptcha + RPC públicos funcionando' }));
 
 // ==== ENDPOINTS DE PREDICCIÓN ====
 
@@ -1452,7 +1456,7 @@ app.get('/prediction/current', requireAuth, async (req, res) => {
         message: '⏳ Esperando la próxima ronda',
         round: {
           id: round.id, number: round.round_number, startPrice: parseFloat(round.start_price),
-          currentPrice: await getBTCPrice(), priceSource: '1rpc', secondsLeft: 0,
+          currentPrice: await getBTCPrice(), priceSource: 'binance-public', secondsLeft: 0,
           totalPool: parseFloat(round.total_pool), basePool: parseFloat(round.base_pool),
           accumulatedPool: parseFloat(round.accumulated_pool), adsPool: parseFloat(round.ads_pool),
           range: PREDICTION_RANGE, status: 'closing', totalPredictions: 0, canPredict: false
@@ -1477,7 +1481,7 @@ app.get('/prediction/current', requireAuth, async (req, res) => {
       success: true, waitingNextRound: false, secondsUntilNextRound: 0,
       round: {
         id: round.id, number: round.round_number, startPrice: parseFloat(round.start_price),
-        currentPrice: await getBTCPrice(), priceSource: '1rpc',
+        currentPrice: await getBTCPrice(), priceSource: 'binance-public',
         secondsLeft: Math.max(0, round.closes_at - now),
         totalPool: parseFloat(round.total_pool), basePool: parseFloat(round.base_pool),
         accumulatedPool: parseFloat(round.accumulated_pool), adsPool: parseFloat(round.ads_pool),
@@ -1724,12 +1728,11 @@ app.listen(process.env.PORT || 3000, () => {
   console.log('⏳ Cooldown entre retiros: ' + WITHDRAW_COOLDOWN + 's');
   console.log('🎲 Dados: x0=46% | x1.1=41% | x2=6% | x4=3% | x6=2% | x8=1% | x10=1% | EV=0.991');
   console.log('🔮 Predicciones: rango ±$' + PREDICTION_RANGE + ' | SIN cooldown de anuncios');
-  console.log('🪙 BTC: 1RPC (sin límite mensual)');
+  console.log('🪙 BTC: RPC públicos de Binance');
   console.log('💰 JHOAL: PancakeSwap JHOAL/USDT');
   console.log('🔥 Wallet de quema: ' + BURN_WALLET);
   console.log('🧹 Limpieza automática de plantas: ACTIVADA');
-  console.log('🚀 RPC principal: 1RPC (https://1rpc.io/bnb) - GRATIS SIN LÍMITE MENSUAL');
-  console.log('⚠️ Monitor de depósitos: cada 10 min (optimizado para no saturar RPC)');
+  console.log('⚠️ MONITOR DE DEPÓSITOS PAUSADO - Ver instrucciones en el código');
 
   cleanupOldPlants();
   cleanupExpiredPlants();
