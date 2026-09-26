@@ -134,7 +134,7 @@ const MOON_MAX_PER_DAY = 5;
 const AD_REWARD_AMOUNT = 5;
 const AD_COOLDOWN = 10 * 60;
 
-// ==== COOLDOWN DE COMPRA (anti-spam) ====
+// ==== COOLDOWN DE COMPRA ====
 const BUY_COOLDOWN = 10;
 
 // ==== PREDICCIONES DE LOS DIOSES ====
@@ -148,25 +148,11 @@ const PREDICTION_RANGE = 20;
 const PREDICTION_AD_COOLDOWN = 0;
 const BURN_WALLET = '0x000000000000000000000000000000000000dEaD';
 
-// ==== FUENTES DE PRECIO BTC (CoinGecko + Binance) ====
+// ==== PRECIO BTC (solo Binance) ====
 const BINANCE_BTC_URL = 'https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT';
-const COINGECKO_BTC_URL = 'https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd';
 
 let btcPriceCache = { price: 0, updatedAt: 0, source: 'none' };
 const BTC_CACHE_MS = 60 * 1000;
-
-async function fetchBTCFromCoinGecko() {
-  try {
-    const r = await fetch(COINGECKO_BTC_URL, { headers: { 'accept': 'application/json' } });
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    const data = await r.json();
-    const price = data && data.bitcoin && data.bitcoin.usd;
-    if (price && price > 0) return parseFloat(price);
-  } catch (e) {
-    console.warn('⚠️ CoinGecko BTC falló:', e.message);
-  }
-  return 0;
-}
 
 async function fetchBTCFromBinance() {
   try {
@@ -185,19 +171,12 @@ async function getBTCPrice() {
   if (now - btcPriceCache.updatedAt < BTC_CACHE_MS && btcPriceCache.price > 0) {
     return btcPriceCache.price;
   }
-  // 1) Binance primero (más rápido, sin rate limit)
-  let price = await fetchBTCFromBinance();
-  let source = 'binance';
-  // 2) CoinGecko como fallback
-  if (!price || price <= 0) {
-    price = await fetchBTCFromCoinGecko();
-    source = 'coingecko';
-  }
+  const price = await fetchBTCFromBinance();
   if (price > 0) {
-    btcPriceCache = { price, updatedAt: now, source };
+    btcPriceCache = { price, updatedAt: now, source: 'binance' };
     return price;
   }
-  console.warn('⚠️ getBTCPrice: sin precio disponible, usando caché anterior');
+  console.warn('⚠️ getBTCPrice: Binance falló, usando caché anterior');
   return btcPriceCache.price || 0;
 }
 
@@ -355,7 +334,6 @@ async function notificarBendicion() {
   } catch (e) {}
 }
 scheduleBlessing();
-
 // ==== MONITOR DE DEPÓSITOS ====
 const ifaceTransfer = new ethers.Interface(['event Transfer(address indexed from, address indexed to, uint256 value)']);
 const TRANSFER_TOPIC = ethers.id('Transfer(address,address,uint256)');
@@ -627,6 +605,7 @@ async function intentarPagarReferido(userId) {
     if (result.success) await supabase.from('referrals_pending').delete().eq('referred_id', userId);
   } catch (e) { console.error('Error intentarPagarReferido:', e); }
 }
+
 // ==== SISTEMA DE RONDAS DE PREDICCIÓN ====
 let predictionLoopRunning = false;
 
@@ -857,10 +836,7 @@ async function predictionLoop() {
   if (predictionLoopRunning) return;
   predictionLoopRunning = true;
   try {
-    const round = await ensurePredictionRound();
-    if (round) {
-      // Log silencioso, solo si es nueva ronda
-    }
+    await ensurePredictionRound();
     await resolvePredictionRounds();
   } catch (e) {
     console.error('❌ Error predictionLoop:', e.message);
@@ -918,7 +894,6 @@ function scheduleBurnAtMidnight() {
     scheduleBurnAtMidnight();
   }, msUntilMidnight);
 }
-
 // ==== ENDPOINTS ====
 app.get('/moon-status', (req, res) => {
   const now = Math.floor(Date.now() / 1000);
@@ -1488,7 +1463,7 @@ app.get('/history/:userId', requireAuth, async (req, res) => {
   } catch (error) { res.status(500).json({ error: 'Error: ' + error.message }); }
 });
 
-// ==== PRECIO JHOAL (PancakeSwap con caché) ====
+// ==== PRECIO JHOAL (desde PancakeSwap con caché) ====
 let jhoalPriceCache = { price: 0, updatedAt: 0 };
 const JHOAL_CACHE_MS = 60 * 1000;
 
@@ -1530,17 +1505,11 @@ app.get('/huerto-warning', (req, res) => {
 app.get('/', (req, res) => res.json({ status: 'Horus Faucet + Dados + Huerto + Historial + Luna Llena + Bendición + AdsGram + Referidos + Predicciones + hCaptcha funcionando' }));
 
 // ==== ENDPOINTS DE PREDICCIÓN ====
+
 app.get('/btc-price', async (req, res) => {
   try {
     const price = await getBTCPrice();
     res.json({ success: true, price, source: btcPriceCache.source });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-app.get('/btc-price-gecko', async (req, res) => {
-  try {
-    const price = await fetchBTCFromCoinGecko();
-    res.json({ success: price > 0, price, source: 'coingecko' });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -1602,9 +1571,8 @@ app.get('/prediction/current', requireAuth, async (req, res) => {
 
     const user = await ensureUser(userId);
     const lastAd = user.last_prediction_ad || 0;
-    const adRecent = lastAd > 0 && (now - lastAd) <= (PREDICTION_ROUND_DURATION / 2);
-    const adThisRound = lastAd >= round.started_at;
-    const adValid = adThisRound || adRecent;
+    const adRecent = lastAd > 0 && (now - lastAd) <= PREDICTION_ROUND_DURATION;
+    const adValid = adRecent || lastAd >= round.started_at;
     const adCooldownRemaining = 0;
 
     const { count: totalPreds } = await supabase
@@ -1710,15 +1678,20 @@ app.post('/prediction/bet', requireAuth, async (req, res) => {
     const user = await ensureUser(userId);
     const now = Math.floor(Date.now() / 1000);
 
-    const round = await ensurePredictionRound();
+    const roundNumber = Math.floor(now / PREDICTION_ROUND_DURATION);
+    const { data: round } = await supabase
+      .from('prediction_rounds')
+      .select('*')
+      .eq('round_number', roundNumber)
+      .maybeSingle();
+
     if (!round || round.status !== 'open') {
       releaseLock(lockKey);
       return res.status(400).json({ error: 'No hay ronda activa. Esperá la próxima.' });
     }
 
-    const adRecent = user.last_prediction_ad && (now - user.last_prediction_ad) <= (PREDICTION_ROUND_DURATION / 2);
-    const adThisRound = user.last_prediction_ad && user.last_prediction_ad >= round.started_at;
-    if (!adRecent && !adThisRound) {
+    const adValid = user.last_prediction_ad && (now - user.last_prediction_ad) <= PREDICTION_ROUND_DURATION;
+    if (!adValid) {
       releaseLock(lockKey);
       return res.status(403).json({ error: 'AD_REQUIRED', message: '📺 Mirá un anuncio para predecir' });
     }
@@ -1732,9 +1705,9 @@ app.post('/prediction/bet', requireAuth, async (req, res) => {
       return res.status(400).json({ error: '⏰ Últimos segundos. Esperá la próxima ronda.' });
     }
 
-    const currentPrice = await getBTCPrice();
-    const minPrice = currentPrice * 0.8;
-    const maxPrice = currentPrice * 1.2;
+    const startPrice = parseFloat(round.start_price);
+    const minPrice = startPrice * 0.8;
+    const maxPrice = startPrice * 1.2;
     if (predictedPrice < minPrice || predictedPrice > maxPrice) {
       releaseLock(lockKey);
       return res.status(400).json({
@@ -1756,7 +1729,7 @@ app.post('/prediction/bet', requireAuth, async (req, res) => {
 
     await supabase.from('predictions').insert({
       round_id: round.id,
-      user_id: userId,
+      user_id: String(userId),
       predicted_price: predictedPrice,
       created_at: now
     });
@@ -1777,11 +1750,9 @@ app.post('/prediction/bet', requireAuth, async (req, res) => {
   }
 });
 
-// ==== HISTORIAL DE PREDICCIONES (para el frontend) ====
 app.get('/prediction/history/:userId', requireAuth, async (req, res) => {
   try {
     const userId = req.userId;
-
     const { data: preds, error } = await supabase
       .from('predictions')
       .select('*')
@@ -1798,16 +1769,13 @@ app.get('/prediction/history/:userId', requireAuth, async (req, res) => {
       return res.json({ success: true, predictions: [] });
     }
 
-    // OJO: predictions.round_id apunta a prediction_rounds.round_number
     const roundNumbers = [...new Set(preds.map(p => p.round_id))];
     const { data: rounds, error: rErr } = await supabase
       .from('prediction_rounds')
       .select('id, round_number, result, end_price, start_price, status')
       .in('round_number', roundNumbers);
 
-    if (rErr) {
-      console.error('Error trayendo rondas:', rErr.message);
-    }
+    if (rErr) console.error('Error trayendo rondas:', rErr.message);
 
     const roundsMap = {};
     (rounds || []).forEach(r => { roundsMap[String(r.round_number)] = r; });
@@ -2011,7 +1979,8 @@ app.listen(process.env.PORT || 3000, () => {
   console.log('⏳ Cooldown entre retiros: ' + WITHDRAW_COOLDOWN + 's');
   console.log('🎲 Dados: x0=46% | x1.1=41% | x2=6% | x4=3% | x6=2% | x8=1% | x10=1% | EV=0.991');
   console.log('🔮 Predicciones: rango ±$' + PREDICTION_RANGE + ' | SIN cooldown de anuncios');
-  console.log('🪙 BTC precio: Binance (principal) + CoinGecko (fallback)');
+  console.log('🪙 BTC precio: Binance (única fuente)');
+  console.log('💰 JHOAL precio: PancakeSwap con caché de ' + (JHOAL_CACHE_MS/1000) + 's');
   console.log('🔥 Wallet de quema: ' + BURN_WALLET);
   console.log('🧹 Limpieza automática de plantas: ACTIVADA');
 
