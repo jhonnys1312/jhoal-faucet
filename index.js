@@ -1718,6 +1718,6 @@ app.listen(process.env.PORT || 3000, () => {
   predictionLoop();
   setInterval(predictionLoop, 15 * 1000);
 
-  // setInterval(sendPendingBurns, 60 * 60 * 1000);  // Deshabilitado: solo se envía a medianoche
+  setInterval(sendPendingBurns, 60 * 60 * 1000);
   scheduleBurnAtMidnight();
 });
