@@ -13,15 +13,10 @@ app.use(express.json());
 // ==== CONFIG ====
 // RPCs públicos de Binance (sin límite mensual agresivo)
 const RPC_LIST = [
-  'https://bsc-dataseed.binance.org',
-  'https://bsc-dataseed1.defibit.io',
-  'https://bsc-dataseed1.ninicoin.io',
-  'https://bsc.publicnode.com',
-  'https://bsc-dataseed2.binance.org',
-  'https://bsc-dataseed3.binance.org',
-  'https://bsc-dataseed4.binance.org'
+  'https://binance.llamarpc.com',
+  'https://rpc.ankr.com/bsc'
 ];
-
+  
 let currentProvider = null;
 
 async function getProvider() {
@@ -133,7 +128,7 @@ async function verificarHCaptcha(token, remoteip) {
 // ==== MONITOR DE DEPÓSITOS ====
 // ⚠️ ACTUALIZA ESTE NÚMERO AL BLOQUE ACTUAL DE BSC
 // Verifica en: https://bscscan.com/blocks
-const MONITOR_START_BLOCK = 124199426;
+const MONITOR_START_BLOCK = 124212628;
 const BATCH_SIZE = 50;
 const BLOCKS_PER_CYCLE = 500;
 const BATCH_DELAY_MS = 1000;
@@ -452,8 +447,8 @@ async function checkDeposits() {
 // 1. Haber reseteado last_deposit_block en Supabase
 // 2. Haber verificado que el bloque actual es correcto
    // ✅ MONITOR REACTIVADO
-//setInterval(checkDeposits, 10 * 60 * 1000);
-//setTimeout(checkDeposits, 60 * 1000);
+setInterval(checkDeposits, 10 * 60 * 1000);
+setTimeout(checkDeposits, 60 * 1000);
 console.log('✅ Monitor de depósitos REACTIVADO');
 
 // ==== VALIDACIÓN INITDATA ====
