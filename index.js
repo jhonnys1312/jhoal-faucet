@@ -1767,28 +1767,66 @@ app.post('/prediction/bet', requireAuth, async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+    async function cargarHistorialPredicciones() {
+      if (!user) return;
+      try {
+        const url = BACKEND_URL + '/prediction/history/' + user.id + '?initData=' + encodeURIComponent(tg.initData) + '&_t=' + Date.now();
+        const res = await fetch(url, { cache: 'no-store', headers: { 'x-init-data': tg.initData || '' } });
+        const data = await res.json();
+        const container = document.getElementById('predictionHistory');
+        if (!data.success || !data.predictions || data.predictions.length === 0) {
+          container.innerHTML = '<div style="text-align:center; color:#6b5a3a; font-size:12px; padding:10px;">' + t('noPredictionsYet') + '</div>';
+          return;
+        }
+        let html = '';
+        data.predictions.forEach(function(p) {
+          const isWin = p.won === true;
+          const isLose = p.won === false;
+          const isPending = p.won === null || p.won === undefined;
 
-app.get('/prediction/history/:userId', requireAuth, async (req, res) => {
-  try {
-    const userId = req.userId;
-    const { data, error } = await supabase
-      .from('predictions')
-      .select('id, round_id, user_id, predicted_price, distance, percent_premium, won, payout, created_at, prediction_rounds(round_number, result, end_price, start_price, status)')
-      .eq('user_id', userId)
-      .order('created_at', { ascending: false })
-      .limit(20);
+          let badge, color;
+          if (isWin) { badge = '✅'; color = '#00c853'; }
+          else if (isLose) { badge = '❌'; color = '#e74c3c'; }
+          else { badge = '⏳'; color = '#a89060'; }
 
-    if (error) {
-      console.error('Error historial predicciones:', error.message);
-      return res.json({ success: true, predictions: [] });
+          const roundNum = p.prediction_rounds ? p.prediction_rounds.round_number : '?';
+          const endPrice = (p.prediction_rounds && p.prediction_rounds.end_price) ? parseFloat(p.prediction_rounds.end_price) : null;
+          const payout = parseFloat(p.payout || 0);
+          const predicted = parseFloat(p.predicted_price);
+          const distance = parseFloat(p.distance || 0);
+
+          let detalle = '<div class="history-entry-title">' +
+            (currentLang === 'es' ? 'Ronda' : 'Round') + ' #' + roundNum +
+            ' · ' + (currentLang === 'es' ? 'Jugaste' : 'You bet') + ' $' + predicted.toLocaleString() +
+            '</div>';
+
+          if (endPrice !== null && !isPending) {
+            detalle += '<div class="history-entry-time">' +
+              (currentLang === 'es' ? 'Final' : 'Final') + ': $' + endPrice.toLocaleString() +
+              (isWin ? ' · dist $' + distance.toFixed(2) : '') +
+              '</div>';
+          } else {
+            detalle += '<div class="history-entry-time">' + (currentLang === 'es' ? 'Pendiente' : 'Pending') + '</div>';
+          }
+
+          let monto = '';
+          if (isWin && payout > 0) {
+            monto = '<div class="history-entry-amount positive">+' + payout.toFixed(2) + '</div>';
+          } else if (isLose) {
+            monto = '<div class="history-entry-amount negative">0</div>';
+          } else {
+            monto = '<div class="history-entry-amount" style="color:' + color + '">' + badge + '</div>';
+          }
+
+          html += '<div class="history-entry">' +
+            '<div class="history-entry-icon">' + badge + '</div>' +
+            '<div class="history-entry-content">' + detalle + '</div>' +
+            monto +
+          '</div>';
+        });
+        container.innerHTML = html;
+      } catch (e) { console.error('Error historial:', e); }
     }
-
-    res.json({ success: true, predictions: data || [] });
-  } catch (e) {
-    console.error('Error /prediction/history:', e);
-    res.json({ success: true, predictions: [] });
-  }
-});
 
 app.get('/prediction/last-winners', async (req, res) => {
   try {
