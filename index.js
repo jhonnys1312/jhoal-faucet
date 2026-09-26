@@ -11,12 +11,13 @@ app.use(cors());
 app.use(express.json());
 
 // ==== CONFIG ====
-// RPC públicos de BSC (sin cuota, sin API key)
 const RPC_LIST = [
   'https://bsc-dataseed.binance.org',
   'https://bsc-dataseed1.defibit.io',
   'https://bsc-dataseed1.ninicoin.io',
-  'https://bsc.publicnode.com'
+  'https://bsc.publicnode.com',
+  'https://bsc-dataseed2.binance.org',
+  'https://bsc-dataseed3.binance.org'
 ];
 let currentProvider = null;
 
@@ -180,7 +181,7 @@ const PAIR_ABI = [
 const pair = new ethers.Contract(PAIR_ADDRESS, PAIR_ABI, provider);
 const btcPair = new ethers.Contract(BTC_PAIR_ADDRESS, PAIR_ABI, provider);
 
-// ==== PRECIO BTC (desde PancakeSwap BTCB/USDT) ====
+// ==== PRECIO BTC ====
 async function getBTCPrice() {
   const now = Date.now();
   if (now - btcPriceCache.updatedAt < BTC_CACHE_MS && btcPriceCache.price > 0) {
@@ -210,7 +211,7 @@ async function getBTCPrice() {
   }
 }
 
-// ==== PRECIO JHOAL (desde PancakeSwap JHOAL/USDT) ====
+// ==== PRECIO JHOAL ====
 async function getJhoalPrice() {
   const now = Date.now();
   if (now - jhoalPriceCache.updatedAt < JHOAL_CACHE_MS && jhoalPriceCache.price > 0) {
@@ -376,7 +377,8 @@ async function notificarBendicion() {
   } catch (e) {}
 }
 scheduleBlessing();
-// ==== MONITOR DE DEPÓSITOS ====
+
+// ==== MONITOR DE DEPÓSITOS (CORREGIDO) ====
 const ifaceTransfer = new ethers.Interface(['event Transfer(address indexed from, address indexed to, uint256 value)']);
 const TRANSFER_TOPIC = ethers.id('Transfer(address,address,uint256)');
 let monitorRunning = false;
@@ -385,51 +387,105 @@ async function checkDeposits() {
   if (monitorRunning) return;
   monitorRunning = true;
   try {
-    const currentBlock = await provider.getBlockNumber();
+    const p = await getProvider();
+    const currentBlock = await p.getBlockNumber();
+    console.log(`🔍 [Monitor] Bloque actual: ${currentBlock}`);
+    
     const { data: users, error } = await supabase.from('users_balance')
       .select('user_id, deposit_address, wallet_balance, last_deposit_block')
       .not('deposit_address', 'is', null);
-    if (error || !users || users.length === 0) { monitorRunning = false; return; }
+    
+    if (error) { console.error('❌ [Monitor] Error Supabase:', error.message); monitorRunning = false; return; }
+    if (!users || users.length === 0) { console.log('ℹ️ [Monitor] No hay usuarios con wallet.'); monitorRunning = false; return; }
+    
     const toBlock = currentBlock - 3;
+    
     for (const u of users) {
       try {
         let fromBlock = (!u.last_deposit_block || u.last_deposit_block === 0) ? MONITOR_START_BLOCK : u.last_deposit_block + 1;
         if (fromBlock > toBlock) continue;
+        
         const maxToBlock = Math.min(fromBlock + BLOCKS_PER_CYCLE, toBlock);
+        console.log(`👤 [Monitor] Usuario ${u.user_id} | desde ${fromBlock} hasta ${maxToBlock}`);
+        
         const allLogs = [];
         let batchStart = fromBlock;
         while (batchStart <= maxToBlock) {
           const batchEnd = Math.min(batchStart + BATCH_SIZE - 1, maxToBlock);
           try {
-            const batchLogs = await provider.getLogs({
+            const batchLogs = await p.getLogs({
               address: TOKEN_ADDRESS,
-              topics: [TRANSFER_TOPIC, null, ethers.zeroPadValue(u.deposit_address.toLowerCase(), 32)],
-              fromBlock: batchStart, toBlock: batchEnd
+              topics: [TRANSFER_TOPIC],
+              fromBlock: batchStart, 
+              toBlock: batchEnd
             });
             allLogs.push(...batchLogs);
-          } catch (batchErr) {}
+          } catch (batchErr) {
+            console.error(`❌ [Monitor] Error getLogs (${batchStart}-${batchEnd}):`, batchErr.message);
+          }
           batchStart = batchEnd + 1;
           await new Promise(r => setTimeout(r, BATCH_DELAY_MS));
         }
-        await supabase.from('users_balance').update({ last_deposit_block: maxToBlock }).eq('user_id', u.user_id);
+        
+        console.log(`📦 [Monitor] ${allLogs.length} logs descargados para ${u.user_id}`);
+        
+        let depositFound = false;
         for (const log of allLogs) {
-          const decoded = ifaceTransfer.parseLog({ topics: log.topics, data: log.data });
-          const amount = parseFloat(ethers.formatUnits(decoded.args.value, 18));
-          const txHash = log.transactionHash;
-          const fromAddress = decoded.args.from;
-          const { data: existing } = await supabase.from('deposits').select('tx_hash').eq('tx_hash', txHash).maybeSingle();
-          if (existing) continue;
-          await supabase.from('deposits').insert({ user_id: u.user_id, wallet: fromAddress, amount, tx_hash: txHash, created_at: Math.floor(Date.now() / 1000) });
-          const newWalletBalance = parseFloat(u.wallet_balance || 0) + amount;
-          await supabase.from('users_balance').update({ wallet_balance: newWalletBalance }).eq('user_id', u.user_id);
-          u.wallet_balance = newWalletBalance;
-          await addHistory(u.user_id, 'deposit', amount, '💵 Depósito a wallet personal', null, txHash);
+          try {
+            const decoded = ifaceTransfer.parseLog({ topics: log.topics, data: log.data });
+            const toAddress = decoded.args.to.toLowerCase();
+            const userAddr = u.deposit_address.toLowerCase();
+            if (toAddress !== userAddr) continue;
+            
+            const amount = parseFloat(ethers.formatUnits(decoded.args.value, 18));
+            const txHash = log.transactionHash;
+            const fromAddress = decoded.args.from;
+            
+            console.log(`💰 [Monitor] ¡Depósito detectado! User: ${u.user_id} | Monto: ${amount} | TX: ${txHash}`);
+            
+            const { data: existing } = await supabase.from('deposits').select('tx_hash').eq('tx_hash', txHash).maybeSingle();
+            if (existing) { console.log(`⚠️ [Monitor] Duplicado ignorado: ${txHash}`); continue; }
+            
+            const { error: insErr } = await supabase.from('deposits').insert({ 
+              user_id: u.user_id, 
+              wallet: fromAddress, 
+              amount, 
+              tx_hash: txHash, 
+              created_at: Math.floor(Date.now() / 1000) 
+            });
+            if (insErr) { console.error(`❌ [Monitor] Error insert depósito:`, insErr.message); continue; }
+            
+            const newWalletBalance = parseFloat(u.wallet_balance || 0) + amount;
+            const { error: updErr } = await supabase.from('users_balance')
+              .update({ wallet_balance: newWalletBalance })
+              .eq('user_id', u.user_id);
+            if (updErr) { console.error(`❌ [Monitor] Error update balance:`, updErr.message); continue; }
+            
+            u.wallet_balance = newWalletBalance;
+            await addHistory(u.user_id, 'deposit', amount, '💵 Depósito a wallet personal', null, txHash);
+            console.log(`✅ [Monitor] Depósito acreditado a ${u.user_id}: +${amount} JHOAL`);
+            depositFound = true;
+          } catch (logErr) {
+            console.error(`❌ [Monitor] Error procesando log:`, logErr.message);
+          }
         }
+        
+        // Solo actualizamos el bloque si no hubo errores graves
+        await supabase.from('users_balance')
+          .update({ last_deposit_block: maxToBlock })
+          .eq('user_id', u.user_id);
+        
+        console.log(`📌 [Monitor] ${u.user_id} actualizado a bloque ${maxToBlock}${depositFound ? ' (con depósitos nuevos)' : ''}`);
         await new Promise(r => setTimeout(r, 500));
-      } catch (e) {}
+      } catch (e) {
+        console.error(`❌ [Monitor] Error procesando usuario ${u.user_id}:`, e.message);
+      }
     }
-  } catch (e) {}
+  } catch (e) {
+    console.error('❌ [Monitor] Error general:', e.message);
+  }
   monitorRunning = false;
+  console.log('🔍 [Monitor] Chequeo finalizado.\n');
 }
 setInterval(checkDeposits, 60 * 1000);
 setTimeout(checkDeposits, 15 * 1000);
@@ -935,6 +991,7 @@ function scheduleBurnAtMidnight() {
     scheduleBurnAtMidnight();
   }, msUntilMidnight);
 }
+
 // ==== ENDPOINTS ====
 app.get('/moon-status', (req, res) => {
   const now = Math.floor(Date.now() / 1000);
@@ -999,9 +1056,11 @@ app.post('/my-deposit-wallet', requireAuth, async (req, res) => {
     if (user.deposit_address) return res.json({ success: true, address: user.deposit_address, walletBalance: parseFloat(user.wallet_balance || 0) });
     const newWallet = ethers.Wallet.createRandom();
     const encryptedKey = encryptPrivateKey(newWallet.privateKey);
+    const p = await getProvider();
+    const currentBlock = await p.getBlockNumber();
     await supabase.from('users_balance').update({
       deposit_address: newWallet.address, deposit_private_key: encryptedKey, wallet_balance: 0,
-      last_deposit_block: await getProvider().then(p => p.getBlockNumber()).then(b => b - 10)
+      last_deposit_block: currentBlock - 10
     }).eq('user_id', userId);
     res.json({ success: true, address: newWallet.address, walletBalance: 0 });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -1375,7 +1434,7 @@ app.get('/history/:userId', requireAuth, async (req, res) => {
   } catch (error) { res.status(500).json({ error: 'Error: ' + error.message }); }
 });
 
-// ==== PRECIO JHOAL (desde PancakeSwap) ====
+// ==== PRECIO JHOAL ====
 app.get('/price', async (req, res) => {
   try {
     const price = await getJhoalPrice();
@@ -1384,7 +1443,7 @@ app.get('/price', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ==== PRECIO BTC (desde PancakeSwap) ====
+// ==== PRECIO BTC ====
 app.get('/btc-price', async (req, res) => {
   try {
     const price = await getBTCPrice();
@@ -1412,7 +1471,6 @@ app.get('/huerto-warning', (req, res) => {
 app.get('/', (req, res) => res.json({ status: 'Horus Faucet + Dados + Huerto + Historial + Luna Llena + Bendición + AdsGram + Referidos + Predicciones + hCaptcha funcionando' }));
 
 // ==== ENDPOINTS DE PREDICCIÓN ====
-
 app.get('/prediction/current', requireAuth, async (req, res) => {
   try {
     const userId = req.userId;
