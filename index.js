@@ -452,8 +452,8 @@ async function checkDeposits() {
 // 1. Haber reseteado last_deposit_block en Supabase
 // 2. Haber verificado que el bloque actual es correcto
    // ✅ MONITOR REACTIVADO
-setInterval(checkDeposits, 10 * 60 * 1000);
-setTimeout(checkDeposits, 60 * 1000);
+//setInterval(checkDeposits, 10 * 60 * 1000);
+//setTimeout(checkDeposits, 60 * 1000);
 console.log('✅ Monitor de depósitos REACTIVADO');
 
 // ==== VALIDACIÓN INITDATA ====
