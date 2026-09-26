@@ -1771,14 +1771,23 @@ app.post('/prediction/bet', requireAuth, async (req, res) => {
 app.get('/prediction/history/:userId', requireAuth, async (req, res) => {
   try {
     const userId = req.userId;
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from('predictions')
-      .select('*, prediction_rounds(round_number, result, end_price, start_price)')
+      .select('id, round_id, user_id, predicted_price, distance, percent_premium, won, payout, created_at, prediction_rounds(round_number, result, end_price, start_price, status)')
       .eq('user_id', userId)
       .order('created_at', { ascending: false })
       .limit(20);
+
+    if (error) {
+      console.error('Error historial predicciones:', error.message);
+      return res.json({ success: true, predictions: [] });
+    }
+
     res.json({ success: true, predictions: data || [] });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('Error /prediction/history:', e);
+    res.json({ success: true, predictions: [] });
+  }
 });
 
 app.get('/prediction/last-winners', async (req, res) => {
