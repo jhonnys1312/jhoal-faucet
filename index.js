@@ -179,19 +179,20 @@ async function fetchBTCFromBinance() {
   }
   return 0;
 }
+
 async function getBTCPrice() {
   const now = Date.now();
   if (now - btcPriceCache.updatedAt < BTC_CACHE_MS && btcPriceCache.price > 0) {
     return btcPriceCache.price;
   }
-  let price = await fetchBTCFromCoinGecko();
-  let source = 'coingecko';
+  // 1) Binance primero (más rápido, sin rate limit)
+  let price = await fetchBTCFromBinance();
+  let source = 'binance';
+  // 2) CoinGecko como fallback
   if (!price || price <= 0) {
-    price = await fetchBTCFromBinance();
-    source = 'binance';
+    price = await fetchBTCFromCoinGecko();
+    source = 'coingecko';
   }
-  ...
-
   if (price > 0) {
     btcPriceCache = { price, updatedAt: now, source };
     return price;
@@ -309,6 +310,7 @@ function tickMoon() {
 moonState.todayKey = todayKeyUTC();
 scheduleNextMoon();
 setInterval(tickMoon, 30 * 1000);
+
 // ==== BENDICIÓN DEL FARAÓN ====
 const BLESSING_DURATION = 30 * 60 * 1000;
 const BLESSING_FRUIT_MULTIPLIER = 2;
@@ -588,6 +590,7 @@ async function cleanupOldPlants() {
     }
   } catch (e) { console.error('Error cleanupOldPlants:', e); }
 }
+
 // ==== REFERIDOS HELPERS ====
 async function otorgarRecompensaReferido(referrerId, referredId) {
   try {
@@ -624,7 +627,6 @@ async function intentarPagarReferido(userId) {
     if (result.success) await supabase.from('referrals_pending').delete().eq('referred_id', userId);
   } catch (e) { console.error('Error intentarPagarReferido:', e); }
 }
-
 // ==== SISTEMA DE RONDAS DE PREDICCIÓN ====
 let predictionLoopRunning = false;
 
@@ -632,7 +634,6 @@ function getPredictionRoundNumber() {
   return Math.floor(Date.now() / 1000 / PREDICTION_ROUND_DURATION);
 }
 
-// Cuántos segundos faltan para la próxima ronda
 function getSecondsUntilNextRound() {
   const now = Math.floor(Date.now() / 1000);
   const nextRoundStart = (getPredictionRoundNumber() + 1) * PREDICTION_ROUND_DURATION;
@@ -945,6 +946,7 @@ app.get('/captcha/status/:userId', requireAuth, async (req, res) => {
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
+
 app.post('/register-referral', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { referrerId } = req.body;
@@ -1177,6 +1179,7 @@ app.get('/bet-history/:userId', requireAuth, async (req, res) => {
     res.json({ success: true, bets: data || [] });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
+
 // ==== WITHDRAW ====
 app.post('/withdraw', requireAuth, async (req, res) => {
   const userId = req.userId;
@@ -1484,6 +1487,8 @@ app.get('/history/:userId', requireAuth, async (req, res) => {
     res.json({ success: true, history: history || [], summary: summary });
   } catch (error) { res.status(500).json({ error: 'Error: ' + error.message }); }
 });
+
+// ==== PRECIO JHOAL (PancakeSwap con caché) ====
 let jhoalPriceCache = { price: 0, updatedAt: 0 };
 const JHOAL_CACHE_MS = 60 * 1000;
 
@@ -1506,7 +1511,6 @@ app.get('/price', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-
 app.get('/balance', async (req, res) => {
   try {
     const balance = await token.balanceOf(wallet.address);
@@ -1524,8 +1528,8 @@ app.get('/huerto-warning', (req, res) => {
 });
 
 app.get('/', (req, res) => res.json({ status: 'Horus Faucet + Dados + Huerto + Historial + Luna Llena + Bendición + AdsGram + Referidos + Predicciones + hCaptcha funcionando' }));
-// ==== ENDPOINTS DE PREDICCIÓN ====
 
+// ==== ENDPOINTS DE PREDICCIÓN ====
 app.get('/btc-price', async (req, res) => {
   try {
     const price = await getBTCPrice();
@@ -1546,7 +1550,6 @@ app.get('/prediction/current', requireAuth, async (req, res) => {
     const round = await ensurePredictionRound();
     const now = Math.floor(Date.now() / 1000);
 
-    // ⚠️ Si no hay ronda → esperar próxima
     if (!round) {
       return res.json({
         success: true,
@@ -1561,7 +1564,6 @@ app.get('/prediction/current', requireAuth, async (req, res) => {
       });
     }
 
-    // ⚠️ Si la ronda ya cerró pero todavía no se resolvió → esperar próxima
     if (round.status === 'open' && now >= round.closes_at) {
       return res.json({
         success: true,
@@ -1600,7 +1602,6 @@ app.get('/prediction/current', requireAuth, async (req, res) => {
 
     const user = await ensureUser(userId);
     const lastAd = user.last_prediction_ad || 0;
-    // ⚠️ El anuncio vale si fue visto en ESTA ronda O en los últimos 2.5 min (media ronda)
     const adRecent = lastAd > 0 && (now - lastAd) <= (PREDICTION_ROUND_DURATION / 2);
     const adThisRound = lastAd >= round.started_at;
     const adValid = adThisRound || adRecent;
@@ -1657,7 +1658,6 @@ app.post('/prediction/watch-ad', requireAuth, async (req, res) => {
     const user = await ensureUser(userId);
     const now = Math.floor(Date.now() / 1000);
 
-    // ⚠️ SIN COOLDOWN: solo anti-spam de 3 segundos para evitar doble-click
     if (user.last_prediction_ad && now - user.last_prediction_ad < 3) {
       releaseLock(lockKey);
       return res.status(429).json({ error: '⏳ Esperá ' + (3 - (now - user.last_prediction_ad)) + 's' });
@@ -1716,7 +1716,6 @@ app.post('/prediction/bet', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'No hay ronda activa. Esperá la próxima.' });
     }
 
-    // ⚠️ El anuncio vale si fue visto en ESTA ronda O en los últimos 2.5 min
     const adRecent = user.last_prediction_ad && (now - user.last_prediction_ad) <= (PREDICTION_ROUND_DURATION / 2);
     const adThisRound = user.last_prediction_ad && user.last_prediction_ad >= round.started_at;
     if (!adRecent && !adThisRound) {
@@ -1777,71 +1776,12 @@ app.post('/prediction/bet', requireAuth, async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
-    async function cargarHistorialPredicciones() {
-      if (!user) return;
-      try {
-        const url = BACKEND_URL + '/prediction/history/' + user.id + '?initData=' + encodeURIComponent(tg.initData) + '&_t=' + Date.now();
-        const res = await fetch(url, { cache: 'no-store', headers: { 'x-init-data': tg.initData || '' } });
-        const data = await res.json();
-        const container = document.getElementById('predictionHistory');
-        if (!data.success || !data.predictions || data.predictions.length === 0) {
-          container.innerHTML = '<div style="text-align:center; color:#6b5a3a; font-size:12px; padding:10px;">' + t('noPredictionsYet') + '</div>';
-          return;
-        }
-        let html = '';
-        data.predictions.forEach(function(p) {
-          const isWin = p.won === true;
-          const isLose = p.won === false;
-          const isPending = p.won === null || p.won === undefined;
 
-          let badge, color;
-          if (isWin) { badge = '✅'; color = '#00c853'; }
-          else if (isLose) { badge = '❌'; color = '#e74c3c'; }
-          else { badge = '⏳'; color = '#a89060'; }
-
-          const roundNum = p.prediction_rounds ? p.prediction_rounds.round_number : '?';
-          const endPrice = (p.prediction_rounds && p.prediction_rounds.end_price) ? parseFloat(p.prediction_rounds.end_price) : null;
-          const payout = parseFloat(p.payout || 0);
-          const predicted = parseFloat(p.predicted_price);
-          const distance = parseFloat(p.distance || 0);
-
-          let detalle = '<div class="history-entry-title">' +
-            (currentLang === 'es' ? 'Ronda' : 'Round') + ' #' + roundNum +
-            ' · ' + (currentLang === 'es' ? 'Jugaste' : 'You bet') + ' $' + predicted.toLocaleString() +
-            '</div>';
-
-          if (endPrice !== null && !isPending) {
-            detalle += '<div class="history-entry-time">' +
-              (currentLang === 'es' ? 'Final' : 'Final') + ': $' + endPrice.toLocaleString() +
-              (isWin ? ' · dist $' + distance.toFixed(2) : '') +
-              '</div>';
-          } else {
-            detalle += '<div class="history-entry-time">' + (currentLang === 'es' ? 'Pendiente' : 'Pending') + '</div>';
-          }
-
-          let monto = '';
-          if (isWin && payout > 0) {
-            monto = '<div class="history-entry-amount positive">+' + payout.toFixed(2) + '</div>';
-          } else if (isLose) {
-            monto = '<div class="history-entry-amount negative">0</div>';
-          } else {
-            monto = '<div class="history-entry-amount" style="color:' + color + '">' + badge + '</div>';
-          }
-
-          html += '<div class="history-entry">' +
-            '<div class="history-entry-icon">' + badge + '</div>' +
-            '<div class="history-entry-content">' + detalle + '</div>' +
-            monto +
-          '</div>';
-        });
-        container.innerHTML = html;
-      } catch (e) { console.error('Error historial:', e); }
-    }
+// ==== HISTORIAL DE PREDICCIONES (para el frontend) ====
 app.get('/prediction/history/:userId', requireAuth, async (req, res) => {
   try {
     const userId = req.userId;
 
-    // 1) Traer las predicciones del usuario
     const { data: preds, error } = await supabase
       .from('predictions')
       .select('*')
@@ -1858,8 +1798,7 @@ app.get('/prediction/history/:userId', requireAuth, async (req, res) => {
       return res.json({ success: true, predictions: [] });
     }
 
-    // 2) Traer las rondas por round_number (NO por id)
-    //    porque predictions.round_id apunta a prediction_rounds.round_number
+    // OJO: predictions.round_id apunta a prediction_rounds.round_number
     const roundNumbers = [...new Set(preds.map(p => p.round_id))];
     const { data: rounds, error: rErr } = await supabase
       .from('prediction_rounds')
@@ -1870,11 +1809,9 @@ app.get('/prediction/history/:userId', requireAuth, async (req, res) => {
       console.error('Error trayendo rondas:', rErr.message);
     }
 
-    // 3) Indexar por round_number para hacer match con predictions.round_id
     const roundsMap = {};
     (rounds || []).forEach(r => { roundsMap[String(r.round_number)] = r; });
 
-    // 4) Combinar
     const predictions = preds.map(p => ({
       ...p,
       prediction_rounds: roundsMap[String(p.round_id)] || null
@@ -2074,7 +2011,7 @@ app.listen(process.env.PORT || 3000, () => {
   console.log('⏳ Cooldown entre retiros: ' + WITHDRAW_COOLDOWN + 's');
   console.log('🎲 Dados: x0=46% | x1.1=41% | x2=6% | x4=3% | x6=2% | x8=1% | x10=1% | EV=0.991');
   console.log('🔮 Predicciones: rango ±$' + PREDICTION_RANGE + ' | SIN cooldown de anuncios');
-  console.log('🪙 BTC precio: CoinGecko (principal) + Binance (fallback)');
+  console.log('🪙 BTC precio: Binance (principal) + CoinGecko (fallback)');
   console.log('🔥 Wallet de quema: ' + BURN_WALLET);
   console.log('🧹 Limpieza automática de plantas: ACTIVADA');
 
