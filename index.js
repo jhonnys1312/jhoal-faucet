@@ -38,6 +38,8 @@ async function getProvider() {
 const PRIVATE_KEY = process.env.PRIVATE_KEY;
 const TOKEN_ADDRESS = process.env.TOKEN_ADDRESS;
 const PAIR_ADDRESS = '0x70163906f11E7a05eb37Dce319602e7ffc4865e5';
+const BTC_PAIR_ADDRESS = '0x3F803EC2b816Ea7F06EC76aA2B6f2532F9892d62';
+const BTCB_ADDRESS = '0x7130d2A12B9BCbfAE4F2634d864A1ee1ce3Ead9c';
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const SUPPORT_BOT_TOKEN = process.env.SUPPORT_BOT_TOKEN;
 const SUPPORT_CHAT_ID = process.env.SUPPORT_CHAT_ID;
@@ -148,37 +150,12 @@ const PREDICTION_RANGE = 20;
 const PREDICTION_AD_COOLDOWN = 0;
 const BURN_WALLET = '0x000000000000000000000000000000000000dEaD';
 
-// ==== PRECIO BTC (solo Binance) ====
-const BINANCE_BTC_URL = 'https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT';
-
-let btcPriceCache = { price: 0, updatedAt: 0, source: 'none' };
+// ==== CACHÉ DE PRECIOS ====
+let btcPriceCache = { price: 0, updatedAt: 0 };
 const BTC_CACHE_MS = 60 * 1000;
 
-async function fetchBTCFromBinance() {
-  try {
-    const r = await fetch(BINANCE_BTC_URL);
-    const data = await r.json();
-    const price = parseFloat(data.price);
-    if (price > 0) return price;
-  } catch (e) {
-    console.warn('⚠️ Binance BTC falló:', e.message);
-  }
-  return 0;
-}
-
-async function getBTCPrice() {
-  const now = Date.now();
-  if (now - btcPriceCache.updatedAt < BTC_CACHE_MS && btcPriceCache.price > 0) {
-    return btcPriceCache.price;
-  }
-  const price = await fetchBTCFromBinance();
-  if (price > 0) {
-    btcPriceCache = { price, updatedAt: now, source: 'binance' };
-    return price;
-  }
-  console.warn('⚠️ getBTCPrice: Binance falló, usando caché anterior');
-  return btcPriceCache.price || 0;
-}
+let jhoalPriceCache = { price: 0, updatedAt: 0 };
+const JHOAL_CACHE_MS = 60 * 1000;
 
 const provider = new ethers.JsonRpcProvider(RPC_LIST[0]);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
@@ -195,7 +172,71 @@ const PAIR_ABI = [
   'function getReserves() view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast)',
   'function token0() view returns (address)'
 ];
+
+// Par JHOAL/USDT
 const pair = new ethers.Contract(PAIR_ADDRESS, PAIR_ABI, provider);
+
+// Par BTCB/USDT (para el precio de BTC)
+const btcPair = new ethers.Contract(BTC_PAIR_ADDRESS, PAIR_ABI, provider);
+
+// ==== PRECIO BTC (desde PancakeSwap BTCB/USDT) ====
+async function getBTCPrice() {
+  const now = Date.now();
+  if (now - btcPriceCache.updatedAt < BTC_CACHE_MS && btcPriceCache.price > 0) {
+    return btcPriceCache.price;
+  }
+  try {
+    const reserves = await btcPair.getReserves();
+    const token0 = await btcPair.token0();
+    let btcReserve, usdtReserve;
+    if (token0.toLowerCase() === BTCB_ADDRESS.toLowerCase()) {
+      btcReserve = reserves.reserve0;
+      usdtReserve = reserves.reserve1;
+    } else {
+      btcReserve = reserves.reserve1;
+      usdtReserve = reserves.reserve0;
+    }
+    const btcAmount = parseFloat(ethers.formatUnits(btcReserve, 18));
+    const usdtAmount = parseFloat(ethers.formatUnits(usdtReserve, 18));
+    if (btcAmount <= 0) throw new Error('Reserva BTC = 0');
+    const price = usdtAmount / btcAmount;
+    btcPriceCache = { price, updatedAt: now };
+    console.log(`🪙 BTC desde PancakeSwap: $${price.toFixed(2)}`);
+    return price;
+  } catch (e) {
+    console.error('❌ Error leyendo BTC de PancakeSwap:', e.message);
+    return btcPriceCache.price || 0;
+  }
+}
+
+// ==== PRECIO JHOAL (desde PancakeSwap JHOAL/USDT) ====
+async function getJhoalPrice() {
+  const now = Date.now();
+  if (now - jhoalPriceCache.updatedAt < JHOAL_CACHE_MS && jhoalPriceCache.price > 0) {
+    return jhoalPriceCache.price;
+  }
+  try {
+    const reserves = await pair.getReserves();
+    const token0 = await pair.token0();
+    let jhoalReserve, usdtReserve;
+    if (token0.toLowerCase() === TOKEN_ADDRESS.toLowerCase()) {
+      jhoalReserve = reserves.reserve0;
+      usdtReserve = reserves.reserve1;
+    } else {
+      jhoalReserve = reserves.reserve1;
+      usdtReserve = reserves.reserve0;
+    }
+    const jhoalAmount = parseFloat(ethers.formatUnits(jhoalReserve, 18));
+    const usdtAmount = parseFloat(ethers.formatUnits(usdtReserve, 18));
+    if (jhoalAmount <= 0) throw new Error('Reserva JHOAL = 0');
+    const price = usdtAmount / jhoalAmount;
+    jhoalPriceCache = { price, updatedAt: now };
+    return price;
+  } catch (e) {
+    console.error('❌ Error leyendo JHOAL de PancakeSwap:', e.message);
+    return jhoalPriceCache.price || 0;
+  }
+}
 
 // ==== SUPABASE ====
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
@@ -334,6 +375,7 @@ async function notificarBendicion() {
   } catch (e) {}
 }
 scheduleBlessing();
+
 // ==== MONITOR DE DEPÓSITOS ====
 const ifaceTransfer = new ethers.Interface(['event Transfer(address indexed from, address indexed to, uint256 value)']);
 const TRANSFER_TOPIC = ethers.id('Transfer(address,address,uint256)');
@@ -391,7 +433,6 @@ async function checkDeposits() {
 }
 setInterval(checkDeposits, 60 * 1000);
 setTimeout(checkDeposits, 15 * 1000);
-
 // ==== VALIDACIÓN INITDATA ====
 function validateInitData(initData) {
   if (!initData || !BOT_TOKEN) return null;
@@ -439,7 +480,6 @@ const PERFECT_WINDOW = 35;
 const ROT_TIME = 60;
 const PLANT_LIFETIME_DAYS = 30;
 const PLANT_LIFETIME_SECONDS = PLANT_LIFETIME_DAYS * 24 * 60 * 60;
-const LIFETIME_MINUTES = PLANT_LIFETIME_DAYS * 24 * 60;
 
 function getPlantStatus(plant) {
   const now = Math.floor(Date.now() / 1000);
@@ -682,7 +722,7 @@ async function ensurePredictionRound() {
       return fallback;
     }
 
-    console.log(`🔮 Ronda #${roundNumber} | Pool: ${totalPool} JHOAL | BTC: $${price.toLocaleString()} [${btcPriceCache.source}]`);
+    console.log(`🔮 Ronda #${roundNumber} | Pool: ${totalPool} JHOAL | BTC: $${price.toLocaleString()}`);
     return newRound;
   } catch (e) {
     console.error('❌ Error ensurePredictionRound:', e.message, e.stack);
@@ -1080,7 +1120,7 @@ app.get('/balance-game/:userId', requireAuth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ==== BET ====
+// ==== BET (DADOS) ====
 app.post('/bet', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { amount, hcaptchaToken } = req.body;
@@ -1099,20 +1139,12 @@ app.post('/bet', requireAuth, async (req, res) => {
   if (needsCaptcha) {
     if (!hcaptchaToken) {
       releaseLock(lockKey);
-      return res.status(403).json({
-        error: 'HCAPTCHA_REQUIRED',
-        message: 'Necesitás verificar que sos humano para seguir tirando.',
-        sitekey: HCAPTCHA_SITE_KEY
-      });
+      return res.status(403).json({ error: 'HCAPTCHA_REQUIRED', message: 'Necesitás verificar que sos humano para seguir tirando.', sitekey: HCAPTCHA_SITE_KEY });
     }
     const verifyResult = await verificarHCaptcha(hcaptchaToken, req.ip);
     if (!verifyResult.success) {
       releaseLock(lockKey);
-      return res.status(403).json({
-        error: 'HCAPTCHA_FAILED',
-        message: 'Verificación fallida. Intentá de nuevo.',
-        sitekey: HCAPTCHA_SITE_KEY
-      });
+      return res.status(403).json({ error: 'HCAPTCHA_FAILED', message: 'Verificación fallida. Intentá de nuevo.', sitekey: HCAPTCHA_SITE_KEY });
     }
     userVerifiedCaptcha.set(userId, Date.now());
     userDiceBetCounters.set(userId, 0);
@@ -1212,10 +1244,7 @@ app.post('/withdraw', requireAuth, async (req, res) => {
       await tx.wait();
     } catch (txErr) {
       console.error('❌ TX falló, revirtiendo débito:', txErr.message);
-      await supabase.from('users_balance').update({
-        balance: previousBalance,
-        total_withdrawn: previousWithdrawn
-      }).eq('user_id', userId);
+      await supabase.from('users_balance').update({ balance: previousBalance, total_withdrawn: previousWithdrawn }).eq('user_id', userId);
       releaseLock(lockKey);
       return res.status(500).json({ error: 'Error enviando TX: ' + txErr.message });
     }
@@ -1227,12 +1256,7 @@ app.post('/withdraw', requireAuth, async (req, res) => {
     await addHistory(userId, 'withdraw', -amount, 'Retiro a wallet', null, tx.hash);
 
     releaseLock(lockKey);
-    res.json({
-      success: true,
-      txHash: tx.hash,
-      explorer: 'https://bscscan.com/tx/' + tx.hash,
-      amount
-    });
+    res.json({ success: true, txHash: tx.hash, explorer: 'https://bscscan.com/tx/' + tx.hash, amount });
   } catch (error) {
     releaseLock(lockKey);
     res.status(500).json({ error: 'Error: ' + error.message });
@@ -1278,15 +1302,11 @@ app.post('/buy-plant', requireAuth, async (req, res) => {
     console.log(`✅ hCaptcha verificado (BUY) para ${userId}`);
 
     const user = await ensureUser(userId);
-
     const nowSec = Math.floor(Date.now() / 1000);
     if (user.plant_buy_cooldown_until && user.plant_buy_cooldown_until > nowSec) {
       const remaining = user.plant_buy_cooldown_until - nowSec;
       releaseLock(lockKey);
-      return res.status(429).json({
-        error: '⏳ Esperá ' + remaining + 's para comprar otra planta.',
-        cooldownRemaining: remaining
-      });
+      return res.status(429).json({ error: '⏳ Esperá ' + remaining + 's para comprar otra planta.', cooldownRemaining: remaining });
     }
 
     const { count } = await supabase.from('plants').select('*', { count: 'exact', head: true }).eq('user_id', userId);
@@ -1382,19 +1402,15 @@ app.post('/harvest', requireAuth, async (req, res) => {
 
 // ==== SELL PLANT (DESHABILITADO) ====
 app.post('/sell-plant', requireAuth, async (req, res) => {
-  return res.status(400).json({
-    error: '🚫 La venta de plantas está deshabilitada. Las plantas duran 30 días y luego expiran automáticamente.'
-  });
+  return res.status(400).json({ error: '🚫 La venta de plantas está deshabilitada. Las plantas duran 30 días y luego expiran automáticamente.' });
 });
 
 app.post('/refund-plant', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { plantId } = req.body;
   if (!plantId) return res.status(400).json({ error: 'Faltan datos' });
-
   const lockKey = `refund_${plantId}`;
   if (!acquireLock(lockKey)) return res.status(429).json({ error: '⏳ Reembolso en proceso. Esperá.' });
-
   const result = await refundPlant(userId, plantId);
   releaseLock(lockKey);
   if (result.success) res.json({ success: true, amount: result.amount, message: result.message });
@@ -1414,20 +1430,14 @@ app.get('/my-plants/:userId', requireAuth, async (req, res) => {
         status: status.status, value: status.value,
         minutesLeft: status.minutesLeft || 0, progress: status.progress || 0,
         waterCost: level.waterCost, fruitValue: level.fruitValue,
-        originalPrice: level.price,
-        canSell: false,
-        lastWatered: p.last_watered,
+        originalPrice: level.price, canSell: false, lastWatered: p.last_watered,
         canRefund: status.canRefund || false,
         refundAmount: status.canRefund ? (level.waterCost * 0.9) : 0,
         moonBoost: status.moonBoost || false, daysLeft: status.daysLeft || 0, expiresAt: status.expiresAt || null
       };
     });
-
     const nowSec = Math.floor(Date.now() / 1000);
-    const buyCooldownRemaining = (user.plant_buy_cooldown_until && user.plant_buy_cooldown_until > nowSec)
-      ? user.plant_buy_cooldown_until - nowSec
-      : 0;
-
+    const buyCooldownRemaining = (user.plant_buy_cooldown_until && user.plant_buy_cooldown_until > nowSec) ? user.plant_buy_cooldown_until - nowSec : 0;
     res.json({
       success: true, plants: plantsWithStatus, count: plantsWithStatus.length,
       maxPlants: MAX_PLANTS, plantLevels: PLANT_LEVELS, lifetimeDays: PLANT_LIFETIME_DAYS,
@@ -1463,26 +1473,21 @@ app.get('/history/:userId', requireAuth, async (req, res) => {
   } catch (error) { res.status(500).json({ error: 'Error: ' + error.message }); }
 });
 
-// ==== PRECIO JHOAL (desde PancakeSwap con caché) ====
-let jhoalPriceCache = { price: 0, updatedAt: 0 };
-const JHOAL_CACHE_MS = 60 * 1000;
-
+// ==== PRECIO JHOAL (desde PancakeSwap) ====
 app.get('/price', async (req, res) => {
   try {
-    const now = Date.now();
-    if (now - jhoalPriceCache.updatedAt < JHOAL_CACHE_MS && jhoalPriceCache.price > 0) {
-      return res.json({ success: true, priceUsd: jhoalPriceCache.price });
-    }
-    const reserves = await pair.getReserves();
-    const token0 = await pair.token0();
-    let jhoalReserve, usdtReserve;
-    if (token0.toLowerCase() === TOKEN_ADDRESS.toLowerCase()) { jhoalReserve = reserves.reserve0; usdtReserve = reserves.reserve1; }
-    else { jhoalReserve = reserves.reserve1; usdtReserve = reserves.reserve0; }
-    const jhoalAmount = parseFloat(ethers.formatUnits(jhoalReserve, 18));
-    const usdtAmount = parseFloat(ethers.formatUnits(usdtReserve, 18));
-    const price = usdtAmount / jhoalAmount;
-    jhoalPriceCache = { price, updatedAt: now };
-    res.json({ success: true, priceUsd: price, jhoalPerUsdt: jhoalAmount / usdtAmount, jhoalReserve: jhoalAmount, usdtReserve: usdtAmount });
+    const price = await getJhoalPrice();
+    if (price <= 0) return res.status(500).json({ error: 'No se pudo obtener el precio' });
+    res.json({ success: true, priceUsd: price });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ==== PRECIO BTC (desde PancakeSwap) ====
+app.get('/btc-price', async (req, res) => {
+  try {
+    const price = await getBTCPrice();
+    if (price <= 0) return res.status(500).json({ error: 'No se pudo obtener el precio BTC' });
+    res.json({ success: true, price, source: 'pancakeswap' });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -1506,13 +1511,6 @@ app.get('/', (req, res) => res.json({ status: 'Horus Faucet + Dados + Huerto + H
 
 // ==== ENDPOINTS DE PREDICCIÓN ====
 
-app.get('/btc-price', async (req, res) => {
-  try {
-    const price = await getBTCPrice();
-    res.json({ success: true, price, source: btcPriceCache.source });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
 app.get('/prediction/current', requireAuth, async (req, res) => {
   try {
     const userId = req.userId;
@@ -1521,98 +1519,54 @@ app.get('/prediction/current', requireAuth, async (req, res) => {
 
     if (!round) {
       return res.json({
-        success: true,
-        waitingNextRound: true,
-        secondsUntilNextRound: getSecondsUntilNextRound(),
-        message: '⏳ Esperando la próxima ronda',
-        round: null,
-        userPrediction: null,
-        adValid: false,
-        adCooldownRemaining: 0,
-        totalBurned: 0
+        success: true, waitingNextRound: true, secondsUntilNextRound: getSecondsUntilNextRound(),
+        message: '⏳ Esperando la próxima ronda', round: null, userPrediction: null,
+        adValid: false, adCooldownRemaining: 0, totalBurned: 0
       });
     }
 
     if (round.status === 'open' && now >= round.closes_at) {
       return res.json({
-        success: true,
-        waitingNextRound: true,
-        secondsUntilNextRound: getSecondsUntilNextRound(),
+        success: true, waitingNextRound: true, secondsUntilNextRound: getSecondsUntilNextRound(),
         message: '⏳ Esperando la próxima ronda',
         round: {
-          id: round.id,
-          number: round.round_number,
-          startPrice: parseFloat(round.start_price),
-          currentPrice: await getBTCPrice(),
-          priceSource: btcPriceCache.source,
-          secondsLeft: 0,
-          totalPool: parseFloat(round.total_pool),
-          basePool: parseFloat(round.base_pool),
-          accumulatedPool: parseFloat(round.accumulated_pool),
-          adsPool: parseFloat(round.ads_pool),
-          range: PREDICTION_RANGE,
-          status: 'closing',
-          totalPredictions: 0,
-          canPredict: false
+          id: round.id, number: round.round_number, startPrice: parseFloat(round.start_price),
+          currentPrice: await getBTCPrice(), priceSource: 'pancakeswap', secondsLeft: 0,
+          totalPool: parseFloat(round.total_pool), basePool: parseFloat(round.base_pool),
+          accumulatedPool: parseFloat(round.accumulated_pool), adsPool: parseFloat(round.ads_pool),
+          range: PREDICTION_RANGE, status: 'closing', totalPredictions: 0, canPredict: false
         },
-        userPrediction: null,
-        adValid: false,
-        adCooldownRemaining: 0,
-        totalBurned: 0
+        userPrediction: null, adValid: false, adCooldownRemaining: 0, totalBurned: 0
       });
     }
 
-    const { data: userPred } = await supabase
-      .from('predictions')
-      .select('*')
-      .eq('round_id', round.id)
-      .eq('user_id', userId)
-      .maybeSingle();
-
+    const { data: userPred } = await supabase.from('predictions').select('*').eq('round_id', round.id).eq('user_id', userId).maybeSingle();
     const user = await ensureUser(userId);
     const lastAd = user.last_prediction_ad || 0;
-    const adRecent = lastAd > 0 && (now - lastAd) <= PREDICTION_ROUND_DURATION;
-    const adValid = adRecent || lastAd >= round.started_at;
+    const adRecent = lastAd > 0 && (now - lastAd) <= (PREDICTION_ROUND_DURATION / 2);
+    const adThisRound = lastAd >= round.started_at;
+    const adValid = adThisRound || adRecent;
     const adCooldownRemaining = 0;
 
-    const { count: totalPreds } = await supabase
-      .from('predictions')
-      .select('*', { count: 'exact', head: true })
-      .eq('round_id', round.id);
-
-    const { data: burns } = await supabase
-      .from('burn_wallet')
-      .select('amount');
+    const { count: totalPreds } = await supabase.from('predictions').select('*', { count: 'exact', head: true }).eq('round_id', round.id);
+    const { data: burns } = await supabase.from('burn_wallet').select('amount');
     const totalBurned = (burns || []).reduce((s, b) => s + parseFloat(b.amount), 0);
 
     res.json({
-      success: true,
-      waitingNextRound: false,
-      secondsUntilNextRound: 0,
+      success: true, waitingNextRound: false, secondsUntilNextRound: 0,
       round: {
-        id: round.id,
-        number: round.round_number,
-        startPrice: parseFloat(round.start_price),
-        currentPrice: await getBTCPrice(),
-        priceSource: btcPriceCache.source,
+        id: round.id, number: round.round_number, startPrice: parseFloat(round.start_price),
+        currentPrice: await getBTCPrice(), priceSource: 'pancakeswap',
         secondsLeft: Math.max(0, round.closes_at - now),
-        totalPool: parseFloat(round.total_pool),
-        basePool: parseFloat(round.base_pool),
-        accumulatedPool: parseFloat(round.accumulated_pool),
-        adsPool: parseFloat(round.ads_pool),
-        range: PREDICTION_RANGE,
-        status: round.status,
-        totalPredictions: totalPreds || 0,
+        totalPool: parseFloat(round.total_pool), basePool: parseFloat(round.base_pool),
+        accumulatedPool: parseFloat(round.accumulated_pool), adsPool: parseFloat(round.ads_pool),
+        range: PREDICTION_RANGE, status: round.status, totalPredictions: totalPreds || 0,
         canPredict: now < (round.closes_at - PREDICTION_BLOCK_LAST_SECONDS)
       },
       userPrediction: userPred ? {
-        predictedPrice: parseFloat(userPred.predicted_price),
-        won: userPred.won,
-        payout: parseFloat(userPred.payout || 0)
+        predictedPrice: parseFloat(userPred.predicted_price), won: userPred.won, payout: parseFloat(userPred.payout || 0)
       } : null,
-      adValid,
-      adCooldownRemaining,
-      totalBurned: Math.floor(totalBurned)
+      adValid, adCooldownRemaining, totalBurned: Math.floor(totalBurned)
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -1625,38 +1579,22 @@ app.post('/prediction/watch-ad', requireAuth, async (req, res) => {
   try {
     const user = await ensureUser(userId);
     const now = Math.floor(Date.now() / 1000);
-
     if (user.last_prediction_ad && now - user.last_prediction_ad < 3) {
       releaseLock(lockKey);
       return res.status(429).json({ error: '⏳ Esperá ' + (3 - (now - user.last_prediction_ad)) + 's' });
     }
-
     const round = await ensurePredictionRound();
     if (!round || round.status !== 'open') {
       releaseLock(lockKey);
       return res.status(400).json({ error: 'No hay ronda activa. Esperá la próxima.' });
     }
-
     const newAdsPool = parseFloat(round.ads_pool || 0) + PREDICTION_AD_REWARD;
     const newTotalPool = parseFloat(round.total_pool || 0) + PREDICTION_AD_REWARD;
-
-    await supabase.from('prediction_rounds')
-      .update({ ads_pool: newAdsPool, total_pool: newTotalPool })
-      .eq('id', round.id);
-
-    await supabase.from('users_balance')
-      .update({ last_prediction_ad: now })
-      .eq('user_id', userId);
-
+    await supabase.from('prediction_rounds').update({ ads_pool: newAdsPool, total_pool: newTotalPool }).eq('id', round.id);
+    await supabase.from('users_balance').update({ last_prediction_ad: now }).eq('user_id', userId);
     await addHistory(userId, 'prediction_ad', 0, '📺 Anuncio visto para predicción (+5 a la pool)', null, null);
-
     releaseLock(lockKey);
-    res.json({
-      success: true,
-      message: `✅ +5 JHOAL a la pool. Pool actual: ${newTotalPool}`,
-      newPool: newTotalPool,
-      validFor: 0
-    });
+    res.json({ success: true, message: `✅ +5 JHOAL a la pool. Pool actual: ${newTotalPool}`, newPool: newTotalPool, validFor: 0 });
   } catch (e) {
     releaseLock(lockKey);
     res.status(500).json({ error: e.message });
@@ -1666,10 +1604,7 @@ app.post('/prediction/watch-ad', requireAuth, async (req, res) => {
 app.post('/prediction/bet', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { predictedPrice } = req.body;
-
-  if (!predictedPrice || isNaN(predictedPrice) || predictedPrice <= 0) {
-    return res.status(400).json({ error: 'Precio inválido' });
-  }
+  if (!predictedPrice || isNaN(predictedPrice) || predictedPrice <= 0) return res.status(400).json({ error: 'Precio inválido' });
 
   const lockKey = `prediction_${userId}`;
   if (!acquireLock(lockKey)) return res.status(429).json({ error: '⏳ Esperá un momento' });
@@ -1677,73 +1612,36 @@ app.post('/prediction/bet', requireAuth, async (req, res) => {
   try {
     const user = await ensureUser(userId);
     const now = Math.floor(Date.now() / 1000);
-
     const roundNumber = Math.floor(now / PREDICTION_ROUND_DURATION);
-    const { data: round } = await supabase
-      .from('prediction_rounds')
-      .select('*')
-      .eq('round_number', roundNumber)
-      .maybeSingle();
-
+    const { data: round } = await supabase.from('prediction_rounds').select('*').eq('round_number', roundNumber).maybeSingle();
     if (!round || round.status !== 'open') {
       releaseLock(lockKey);
       return res.status(400).json({ error: 'No hay ronda activa. Esperá la próxima.' });
     }
-
-    const adValid = user.last_prediction_ad && (now - user.last_prediction_ad) <= PREDICTION_ROUND_DURATION;
-    if (!adValid) {
+    const adRecent = user.last_prediction_ad && (now - user.last_prediction_ad) <= (PREDICTION_ROUND_DURATION / 2);
+    const adThisRound = user.last_prediction_ad && user.last_prediction_ad >= round.started_at;
+    if (!adRecent && !adThisRound) {
       releaseLock(lockKey);
       return res.status(403).json({ error: 'AD_REQUIRED', message: '📺 Mirá un anuncio para predecir' });
     }
-
-    if (now >= round.closes_at) {
-      releaseLock(lockKey);
-      return res.status(400).json({ error: 'La ronda ya cerró' });
-    }
-    if (now >= round.closes_at - PREDICTION_BLOCK_LAST_SECONDS) {
-      releaseLock(lockKey);
-      return res.status(400).json({ error: '⏰ Últimos segundos. Esperá la próxima ronda.' });
-    }
+    if (now >= round.closes_at) { releaseLock(lockKey); return res.status(400).json({ error: 'La ronda ya cerró' }); }
+    if (now >= round.closes_at - PREDICTION_BLOCK_LAST_SECONDS) { releaseLock(lockKey); return res.status(400).json({ error: '⏰ Últimos segundos. Esperá la próxima ronda.' }); }
 
     const startPrice = parseFloat(round.start_price);
     const minPrice = startPrice * 0.8;
     const maxPrice = startPrice * 1.2;
     if (predictedPrice < minPrice || predictedPrice > maxPrice) {
       releaseLock(lockKey);
-      return res.status(400).json({
-        error: `El precio debe estar entre $${minPrice.toFixed(2)} y $${maxPrice.toFixed(2)}`
-      });
+      return res.status(400).json({ error: `El precio debe estar entre $${minPrice.toFixed(2)} y $${maxPrice.toFixed(2)}` });
     }
 
-    const { data: existing } = await supabase
-      .from('predictions')
-      .select('id')
-      .eq('round_id', round.id)
-      .eq('user_id', userId)
-      .maybeSingle();
+    const { data: existing } = await supabase.from('predictions').select('id').eq('round_id', round.id).eq('user_id', userId).maybeSingle();
+    if (existing) { releaseLock(lockKey); return res.status(400).json({ error: 'Ya hiciste tu predicción para esta ronda' }); }
 
-    if (existing) {
-      releaseLock(lockKey);
-      return res.status(400).json({ error: 'Ya hiciste tu predicción para esta ronda' });
-    }
-
-    await supabase.from('predictions').insert({
-      round_id: round.id,
-      user_id: String(userId),
-      predicted_price: predictedPrice,
-      created_at: now
-    });
-
-    await addHistory(userId, 'prediction_bet', 0,
-      `🔮 Predijiste $${predictedPrice} para Ronda #${round.round_number}`,
-      null, null);
-
+    await supabase.from('predictions').insert({ round_id: round.id, user_id: userId, predicted_price: predictedPrice, created_at: now });
+    await addHistory(userId, 'prediction_bet', 0, `🔮 Predijiste $${predictedPrice} para Ronda #${round.round_number}`, null, null);
     releaseLock(lockKey);
-    res.json({
-      success: true,
-      message: `¡Predicción registrada! $${predictedPrice}`,
-      predictedPrice
-    });
+    res.json({ success: true, message: `¡Predicción registrada! $${predictedPrice}`, predictedPrice });
   } catch (e) {
     releaseLock(lockKey);
     res.status(500).json({ error: e.message });
@@ -1753,38 +1651,16 @@ app.post('/prediction/bet', requireAuth, async (req, res) => {
 app.get('/prediction/history/:userId', requireAuth, async (req, res) => {
   try {
     const userId = req.userId;
-    const { data: preds, error } = await supabase
-      .from('predictions')
-      .select('*')
-      .eq('user_id', String(userId))
-      .order('created_at', { ascending: false })
-      .limit(20);
-
-    if (error) {
-      console.error('Error historial predicciones:', error.message);
-      return res.json({ success: true, predictions: [] });
-    }
-
-    if (!preds || preds.length === 0) {
-      return res.json({ success: true, predictions: [] });
-    }
+    const { data: preds, error } = await supabase.from('predictions').select('*').eq('user_id', String(userId)).order('created_at', { ascending: false }).limit(20);
+    if (error) { console.error('Error historial predicciones:', error.message); return res.json({ success: true, predictions: [] }); }
+    if (!preds || preds.length === 0) return res.json({ success: true, predictions: [] });
 
     const roundNumbers = [...new Set(preds.map(p => p.round_id))];
-    const { data: rounds, error: rErr } = await supabase
-      .from('prediction_rounds')
-      .select('id, round_number, result, end_price, start_price, status')
-      .in('round_number', roundNumbers);
-
-    if (rErr) console.error('Error trayendo rondas:', rErr.message);
-
+    const { data: rounds } = await supabase.from('prediction_rounds').select('id, round_number, result, end_price, start_price, status').in('round_number', roundNumbers);
     const roundsMap = {};
     (rounds || []).forEach(r => { roundsMap[String(r.round_number)] = r; });
 
-    const predictions = preds.map(p => ({
-      ...p,
-      prediction_rounds: roundsMap[String(p.round_id)] || null
-    }));
-
+    const predictions = preds.map(p => ({ ...p, prediction_rounds: roundsMap[String(p.round_id)] || null }));
     res.json({ success: true, predictions });
   } catch (e) {
     console.error('Error /prediction/history:', e);
@@ -1794,39 +1670,19 @@ app.get('/prediction/history/:userId', requireAuth, async (req, res) => {
 
 app.get('/prediction/last-winners', async (req, res) => {
   try {
-    const { data: lastRound } = await supabase
-      .from('prediction_rounds')
-      .select('*')
-      .eq('status', 'resolved')
-      .order('round_number', { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
+    const { data: lastRound } = await supabase.from('prediction_rounds').select('*').eq('status', 'resolved').order('round_number', { ascending: false }).limit(1).maybeSingle();
     if (!lastRound) return res.json({ success: true, winners: [], round: null });
-
-    const { data: preds } = await supabase
-      .from('predictions')
-      .select('user_id, predicted_price, distance, percent_premium, payout')
-      .eq('round_id', lastRound.id)
-      .eq('won', true)
-      .order('payout', { ascending: false })
-      .limit(10);
-
+    const { data: preds } = await supabase.from('predictions').select('user_id, predicted_price, distance, percent_premium, payout').eq('round_id', lastRound.id).eq('won', true).order('payout', { ascending: false }).limit(10);
     res.json({
       success: true,
       round: {
-        number: lastRound.round_number,
-        startPrice: parseFloat(lastRound.start_price),
-        endPrice: parseFloat(lastRound.end_price),
-        result: lastRound.result,
-        totalPool: parseFloat(lastRound.total_pool),
-        distributed: parseFloat(lastRound.distributed || 0)
+        number: lastRound.round_number, startPrice: parseFloat(lastRound.start_price),
+        endPrice: parseFloat(lastRound.end_price), result: lastRound.result,
+        totalPool: parseFloat(lastRound.total_pool), distributed: parseFloat(lastRound.distributed || 0)
       },
       winners: (preds || []).map(p => ({
-        userId: p.user_id,
-        predictedPrice: parseFloat(p.predicted_price),
-        distance: parseFloat(p.distance || 0),
-        percentPremium: parseFloat(p.percent_premium || 0),
+        userId: p.user_id, predictedPrice: parseFloat(p.predicted_price),
+        distance: parseFloat(p.distance || 0), percentPremium: parseFloat(p.percent_premium || 0),
         payout: parseFloat(p.payout || 0)
       }))
     });
@@ -1918,17 +1774,13 @@ if (BOT_TOKEN) {
 
   bot.onText(/\/price/, async (msg) => {
     try {
-      const reserves = await pair.getReserves();
-      const token0 = await pair.token0();
-      let jhoalReserve, usdtReserve;
-      if (token0.toLowerCase() === TOKEN_ADDRESS.toLowerCase()) { jhoalReserve = reserves.reserve0; usdtReserve = reserves.reserve1; }
-      else { jhoalReserve = reserves.reserve1; usdtReserve = reserves.reserve0; }
-      const jhoalAmount = parseFloat(ethers.formatUnits(jhoalReserve, 18));
-      const usdtAmount = parseFloat(ethers.formatUnits(usdtReserve, 18));
+      const jhoalPrice = await getJhoalPrice();
+      if (jhoalPrice <= 0) { bot.sendMessage(msg.chat.id, '❌ Error al consultar precio.'); return; }
+      const jhoalPerUsdt = 1 / jhoalPrice;
       bot.sendMessage(msg.chat.id,
         '💰 *PRECIO JHOAL*\n\n' +
-        '💵 1 JHOAL = *$' + (usdtAmount / jhoalAmount).toFixed(8) + '*\n' +
-        '💎 1 USDT = *' + Math.round(jhoalAmount / usdtAmount).toLocaleString() + ' JHOAL*',
+        '💵 1 JHOAL = *$' + jhoalPrice.toFixed(8) + '*\n' +
+        '💎 1 USDT = *' + Math.round(jhoalPerUsdt).toLocaleString() + ' JHOAL*',
         { parse_mode: 'Markdown' }
       );
     } catch (e) { bot.sendMessage(msg.chat.id, '❌ Error al consultar precio.'); }
@@ -1979,8 +1831,8 @@ app.listen(process.env.PORT || 3000, () => {
   console.log('⏳ Cooldown entre retiros: ' + WITHDRAW_COOLDOWN + 's');
   console.log('🎲 Dados: x0=46% | x1.1=41% | x2=6% | x4=3% | x6=2% | x8=1% | x10=1% | EV=0.991');
   console.log('🔮 Predicciones: rango ±$' + PREDICTION_RANGE + ' | SIN cooldown de anuncios');
-  console.log('🪙 BTC precio: Binance (única fuente)');
-  console.log('💰 JHOAL precio: PancakeSwap con caché de ' + (JHOAL_CACHE_MS/1000) + 's');
+  console.log('🪙 BTC: PancakeSwap BTCB/USDT (0x3F80...)');
+  console.log('💰 JHOAL: PancakeSwap JHOAL/USDT (0x7016...)');
   console.log('🔥 Wallet de quema: ' + BURN_WALLET);
   console.log('🧹 Limpieza automática de plantas: ACTIVADA');
 
