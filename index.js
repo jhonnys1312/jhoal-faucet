@@ -153,7 +153,7 @@ const BINANCE_BTC_URL = 'https://api.binance.com/api/v3/ticker/price?symbol=BTCU
 const COINGECKO_BTC_URL = 'https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd';
 
 let btcPriceCache = { price: 0, updatedAt: 0, source: 'none' };
-const BTC_CACHE_MS = 30 * 1000;
+const BTC_CACHE_MS = 60 * 1000;
 
 async function fetchBTCFromCoinGecko() {
   try {
@@ -179,7 +179,6 @@ async function fetchBTCFromBinance() {
   }
   return 0;
 }
-
 async function getBTCPrice() {
   const now = Date.now();
   if (now - btcPriceCache.updatedAt < BTC_CACHE_MS && btcPriceCache.price > 0) {
@@ -191,6 +190,8 @@ async function getBTCPrice() {
     price = await fetchBTCFromBinance();
     source = 'binance';
   }
+  ...
+
   if (price > 0) {
     btcPriceCache = { price, updatedAt: now, source };
     return price;
@@ -1483,9 +1484,15 @@ app.get('/history/:userId', requireAuth, async (req, res) => {
     res.json({ success: true, history: history || [], summary: summary });
   } catch (error) { res.status(500).json({ error: 'Error: ' + error.message }); }
 });
+let jhoalPriceCache = { price: 0, updatedAt: 0 };
+const JHOAL_CACHE_MS = 60 * 1000;
 
 app.get('/price', async (req, res) => {
   try {
+    const now = Date.now();
+    if (now - jhoalPriceCache.updatedAt < JHOAL_CACHE_MS && jhoalPriceCache.price > 0) {
+      return res.json({ success: true, priceUsd: jhoalPriceCache.price });
+    }
     const reserves = await pair.getReserves();
     const token0 = await pair.token0();
     let jhoalReserve, usdtReserve;
@@ -1493,9 +1500,12 @@ app.get('/price', async (req, res) => {
     else { jhoalReserve = reserves.reserve1; usdtReserve = reserves.reserve0; }
     const jhoalAmount = parseFloat(ethers.formatUnits(jhoalReserve, 18));
     const usdtAmount = parseFloat(ethers.formatUnits(usdtReserve, 18));
-    res.json({ success: true, priceUsd: usdtAmount / jhoalAmount, jhoalPerUsdt: jhoalAmount / usdtAmount, jhoalReserve: jhoalAmount, usdtReserve: usdtAmount });
+    const price = usdtAmount / jhoalAmount;
+    jhoalPriceCache = { price, updatedAt: now };
+    res.json({ success: true, priceUsd: price, jhoalPerUsdt: jhoalAmount / usdtAmount, jhoalReserve: jhoalAmount, usdtReserve: usdtAmount });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
+
 
 app.get('/balance', async (req, res) => {
   try {
