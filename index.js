@@ -133,7 +133,7 @@ async function verificarHCaptcha(token, remoteip) {
 // ==== MONITOR DE DEPÓSITOS ====
 // ⚠️ ACTUALIZA ESTE NÚMERO AL BLOQUE ACTUAL DE BSC
 // Verifica en: https://bscscan.com/blocks
-const MONITOR_START_BLOCK = 124199300;
+const MONITOR_START_BLOCK = 124199426;
 const BATCH_SIZE = 50;
 const BLOCKS_PER_CYCLE = 500;
 const BATCH_DELAY_MS = 1000;
@@ -451,8 +451,8 @@ async function checkDeposits() {
 // Descomenta estas líneas SOLO después de:
 // 1. Haber reseteado last_deposit_block en Supabase
 // 2. Haber verificado que el bloque actual es correcto
-   setInterval(checkDeposits, 15 * 60 * 1000);
-   setTimeout(checkDeposits, 60 * 1000);
+ //  setInterval(checkDeposits, 15 * 60 * 1000);
+ //  setTimeout(checkDeposits, 60 * 1000);
 
 console.log('⚠️ MONITOR DE DEPÓSITOS PAUSADO - Ver instrucciones en el código');
 
