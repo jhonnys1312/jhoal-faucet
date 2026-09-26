@@ -1827,6 +1827,55 @@ app.post('/prediction/bet', requireAuth, async (req, res) => {
         container.innerHTML = html;
       } catch (e) { console.error('Error historial:', e); }
     }
+app.get('/prediction/history/:userId', requireAuth, async (req, res) => {
+  try {
+    const userId = req.userId;
+
+    // 1) Traer las predicciones del usuario
+    const { data: preds, error } = await supabase
+      .from('predictions')
+      .select('*')
+      .eq('user_id', String(userId))
+      .order('created_at', { ascending: false })
+      .limit(20);
+
+    if (error) {
+      console.error('Error historial predicciones:', error.message);
+      return res.json({ success: true, predictions: [] });
+    }
+
+    if (!preds || preds.length === 0) {
+      return res.json({ success: true, predictions: [] });
+    }
+
+    // 2) Traer las rondas por round_number (NO por id)
+    //    porque predictions.round_id apunta a prediction_rounds.round_number
+    const roundNumbers = [...new Set(preds.map(p => p.round_id))];
+    const { data: rounds, error: rErr } = await supabase
+      .from('prediction_rounds')
+      .select('id, round_number, result, end_price, start_price, status')
+      .in('round_number', roundNumbers);
+
+    if (rErr) {
+      console.error('Error trayendo rondas:', rErr.message);
+    }
+
+    // 3) Indexar por round_number para hacer match con predictions.round_id
+    const roundsMap = {};
+    (rounds || []).forEach(r => { roundsMap[String(r.round_number)] = r; });
+
+    // 4) Combinar
+    const predictions = preds.map(p => ({
+      ...p,
+      prediction_rounds: roundsMap[String(p.round_id)] || null
+    }));
+
+    res.json({ success: true, predictions });
+  } catch (e) {
+    console.error('Error /prediction/history:', e);
+    res.json({ success: true, predictions: [] });
+  }
+});
 
 app.get('/prediction/last-winners', async (req, res) => {
   try {
