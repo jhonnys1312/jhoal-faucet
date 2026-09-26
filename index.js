@@ -11,15 +11,16 @@ app.use(cors());
 app.use(express.json());
 
 // ==== CONFIG ====
-// RPC gestionado de NodeReal (capa gratuita) - Rápido y fiable
-const NODEREAL_HTTPS = 'https://bsc-mainnet.nodereal.io/v1/05f8075daa504e9e97eab50c590ae8a2';
-
-// Fallbacks públicos (solo por si NodeReal falla temporalmente)
+// RPCs gratuitos SIN límite mensual (solo rate limit por segundo)
+// 1RPC es el principal: sin API key, sin límite mensual, gratis
 const RPC_LIST = [
-  NODEREAL_HTTPS,
-  'https://bsc-dataseed.binance.org',
-  'https://bsc-dataseed1.defibit.io',
-  'https://bsc.publicnode.com'
+  'https://1rpc.io/bnb',                          // 1RPC - Sin API key, sin límite
+  'https://binance.llamarpc.com',                 // LlamaNodes - Sin API key
+  'https://bsc-dataseed.binance.org',             // Binance oficial
+  'https://bsc-dataseed1.defibit.io',             // Defibit
+  'https://bsc-dataseed1.ninicoin.io',            // Ninicoin
+  'https://bsc.publicnode.com',                   // PublicNode
+  'https://rpc.ankr.com/bsc'                      // Ankr
 ];
 
 let currentProvider = null;
@@ -131,10 +132,12 @@ async function verificarHCaptcha(token, remoteip) {
 }
 
 // ==== MONITOR DE DEPÓSITOS ====
-const MONITOR_START_BLOCK = 122925000;
-const BATCH_SIZE = 50;              // ✅ Reducido para no saturar RPC
-const BLOCKS_PER_CYCLE = 500;       // ✅ Reducido para no saturar RPC
-const BATCH_DELAY_MS = 500;         // ✅ Aumentado para respetar rate limit
+// ⚠️ IMPORTANTE: MONITOR_START_BLOCK debe ser el bloque ACTUAL de BSC
+// Verifica en https://bscscan.com/blocks
+const MONITOR_START_BLOCK = 62400000;  // ⚠️ ACTUALIZAR al bloque actual
+const BATCH_SIZE = 25;                  // ✅ Reducido drásticamente
+const BLOCKS_PER_CYCLE = 250;           // ✅ Reducido drásticamente
+const BATCH_DELAY_MS = 1000;            // ✅ 1 segundo entre batches
 
 // ==== LUNA LLENA ====
 const MOON_GROWTH_MULTIPLIER = 1.9;
@@ -167,8 +170,8 @@ const BTC_CACHE_MS = 60 * 1000;
 let jhoalPriceCache = { price: 0, updatedAt: 0 };
 const JHOAL_CACHE_MS = 60 * 1000;
 
-// ✅ Usamos NodeReal como provider principal
-const provider = new ethers.JsonRpcProvider(NODEREAL_HTTPS);
+// ✅ Usamos 1RPC como provider principal (sin límite mensual)
+const provider = new ethers.JsonRpcProvider('https://1rpc.io/bnb');
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 
 const ABI = [
@@ -437,7 +440,7 @@ async function checkDeposits() {
           u.wallet_balance = newWalletBalance;
           await addHistory(u.user_id, 'deposit', amount, '💵 Depósito a wallet personal', null, txHash);
         }
-        await new Promise(r => setTimeout(r, 500));
+        await new Promise(r => setTimeout(r, 1000));
       } catch (e) {
         console.warn('Error en user deposit check:', e.message);
       }
@@ -445,9 +448,9 @@ async function checkDeposits() {
   } catch (e) { console.error('Error checkDeposits:', e.message); }
   monitorRunning = false;
 }
-// ✅ Cada 3 minutos en vez de 1 minuto
-setInterval(checkDeposits, 3 * 60 * 1000);
-setTimeout(checkDeposits, 30 * 1000);
+// ✅ Cada 10 minutos (antes cada 3) para no saturar RPC
+setInterval(checkDeposits, 10 * 60 * 1000);
+setTimeout(checkDeposits, 60 * 1000);
 
 // ==== VALIDACIÓN INITDATA ====
 function validateInitData(initData) {
@@ -1405,7 +1408,7 @@ app.get('/btc-price', async (req, res) => {
   try {
     const price = await getBTCPrice();
     if (price <= 0) return res.status(500).json({ error: 'No se pudo obtener el precio BTC' });
-    res.json({ success: true, price, source: 'nodereal' });
+    res.json({ success: true, price, source: '1rpc' });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -1425,7 +1428,7 @@ app.get('/huerto-warning', (req, res) => {
   });
 });
 
-app.get('/', (req, res) => res.json({ status: 'Horus Faucet + Dados + Huerto + Historial + Luna Llena + Bendición + AdsGram + Referidos + Predicciones + hCaptcha + NodeReal funcionando' }));
+app.get('/', (req, res) => res.json({ status: 'Horus Faucet + Dados + Huerto + Historial + Luna Llena + Bendición + AdsGram + Referidos + Predicciones + hCaptcha + 1RPC funcionando' }));
 
 // ==== ENDPOINTS DE PREDICCIÓN ====
 
@@ -1449,7 +1452,7 @@ app.get('/prediction/current', requireAuth, async (req, res) => {
         message: '⏳ Esperando la próxima ronda',
         round: {
           id: round.id, number: round.round_number, startPrice: parseFloat(round.start_price),
-          currentPrice: await getBTCPrice(), priceSource: 'nodereal', secondsLeft: 0,
+          currentPrice: await getBTCPrice(), priceSource: '1rpc', secondsLeft: 0,
           totalPool: parseFloat(round.total_pool), basePool: parseFloat(round.base_pool),
           accumulatedPool: parseFloat(round.accumulated_pool), adsPool: parseFloat(round.ads_pool),
           range: PREDICTION_RANGE, status: 'closing', totalPredictions: 0, canPredict: false
@@ -1474,7 +1477,7 @@ app.get('/prediction/current', requireAuth, async (req, res) => {
       success: true, waitingNextRound: false, secondsUntilNextRound: 0,
       round: {
         id: round.id, number: round.round_number, startPrice: parseFloat(round.start_price),
-        currentPrice: await getBTCPrice(), priceSource: 'nodereal',
+        currentPrice: await getBTCPrice(), priceSource: '1rpc',
         secondsLeft: Math.max(0, round.closes_at - now),
         totalPool: parseFloat(round.total_pool), basePool: parseFloat(round.base_pool),
         accumulatedPool: parseFloat(round.accumulated_pool), adsPool: parseFloat(round.ads_pool),
@@ -1721,11 +1724,12 @@ app.listen(process.env.PORT || 3000, () => {
   console.log('⏳ Cooldown entre retiros: ' + WITHDRAW_COOLDOWN + 's');
   console.log('🎲 Dados: x0=46% | x1.1=41% | x2=6% | x4=3% | x6=2% | x8=1% | x10=1% | EV=0.991');
   console.log('🔮 Predicciones: rango ±$' + PREDICTION_RANGE + ' | SIN cooldown de anuncios');
-  console.log('🪙 BTC: NodeReal (RPC gestionado)');
+  console.log('🪙 BTC: 1RPC (sin límite mensual)');
   console.log('💰 JHOAL: PancakeSwap JHOAL/USDT');
   console.log('🔥 Wallet de quema: ' + BURN_WALLET);
   console.log('🧹 Limpieza automática de plantas: ACTIVADA');
-  console.log('🚀 RPC principal: NodeReal (100M CU gratis al mes)');
+  console.log('🚀 RPC principal: 1RPC (https://1rpc.io/bnb) - GRATIS SIN LÍMITE MENSUAL');
+  console.log('⚠️ Monitor de depósitos: cada 10 min (optimizado para no saturar RPC)');
 
   cleanupOldPlants();
   cleanupExpiredPlants();
