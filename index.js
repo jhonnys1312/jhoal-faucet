@@ -11,12 +11,17 @@ app.use(cors());
 app.use(express.json());
 
 // ==== CONFIG ====
-// RPCs públicos de Binance (sin límite mensual agresivo)
+// RPCs oficiales de BNB Chain (los más estables, sin API key)
 const RPC_LIST = [
-  'https://binance.llamarpc.com',
-  'https://rpc.ankr.com/bsc'
+  'https://bsc-dataseed.binance.org',
+  'https://bsc-dataseed1.defibit.io',
+  'https://bsc-dataseed1.ninicoin.io',
+  'https://bsc.publicnode.com',
+  'https://bsc-dataseed1.bnbchain.org',
+  'https://bsc-dataseed2.bnbchain.org',
+  'https://bsc-dataseed3.bnbchain.org'
 ];
-  
+
 let currentProvider = null;
 
 async function getProvider() {
@@ -126,9 +131,7 @@ async function verificarHCaptcha(token, remoteip) {
 }
 
 // ==== MONITOR DE DEPÓSITOS ====
-// ⚠️ ACTUALIZA ESTE NÚMERO AL BLOQUE ACTUAL DE BSC
-// Verifica en: https://bscscan.com/blocks
-const MONITOR_START_BLOCK = 124212628;
+const MONITOR_START_BLOCK = 124214148;   // ⚠️ Bloque actual - actualizar cada vez
 const BATCH_SIZE = 50;
 const BLOCKS_PER_CYCLE = 500;
 const BATCH_DELAY_MS = 1000;
@@ -164,6 +167,7 @@ const BTC_CACHE_MS = 60 * 1000;
 let jhoalPriceCache = { price: 0, updatedAt: 0 };
 const JHOAL_CACHE_MS = 60 * 1000;
 
+// Provider principal: primer RPC de la lista
 const provider = new ethers.JsonRpcProvider(RPC_LIST[0]);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 
@@ -183,7 +187,7 @@ const PAIR_ABI = [
 const pair = new ethers.Contract(PAIR_ADDRESS, PAIR_ABI, provider);
 const btcPair = new ethers.Contract(BTC_PAIR_ADDRESS, PAIR_ABI, provider);
 
-// ==== PRECIO BTC (desde PancakeSwap BTCB/USDT) ====
+// ==== PRECIO BTC ====
 async function getBTCPrice() {
   const now = Date.now();
   if (now - btcPriceCache.updatedAt < BTC_CACHE_MS && btcPriceCache.price > 0) {
@@ -213,7 +217,7 @@ async function getBTCPrice() {
   }
 }
 
-// ==== PRECIO JHOAL (desde PancakeSwap JHOAL/USDT) ====
+// ==== PRECIO JHOAL ====
 async function getJhoalPrice() {
   const now = Date.now();
   if (now - jhoalPriceCache.updatedAt < JHOAL_CACHE_MS && jhoalPriceCache.price > 0) {
@@ -380,7 +384,7 @@ async function notificarBendicion() {
 }
 scheduleBlessing();
 
-// ==== MONITOR DE DEPÓSITOS (PAUSADO TEMPORALMENTE) ====
+// ==== MONITOR DE DEPÓSITOS ====
 const ifaceTransfer = new ethers.Interface(['event Transfer(address indexed from, address indexed to, uint256 value)']);
 const TRANSFER_TOPIC = ethers.id('Transfer(address,address,uint256)');
 let monitorRunning = false;
@@ -442,14 +446,10 @@ async function checkDeposits() {
   monitorRunning = false;
 }
 
-// ⚠️ MONITOR PAUSADO TEMPORALMENTE
-// Descomenta estas líneas SOLO después de:
-// 1. Haber reseteado last_deposit_block en Supabase
-// 2. Haber verificado que el bloque actual es correcto
-   // ✅ MONITOR REACTIVADO
-setInterval(checkDeposits, 10 * 60 * 1000);
-setTimeout(checkDeposits, 60 * 1000);
-console.log('✅ Monitor de depósitos REACTIVADO');
+// ⛔ MONITOR PAUSADO - Descomenta las 3 líneas de abajo cuando quieras reactivarlo
+// setInterval(checkDeposits, 10 * 60 * 1000);
+// setTimeout(checkDeposits, 60 * 1000);
+console.log('⚠️ Monitor de depósitos PAUSADO - Descomenta las líneas en el código para reactivar');
 
 // ==== VALIDACIÓN INITDATA ====
 function validateInitData(initData) {
@@ -1407,7 +1407,7 @@ app.get('/btc-price', async (req, res) => {
   try {
     const price = await getBTCPrice();
     if (price <= 0) return res.status(500).json({ error: 'No se pudo obtener el precio BTC' });
-    res.json({ success: true, price, source: 'binance-public' });
+    res.json({ success: true, price, source: 'bsc-dataseed' });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -1427,7 +1427,7 @@ app.get('/huerto-warning', (req, res) => {
   });
 });
 
-app.get('/', (req, res) => res.json({ status: 'Horus Faucet + Dados + Huerto + Historial + Luna Llena + Bendición + AdsGram + Referidos + Predicciones + hCaptcha + RPC públicos funcionando' }));
+app.get('/', (req, res) => res.json({ status: 'Horus Faucet funcionando con RPCs oficiales' }));
 
 // ==== ENDPOINTS DE PREDICCIÓN ====
 
@@ -1451,7 +1451,7 @@ app.get('/prediction/current', requireAuth, async (req, res) => {
         message: '⏳ Esperando la próxima ronda',
         round: {
           id: round.id, number: round.round_number, startPrice: parseFloat(round.start_price),
-          currentPrice: await getBTCPrice(), priceSource: 'binance-public', secondsLeft: 0,
+          currentPrice: await getBTCPrice(), priceSource: 'bsc-dataseed', secondsLeft: 0,
           totalPool: parseFloat(round.total_pool), basePool: parseFloat(round.base_pool),
           accumulatedPool: parseFloat(round.accumulated_pool), adsPool: parseFloat(round.ads_pool),
           range: PREDICTION_RANGE, status: 'closing', totalPredictions: 0, canPredict: false
@@ -1476,7 +1476,7 @@ app.get('/prediction/current', requireAuth, async (req, res) => {
       success: true, waitingNextRound: false, secondsUntilNextRound: 0,
       round: {
         id: round.id, number: round.round_number, startPrice: parseFloat(round.start_price),
-        currentPrice: await getBTCPrice(), priceSource: 'binance-public',
+        currentPrice: await getBTCPrice(), priceSource: 'bsc-dataseed',
         secondsLeft: Math.max(0, round.closes_at - now),
         totalPool: parseFloat(round.total_pool), basePool: parseFloat(round.base_pool),
         accumulatedPool: parseFloat(round.accumulated_pool), adsPool: parseFloat(round.ads_pool),
@@ -1723,11 +1723,12 @@ app.listen(process.env.PORT || 3000, () => {
   console.log('⏳ Cooldown entre retiros: ' + WITHDRAW_COOLDOWN + 's');
   console.log('🎲 Dados: x0=46% | x1.1=41% | x2=6% | x4=3% | x6=2% | x8=1% | x10=1% | EV=0.991');
   console.log('🔮 Predicciones: rango ±$' + PREDICTION_RANGE + ' | SIN cooldown de anuncios');
-  console.log('🪙 BTC: RPC públicos de Binance');
+  console.log('🪙 BTC: RPCs oficiales de BNB Chain');
   console.log('💰 JHOAL: PancakeSwap JHOAL/USDT');
   console.log('🔥 Wallet de quema: ' + BURN_WALLET);
   console.log('🧹 Limpieza automática de plantas: ACTIVADA');
-  console.log('⚠️ MONITOR DE DEPÓSITOS PAUSADO - Ver instrucciones en el código');
+  console.log('⚠️ Monitor de depósitos: PAUSADO (para reactivar, descomenta las líneas)');
+  console.log('📌 MONITOR_START_BLOCK = ' + MONITOR_START_BLOCK);
 
   cleanupOldPlants();
   cleanupExpiredPlants();
