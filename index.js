@@ -11,7 +11,7 @@ app.use(cors());
 app.use(express.json());
 
 // ==== CONFIG ====
-const RPC_LIST = [
+// RPC públicos de BSC (sin cuota, sin API key)
 const RPC_LIST = [
   'https://bsc-dataseed.binance.org',
   'https://bsc-dataseed1.defibit.io',
@@ -202,9 +202,10 @@ async function getBTCPrice() {
     if (btcAmount <= 0) throw new Error('Reserva BTC = 0');
     const price = usdtAmount / btcAmount;
     btcPriceCache = { price, updatedAt: now };
+    console.log(`🪙 BTC: $${price.toFixed(2)}`);
     return price;
   } catch (e) {
-    console.error('❌ Error leyendo BTC de PancakeSwap:', e.message);
+    console.error('❌ Error BTC:', e.message);
     return btcPriceCache.price || 0;
   }
 }
@@ -233,7 +234,7 @@ async function getJhoalPrice() {
     jhoalPriceCache = { price, updatedAt: now };
     return price;
   } catch (e) {
-    console.error('❌ Error leyendo JHOAL de PancakeSwap:', e.message);
+    console.error('❌ Error JHOAL:', e.message);
     return jhoalPriceCache.price || 0;
   }
 }
@@ -725,7 +726,7 @@ async function ensurePredictionRound() {
     console.log(`🔮 Ronda #${roundNumber} | Pool: ${totalPool} JHOAL | BTC: $${price.toLocaleString()}`);
     return newRound;
   } catch (e) {
-    console.error('❌ Error ensurePredictionRound:', e.message, e.stack);
+    console.error('❌ Error ensurePredictionRound:', e.message);
     return null;
   }
 }
