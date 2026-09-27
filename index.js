@@ -129,8 +129,8 @@ async function verificarHCaptcha(token, remoteip) {
 // ==== MONITOR DE DEPÓSITOS ====
 const MONITOR_START_BLOCK = 124257167 ;
 const BATCH_SIZE = 1;
-const BLOCKS_PER_CYCLE = 3;
-const BATCH_DELAY_MS = 5000;
+const BLOCKS_PER_CYCLE = 1;
+const BATCH_DELAY_MS = 3000;
 
 // ==== LUNA LLENA ====
 const MOON_GROWTH_MULTIPLIER = 1.9;
@@ -1818,6 +1818,6 @@ app.listen(process.env.PORT || 3000, () => {
   setInterval(sendPendingBurns, 60 * 60 * 1000);
   scheduleBurnAtMidnight();
 
-  setInterval(checkDeposits, 15 * 60 * 1000);
+  setInterval(checkDeposits, 3 * 60 * 1000);
   setTimeout(checkDeposits, 15 * 1000);
 });
