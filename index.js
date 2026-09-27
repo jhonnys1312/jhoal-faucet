@@ -128,8 +128,8 @@ async function verificarHCaptcha(token, remoteip) {
 // ==== MONITOR DE DEPÓSITOS ====
 const MONITOR_START_BLOCK = 124214834;
 const BATCH_SIZE = 100;
-const BLOCKS_PER_CYCLE = 2000;
-const BATCH_DELAY_MS = 100;
+const BLOCKS_PER_CYCLE = 500;
+const BATCH_DELAY_MS = 500;
 
 // ==== LUNA LLENA ====
 const MOON_GROWTH_MULTIPLIER = 1.9;
@@ -382,6 +382,7 @@ scheduleBlessing();
 const ifaceTransfer = new ethers.Interface(['event Transfer(address indexed from, address indexed to, uint256 value)']);
 const TRANSFER_TOPIC = ethers.id('Transfer(address,address,uint256)');
 let monitorRunning = false;
+
 async function checkDeposits() {
   if (monitorRunning) return;
   monitorRunning = true;
@@ -415,27 +416,27 @@ async function checkDeposits() {
         const maxToBlock = Math.min(fromBlock + BLOCKS_PER_CYCLE, toBlock);
         let allLogs = [];
         let batchStart = fromBlock;
-        let huboError = false; // 🔥 Bandera para saber si falló la RPC
+        let lastSuccessfulBlock = fromBlock - 1;
 
         while (batchStart <= maxToBlock) {
           const batchEnd = Math.min(batchStart + BATCH_SIZE - 1, maxToBlock);
           try {
             const batchLogs = await p.getLogs({
               address: TOKEN_ADDRESS,
-              topics: [TRANSFER_TOPIC], // Descargamos TODOS los transfers y filtramos en JS
+              topics: [TRANSFER_TOPIC],
               fromBlock: batchStart,
               toBlock: batchEnd
             });
             allLogs.push(...batchLogs);
+            lastSuccessfulBlock = batchEnd;
           } catch (batchErr) {
             console.error(`❌ [Monitor] Error getLogs (${batchStart}-${batchEnd}):`, batchErr.message);
-            huboError = true; // 🔥 Marcamos que hubo error
+            await new Promise(r => setTimeout(r, 2000));
           }
           batchStart = batchEnd + 1;
           await new Promise(r => setTimeout(r, BATCH_DELAY_MS));
         }
 
-        // Procesamos los logs y filtramos manualmente
         for (const log of allLogs) {
           try {
             const decoded = ifaceTransfer.parseLog({ topics: log.topics, data: log.data });
@@ -468,15 +469,14 @@ async function checkDeposits() {
           }
         }
 
-        // 🔥 SOLO actualizar last_deposit_block si NO hubo errores
-        if (!huboError) {
-          await supabase.from('users_balance').update({ last_deposit_block: maxToBlock }).eq('user_id', u.user_id);
-          console.log(`📌 [Monitor] Usuario ${u.user_id} actualizado a bloque ${maxToBlock}`);
+        if (lastSuccessfulBlock >= fromBlock) {
+          await supabase.from('users_balance').update({ last_deposit_block: lastSuccessfulBlock }).eq('user_id', u.user_id);
+          console.log(`📌 [Monitor] Usuario ${u.user_id} actualizado a bloque ${lastSuccessfulBlock}`);
         } else {
-          console.log(`⚠️ [Monitor] Usuario ${u.user_id} NO actualizado por errores. Reintentará.`);
+          console.log(`⚠️ [Monitor] Usuario ${u.user_id} no pudo avanzar. Reintentará desde ${fromBlock}.`);
         }
 
-        await new Promise(r => setTimeout(r, 500));
+        await new Promise(r => setTimeout(r, 1000));
 
       } catch (e) {
         console.error(`❌ [Monitor] Error procesando usuario ${u.user_id}:`, e.message);
@@ -489,6 +489,7 @@ async function checkDeposits() {
   monitorRunning = false;
   console.log('🔍 [Monitor] Chequeo finalizado.');
 }
+
 // ==== VALIDACIÓN INITDATA ====
 function validateInitData(initData) {
   if (!initData || !BOT_TOKEN) return null;
@@ -522,7 +523,6 @@ function requireAuth(req, res, next) {
   req.userId = verifiedUserId;
   next();
 }
-
 // ==== HUERTO ====
 const PLANT_LEVELS = {
   basic:   { name: 'Básica',  emoji: '🌱', price: 10000, waterCost: 40,  fruitValue: 125 },
@@ -990,7 +990,6 @@ function scheduleBurnAtMidnight() {
     scheduleBurnAtMidnight();
   }, msUntilMidnight);
 }
-
 // ==== ENDPOINTS ====
 app.get('/moon-status', (req, res) => {
   const now = Math.floor(Date.now() / 1000);
@@ -1766,6 +1765,7 @@ app.listen(process.env.PORT || 3000, () => {
   console.log('💰 JHOAL: PancakeSwap JHOAL/USDT');
   console.log('🔥 Wallet de quema: ' + BURN_WALLET);
   console.log('🧹 Limpieza automática de plantas: ACTIVADA');
+  console.log('📦 Monitor de depósitos: INICIADO (Bloque inicial: ' + MONITOR_START_BLOCK + ')');
 
   cleanupOldPlants();
   cleanupExpiredPlants();
@@ -1777,4 +1777,7 @@ app.listen(process.env.PORT || 3000, () => {
 
   setInterval(sendPendingBurns, 60 * 60 * 1000);
   scheduleBurnAtMidnight();
+
+  setInterval(checkDeposits, 60 * 1000);
+  setTimeout(checkDeposits, 15 * 1000);
 });
