@@ -12,6 +12,7 @@ app.use(express.json());
 
 // ==== CONFIG ====
 const RPC_LIST = [
+  'https://old-empty-hill.bsc.quiknode.pro/dbb80cf4d2f75f090392275bd25a0f460e47074a',
   'https://bsc-dataseed.binance.org',
   'https://bsc-dataseed1.defibit.io',
   'https://bsc-dataseed1.ninicoin.io',
