@@ -57,6 +57,7 @@ const COOLDOWN = 30 * 60;
 const MIN_BET = 0.1;
 const MAX_BET = 1000;
 const WITHDRAW_COOLDOWN = 5 * 60;
+const VERIFY_DEPOSIT_MAX_DAYS = 7; // Días máximos para verificar un depósito
 
 // ==== REFERIDOS ====
 const REFERRAL_REWARD = 1000;
@@ -126,12 +127,6 @@ async function verificarHCaptcha(token, remoteip) {
   }
 }
 
-// ==== MONITOR DE DEPÓSITOS ====
-const MONITOR_START_BLOCK =  124339856;
-const BATCH_SIZE = 5;
-const BLOCKS_PER_CYCLE = 5;
-const BATCH_DELAY_MS = 3000;
-
 // ==== LUNA LLENA ====
 const MOON_GROWTH_MULTIPLIER = 1.9;
 const MOON_DURATION_MIN = 10;
@@ -163,11 +158,9 @@ const BTC_CACHE_MS = 60 * 1000;
 let jhoalPriceCache = { price: 0, updatedAt: 0 };
 const JHOAL_CACHE_MS = 60 * 1000;
 
-// 🔥 PROVIDER PRINCIPAL (QuickNode) - Solo para lectura y monitor
 const provider = new ethers.JsonRpcProvider(RPC_LIST[0]);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
 
-// 🔥 PROVIDER PARA TRANSACCIONES (BSC Público) - Soluciona el error de getFeeData
 const txProvider = new ethers.JsonRpcProvider('https://bsc-dataseed1.binance.org');
 const txWallet = new ethers.Wallet(PRIVATE_KEY, txProvider);
 
@@ -191,9 +184,7 @@ const btcPair = new ethers.Contract(BTC_PAIR_ADDRESS, PAIR_ABI, provider);
 // ==== PRECIO BTC ====
 async function getBTCPrice() {
   const now = Date.now();
-  if (now - btcPriceCache.updatedAt < BTC_CACHE_MS && btcPriceCache.price > 0) {
-    return btcPriceCache.price;
-  }
+  if (now - btcPriceCache.updatedAt < BTC_CACHE_MS && btcPriceCache.price > 0) return btcPriceCache.price;
   try {
     const reserves = await btcPair.getReserves();
     const token0 = await btcPair.token0();
@@ -221,9 +212,7 @@ async function getBTCPrice() {
 // ==== PRECIO JHOAL ====
 async function getJhoalPrice() {
   const now = Date.now();
-  if (now - jhoalPriceCache.updatedAt < JHOAL_CACHE_MS && jhoalPriceCache.price > 0) {
-    return jhoalPriceCache.price;
-  }
+  if (now - jhoalPriceCache.updatedAt < JHOAL_CACHE_MS && jhoalPriceCache.price > 0) return jhoalPriceCache.price;
   try {
     const reserves = await pair.getReserves();
     const token0 = await pair.token0();
@@ -385,144 +374,6 @@ async function notificarBendicion() {
 }
 scheduleBlessing();
 
-// ==== MONITOR DE DEPÓSITOS (CORREGIDO) ====
-const ifaceTransfer = new ethers.Interface(['event Transfer(address indexed from, address indexed to, uint256 value)']);
-const TRANSFER_TOPIC = ethers.id('Transfer(address,address,uint256)');
-let monitorRunning = false;
-
-async function checkDeposits() {
-  if (monitorRunning) return;
-  monitorRunning = true;
-
-  try {
-    const p = await getProvider();
-    const currentBlock = await p.getBlockNumber();
-
-    const { data: users, error } = await supabase.from('users_balance')
-      .select('user_id, deposit_address, wallet_balance, last_deposit_block')
-      .not('deposit_address', 'is', null);
-
-    if (error || !users || users.length === 0) {
-      monitorRunning = false;
-      return;
-    }
-
-    // Bloque más bajo entre todos los usuarios
-    const bloques = users
-      .map(u => u.last_deposit_block || MONITOR_START_BLOCK)
-      .filter(b => b !== null && b !== undefined);
-    
-    if (bloques.length === 0) {
-      monitorRunning = false;
-      return;
-    }
-
-    const fromBlockGlobal = Math.min(...bloques) + 1;
-    const toBlock = currentBlock - 3;
-
-    if (fromBlockGlobal > toBlock) {
-      monitorRunning = false;
-      return;
-    }
-
-    console.log(`🔍 [Monitor] Escaneando ${fromBlockGlobal} a ${toBlock} (${toBlock - fromBlockGlobal} bloques)`);
-
-    // 🔥 CLAVE: Pedimos bloques de 5 en 5 pero en UNA SOLA petición por lote
-    let allLogs = [];
-    let batchStart = fromBlockGlobal;
-    const BATCH_SIZE = 5; // Límite de QuickNode
-
-    while (batchStart <= toBlock) {
-      const batchEnd = Math.min(batchStart + BATCH_SIZE - 1, toBlock);
-      
-      try {
-        const batchLogs = await p.getLogs({
-          address: TOKEN_ADDRESS,
-          topics: [TRANSFER_TOPIC],
-          fromBlock: batchStart,
-          toBlock: batchEnd
-        });
-        allLogs.push(...batchLogs);
-      } catch (batchErr) {
-        console.error(`❌ Error getLogs (${batchStart}-${batchEnd}):`, batchErr.message);
-        await new Promise(r => setTimeout(r, 2000));
-        continue;
-      }
-      
-      batchStart = batchEnd + 1;
-      await new Promise(r => setTimeout(r, 150)); // Pausa corta pero segura
-    }
-
-    console.log(`📥 [Monitor] ${allLogs.length} transfers encontrados`);
-
-    // Procesamos los logs
-    const userMap = {};
-    users.forEach(u => {
-      userMap[u.deposit_address.toLowerCase()] = u;
-    });
-
-    let depositosAcreditados = 0;
-
-    for (const log of allLogs) {
-      try {
-        const decoded = ifaceTransfer.parseLog({ topics: log.topics, data: log.data });
-        const toAddress = decoded.args.to.toLowerCase();
-        const user = userMap[toAddress];
-        if (!user) continue;
-
-        const blockNum = log.blockNumber;
-        if (user.last_deposit_block && blockNum <= user.last_deposit_block) continue;
-
-        const amount = parseFloat(ethers.formatUnits(decoded.args.value, 18));
-        const txHash = log.transactionHash;
-        const fromAddress = decoded.args.from;
-
-        const { data: existing } = await supabase.from('deposits').select('tx_hash').eq('tx_hash', txHash).maybeSingle();
-        if (existing) continue;
-
-        await supabase.from('deposits').insert({
-          user_id: user.user_id, wallet: fromAddress, amount, tx_hash: txHash,
-          created_at: Math.floor(Date.now() / 1000)
-        });
-
-        const newWalletBalance = parseFloat(user.wallet_balance || 0) + amount;
-        await supabase.from('users_balance').update({ 
-          wallet_balance: newWalletBalance,
-          last_deposit_block: blockNum 
-        }).eq('user_id', user.user_id);
-        
-        user.wallet_balance = newWalletBalance;
-        user.last_deposit_block = blockNum;
-
-        await addHistory(user.user_id, 'deposit', amount, '💵 Depósito a wallet personal', null, txHash);
-        console.log(`✅ Depósito: ${user.user_id} +${amount} JHOAL`);
-        depositosAcreditados++;
-
-      } catch (logErr) {
-        console.error(`❌ Error procesando log:`, logErr.message);
-      }
-    }
-
-    // Actualizamos last_deposit_block de todos los usuarios al bloque final
-    if (allLogs.length > 0 || fromBlockGlobal <= toBlock) {
-      for (const u of users) {
-        if (u.last_deposit_block < toBlock) {
-          await supabase.from('users_balance')
-            .update({ last_deposit_block: toBlock })
-            .eq('user_id', u.user_id);
-        }
-      }
-    }
-
-    console.log(`✅ [Monitor] Chequeo finalizado. Depósitos acreditados: ${depositosAcreditados}`);
-
-  } catch (e) {
-    console.error('❌ [Monitor] Error general:', e.message);
-  }
-
-  monitorRunning = false;
-}
-
 // ==== VALIDACIÓN INITDATA ====
 function validateInitData(initData) {
   if (!initData || !BOT_TOKEN) return null;
@@ -556,6 +407,7 @@ function requireAuth(req, res, next) {
   req.userId = verifiedUserId;
   next();
 }
+
 // ==== HUERTO ====
 const PLANT_LEVELS = {
   basic:   { name: 'Básica',  emoji: '🌱', price: 10000, waterCost: 40,  fruitValue: 125 },
@@ -751,12 +603,7 @@ function getSecondsUntilNextRound() {
 async function ensurePredictionRound() {
   const roundNumber = getPredictionRoundNumber();
   try {
-    const { data: existing } = await supabase
-      .from('prediction_rounds')
-      .select('*')
-      .eq('round_number', roundNumber)
-      .maybeSingle();
-
+    const { data: existing } = await supabase.from('prediction_rounds').select('*').eq('round_number', roundNumber).maybeSingle();
     if (existing) return existing;
 
     const price = await getBTCPrice();
@@ -769,45 +616,23 @@ async function ensurePredictionRound() {
     const startedAt = roundNumber * PREDICTION_ROUND_DURATION;
     const closesAt = startedAt + PREDICTION_WINDOW;
 
-    const { data: lastRound } = await supabase
-      .from('prediction_rounds')
-      .select('accumulated_pool')
-      .eq('status', 'resolved')
-      .order('round_number', { ascending: false })
-      .limit(1)
-      .maybeSingle();
+    const { data: lastRound } = await supabase.from('prediction_rounds').select('accumulated_pool').eq('status', 'resolved').order('round_number', { ascending: false }).limit(1).maybeSingle();
 
     let accumulated = 0;
-    if (lastRound && lastRound.accumulated_pool > 0) {
-      accumulated = parseFloat(lastRound.accumulated_pool);
-    }
+    if (lastRound && lastRound.accumulated_pool > 0) accumulated = parseFloat(lastRound.accumulated_pool);
 
     const totalPool = PREDICTION_BASE_POOL + accumulated;
 
-    const { data: newRound, error } = await supabase
-      .from('prediction_rounds')
-      .insert({
-        round_number: roundNumber,
-        start_price: price,
-        base_pool: PREDICTION_BASE_POOL,
-        accumulated_pool: accumulated,
-        ads_pool: 0,
-        total_pool: totalPool,
-        status: 'open',
-        started_at: startedAt,
-        closes_at: closesAt,
-        created_at: now
-      })
-      .select()
-      .maybeSingle();
+    const { data: newRound, error } = await supabase.from('prediction_rounds').insert({
+      round_number: roundNumber, start_price: price,
+      base_pool: PREDICTION_BASE_POOL, accumulated_pool: accumulated,
+      ads_pool: 0, total_pool: totalPool, status: 'open',
+      started_at: startedAt, closes_at: closesAt, created_at: now
+    }).select().maybeSingle();
 
     if (error) {
       console.error('❌ Error creando ronda:', error.message);
-      const { data: fallback } = await supabase
-        .from('prediction_rounds')
-        .select('*')
-        .eq('round_number', roundNumber)
-        .maybeSingle();
+      const { data: fallback } = await supabase.from('prediction_rounds').select('*').eq('round_number', roundNumber).maybeSingle();
       return fallback;
     }
 
@@ -822,12 +647,7 @@ async function ensurePredictionRound() {
 async function resolvePredictionRounds() {
   try {
     const now = Math.floor(Date.now() / 1000);
-    const { data: pending } = await supabase
-      .from('prediction_rounds')
-      .select('*')
-      .eq('status', 'open')
-      .lt('closes_at', now - 5);
-
+    const { data: pending } = await supabase.from('prediction_rounds').select('*').eq('status', 'open').lt('closes_at', now - 5);
     if (!pending || pending.length === 0) return;
 
     for (const round of pending) {
@@ -839,12 +659,7 @@ async function resolvePredictionRounds() {
         if (!endPrice || endPrice <= 0) { releaseLock(lockKey); continue; }
 
         const result = endPrice > round.start_price ? 'up' : (endPrice < round.start_price ? 'down' : 'tie');
-
-        const { data: preds } = await supabase
-          .from('predictions')
-          .select('*')
-          .eq('round_id', round.id);
-
+        const { data: preds } = await supabase.from('predictions').select('*').eq('round_id', round.id);
         const allPreds = preds || [];
 
         const processedPreds = allPreds.map(p => {
@@ -852,12 +667,10 @@ async function resolvePredictionRounds() {
           const distance = Math.abs(endPrice - predicted);
           let percentPremium = 0;
           let isWinner = false;
-
           if (distance <= PREDICTION_RANGE) {
             percentPremium = 100 - (distance / PREDICTION_RANGE) * 100;
             isWinner = true;
           }
-
           return { ...p, distance, percentPremium, isWinner };
         });
 
@@ -870,84 +683,48 @@ async function resolvePredictionRounds() {
 
         if (winnersCount > 0) {
           const sumPercents = winners.reduce((s, w) => s + w.percentPremium, 0);
-
           for (const w of winners) {
             const share = (w.percentPremium / sumPercents) * totalPool;
             const payout = Math.floor(share * 100) / 100;
-
             const user = await ensureUser(w.user_id);
             const newBalance = parseFloat(user.balance) + payout;
             const newWon = parseFloat(user.total_prediction_won || 0) + payout;
-
-            await supabase.from('users_balance')
-              .update({ balance: newBalance, total_prediction_won: newWon })
-              .eq('user_id', w.user_id);
-
-            await supabase.from('predictions')
-              .update({ distance: w.distance, percent_premium: w.percentPremium, won: true, payout })
-              .eq('id', w.id);
-
-            await addHistory(w.user_id, 'prediction_win', payout,
-              `🔮 Ganaste en Predicciones Ronda #${round.round_number} (dist $${w.distance.toFixed(2)}, ${w.percentPremium.toFixed(1)}%)`,
-              null, null);
-
+            await supabase.from('users_balance').update({ balance: newBalance, total_prediction_won: newWon }).eq('user_id', w.user_id);
+            await supabase.from('predictions').update({ distance: w.distance, percent_premium: w.percentPremium, won: true, payout }).eq('id', w.id);
+            await addHistory(w.user_id, 'prediction_win', payout, `🔮 Ganaste en Predicciones Ronda #${round.round_number} (dist $${w.distance.toFixed(2)}, ${w.percentPremium.toFixed(1)}%)`, null, null);
             distributed += payout;
-
             if (bot && user.chat_id) {
               try {
                 await bot.sendMessage(user.chat_id,
-                  `🔮 *¡GANASTE EN LOS DIOSES!*\n\n` +
-                  `📊 Ronda #${round.round_number}\n` +
-                  `📍 Precio final: $${endPrice.toLocaleString()}\n` +
-                  `🎯 Tu predicción: $${w.predicted_price}\n` +
-                  `📏 Distancia: $${w.distance.toFixed(2)}\n` +
-                  `💰 Ganaste: *${payout.toFixed(2)} JHOAL*`,
+                  `🔮 *¡GANASTE EN LOS DIOSES!*\n\n📊 Ronda #${round.round_number}\n📍 Precio final: $${endPrice.toLocaleString()}\n🎯 Tu predicción: $${w.predicted_price}\n📏 Distancia: $${w.distance.toFixed(2)}\n💰 Ganaste: *${payout.toFixed(2)} JHOAL*`,
                   { parse_mode: 'Markdown' }
                 );
               } catch (e) {}
             }
           }
-
           const losers = processedPreds.filter(p => !p.isWinner);
           for (const l of losers) {
-            await supabase.from('predictions')
-              .update({ distance: l.distance, percent_premium: 0, won: false, payout: 0 })
-              .eq('id', l.id);
+            await supabase.from('predictions').update({ distance: l.distance, percent_premium: 0, won: false, payout: 0 }).eq('id', l.id);
           }
-
           console.log(`✅ Ronda #${round.round_number} | Ganadores: ${winnersCount} | Repartido: ${distributed.toFixed(2)}`);
         } else {
           const burnAmount = Math.floor(totalPool * 0.10 * 100) / 100;
           const accumulateAmount = totalPool - burnAmount;
           burned = burnAmount;
           accumulatedNext = accumulateAmount;
-
           if (burnAmount > 0) {
-            await supabase.from('burn_wallet').insert({
-              amount: burnAmount,
-              source: 'prediction_loss',
-              created_at: now
-            });
+            await supabase.from('burn_wallet').insert({ amount: burnAmount, source: 'prediction_loss', created_at: now });
           }
-
           for (const p of processedPreds) {
-            await supabase.from('predictions')
-              .update({ distance: p.distance, percent_premium: 0, won: false, payout: 0 })
-              .eq('id', p.id);
+            await supabase.from('predictions').update({ distance: p.distance, percent_premium: 0, won: false, payout: 0 }).eq('id', p.id);
           }
-
           console.log(`💀 Ronda #${round.round_number} | Nadie ganó | Quemado: ${burnAmount} | Acumulado: ${accumulateAmount}`);
         }
 
         await supabase.from('prediction_rounds').update({
-          end_price: endPrice,
-          result: result,
-          distributed: distributed,
-          burned: burned,
-          accumulated_pool: accumulatedNext,
-          winners_count: winnersCount,
-          status: 'resolved',
-          resolved_at: now
+          end_price: endPrice, result: result, distributed: distributed,
+          burned: burned, accumulated_pool: accumulatedNext,
+          winners_count: winnersCount, status: 'resolved', resolved_at: now
         }).eq('id', round.id).eq('status', 'open');
 
       } catch (e) {
@@ -980,33 +757,19 @@ async function sendPendingBurns() {
   if (burnSendRunning) return;
   burnSendRunning = true;
   try {
-    const { data: pending } = await supabase
-      .from('burn_wallet')
-      .select('*')
-      .is('sent_at', null)
-      .order('created_at', { ascending: true });
-
+    const { data: pending } = await supabase.from('burn_wallet').select('*').is('sent_at', null).order('created_at', { ascending: true });
     if (!pending || pending.length === 0) { burnSendRunning = false; return; }
-
     const totalBurn = pending.reduce((s, b) => s + parseFloat(b.amount), 0);
     if (totalBurn <= 0) { burnSendRunning = false; return; }
-
     console.log(`🔥 Enviando ${totalBurn.toFixed(2)} JHOAL a quema...`);
-
     const amountWei = ethers.parseUnits(totalBurn.toFixed(18), 18);
     const tx = await txToken.transfer(BURN_WALLET, amountWei);
     await tx.wait();
-
     const now = Math.floor(Date.now() / 1000);
     for (const b of pending) {
-      await supabase.from('burn_wallet')
-        .update({ sent_at: now, tx_hash: tx.hash })
-        .eq('id', b.id);
+      await supabase.from('burn_wallet').update({ sent_at: now, tx_hash: tx.hash }).eq('id', b.id);
     }
-
-    await addHistory('SYSTEM', 'burn', -totalBurn,
-      `🔥 Quema enviada a ${BURN_WALLET.slice(0, 8)}...`, null, tx.hash);
-
+    await addHistory('SYSTEM', 'burn', -totalBurn, `🔥 Quema enviada a ${BURN_WALLET.slice(0, 8)}...`, null, tx.hash);
     console.log(`🔥 Quema enviada: ${totalBurn.toFixed(2)} JHOAL | TX: ${tx.hash}`);
   } catch (e) {
     console.error('Error en sendPendingBurns:', e.message);
@@ -1023,6 +786,7 @@ function scheduleBurnAtMidnight() {
     scheduleBurnAtMidnight();
   }, msUntilMidnight);
 }
+
 // ==== ENDPOINTS ====
 app.get('/moon-status', (req, res) => {
   const now = Math.floor(Date.now() / 1000);
@@ -1087,14 +851,194 @@ app.post('/my-deposit-wallet', requireAuth, async (req, res) => {
     if (user.deposit_address) return res.json({ success: true, address: user.deposit_address, walletBalance: parseFloat(user.wallet_balance || 0) });
     const newWallet = ethers.Wallet.createRandom();
     const encryptedKey = encryptPrivateKey(newWallet.privateKey);
-    const p = await getProvider();
-    const currentBlock = await p.getBlockNumber();
     await supabase.from('users_balance').update({
-      deposit_address: newWallet.address, deposit_private_key: encryptedKey, wallet_balance: 0,
-      last_deposit_block: currentBlock - 10
+      deposit_address: newWallet.address, deposit_private_key: encryptedKey, wallet_balance: 0
     }).eq('user_id', userId);
     res.json({ success: true, address: newWallet.address, walletBalance: 0 });
   } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ==== VERIFICAR DEPÓSITO POR HASH (NUEVO) ====
+app.post('/verify-deposit', requireAuth, async (req, res) => {
+  const userId = req.userId;
+  const { txHash } = req.body;
+
+  // Validación 1: Formato del hash
+  if (!txHash || typeof txHash !== 'string' || !txHash.startsWith('0x') || txHash.length !== 66) {
+    return res.status(400).json({ error: 'Hash de transacción inválido' });
+  }
+
+  const lockKey = `verify_${userId}_${txHash}`;
+  if (!acquireLock(lockKey)) {
+    return res.status(429).json({ error: '⏳ Verificación en proceso. Esperá.' });
+  }
+
+  try {
+    const user = await ensureUser(userId);
+    if (!user.deposit_address) {
+      releaseLock(lockKey);
+      return res.status(400).json({ error: 'No tienes wallet de depósito asignada' });
+    }
+
+    // Validación 2: ¿Ya fue acreditada antes? (SIN gastar CU)
+    const { data: existing } = await supabase.from('deposits').select('tx_hash, amount').eq('tx_hash', txHash).maybeSingle();
+    if (existing) {
+      releaseLock(lockKey);
+      return res.status(400).json({ 
+        error: `❌ Esta transacción ya fue acreditada anteriormente (${parseFloat(existing.amount).toFixed(2)} JHOAL)` 
+      });
+    }
+
+    // Validación 3: Consultar la blockchain (GASTA CU)
+    const p = await getProvider();
+    const tx = await p.getTransaction(txHash);
+    const receipt = await p.getTransactionReceipt(txHash);
+
+    if (!tx || !receipt) {
+      releaseLock(lockKey);
+      return res.status(400).json({ error: '❌ Transacción no encontrada en la blockchain' });
+    }
+
+    if (receipt.status !== 1) {
+      releaseLock(lockKey);
+      return res.status(400).json({ error: '❌ La transacción falló en la blockchain' });
+    }
+
+    // Validación 4: ¿El destino es el contrato de JHOAL?
+    if (!tx.to || tx.to.toLowerCase() !== TOKEN_ADDRESS.toLowerCase()) {
+      releaseLock(lockKey);
+      return res.status(400).json({ error: '❌ La transacción no es del token JHOAL' });
+    }
+
+    // Validación 5: Decodificar para obtener destinatario y monto
+    const iface = new ethers.Interface([
+      'function transfer(address to, uint256 amount) returns (bool)'
+    ]);
+    let decoded;
+    try {
+      decoded = iface.parseTransaction({ data: tx.data });
+    } catch (e) {
+      releaseLock(lockKey);
+      return res.status(400).json({ error: '❌ No se pudo decodificar la transacción' });
+    }
+
+    if (!decoded || decoded.name !== 'transfer') {
+      releaseLock(lockKey);
+      return res.status(400).json({ error: '❌ La transacción no es una transferencia válida' });
+    }
+
+    const toAddress = decoded.args.to.toLowerCase();
+    const amount = parseFloat(ethers.formatUnits(decoded.args.amount, 18));
+
+    // Validación 6: ¿El destinatario es la wallet del usuario logueado? (FILTRO ANTI-ROBO)
+    if (toAddress !== user.deposit_address.toLowerCase()) {
+      releaseLock(lockKey);
+      return res.status(400).json({ 
+        error: `❌ Esta transacción no fue enviada a tu wallet de depósito.\n\nTu wallet: ${user.deposit_address}\nDestino de la TX: ${decoded.args.to}` 
+      });
+    }
+
+    // Validación 7: ¿El monto es válido?
+    if (amount <= 0) {
+      releaseLock(lockKey);
+      return res.status(400).json({ error: '❌ Monto inválido (0 o negativo)' });
+    }
+
+    // Validación 8: ¿La transacción es reciente? (máximo 7 días)
+    const block = await p.getBlock(receipt.blockNumber);
+    const txTimestamp = block.timestamp;
+    const now = Math.floor(Date.now() / 1000);
+    const daysOld = (now - txTimestamp) / 86400;
+    
+    if (daysOld > VERIFY_DEPOSIT_MAX_DAYS) {
+      releaseLock(lockKey);
+      return res.status(400).json({ 
+        error: `⏰ Esta transacción es muy antigua (${Math.floor(daysOld)} días). El plazo máximo es ${VERIFY_DEPOSIT_MAX_DAYS} días. Contactá a @${SUPPORT_USERNAME}` 
+      });
+    }
+
+    // ¡TODO OK! Acreditar el depósito
+    await supabase.from('deposits').insert({
+      user_id: userId,
+      wallet: tx.from,
+      amount: amount,
+      tx_hash: txHash,
+      created_at: Math.floor(Date.now() / 1000),
+      verified_by: 'MANUAL'
+    });
+
+    const newWalletBalance = parseFloat(user.wallet_balance || 0) + amount;
+    await supabase.from('users_balance')
+      .update({ wallet_balance: newWalletBalance })
+      .eq('user_id', userId);
+
+    await addHistory(userId, 'deposit', amount, '💵 Depósito verificado por hash', null, txHash);
+
+    releaseLock(lockKey);
+    console.log(`✅ Depósito verificado: ${userId} +${amount} JHOAL | TX: ${txHash}`);
+
+    res.json({
+      success: true,
+      amount: amount,
+      newWalletBalance: newWalletBalance,
+      txHash: txHash,
+      explorer: `https://bscscan.com/tx/${txHash}`,
+      message: `✅ ¡Depósito de ${amount.toFixed(2)} JHOAL acreditado!`
+    });
+
+  } catch (e) {
+    releaseLock(lockKey);
+    console.error('❌ Error verificando depósito:', e.message);
+    res.status(500).json({ error: 'Error: ' + e.message });
+  }
+});
+
+// ==== SINCRONIZAR WALLET (respaldo por si el usuario no tiene el hash) ====
+app.post('/sync-wallet', requireAuth, async (req, res) => {
+  const userId = req.userId;
+  const lockKey = `sync_${userId}`;
+  if (!acquireLock(lockKey)) return res.status(429).json({ error: '⏳ Sincronización en proceso. Esperá.' });
+
+  try {
+    const user = await ensureUser(userId);
+    if (!user.deposit_address) {
+      releaseLock(lockKey);
+      return res.status(400).json({ error: 'No tienes wallet de depósito asignada' });
+    }
+
+    const p = await getProvider();
+    const realBalanceWei = await token.balanceOf(user.deposit_address);
+    const realBalance = parseFloat(ethers.formatUnits(realBalanceWei, 18));
+    const savedBalance = parseFloat(user.wallet_balance || 0);
+
+    const diff = realBalance - savedBalance;
+
+    releaseLock(lockKey);
+
+    if (diff <= 0) {
+      return res.json({
+        success: true,
+        synced: false,
+        message: '✅ Tu wallet está sincronizada. No hay depósitos pendientes.',
+        realBalance: realBalance,
+        savedBalance: savedBalance
+      });
+    }
+
+    return res.json({
+      success: true,
+      synced: true,
+      difference: diff,
+      message: `⚠️ Se detectaron ${diff.toFixed(2)} JHOAL en tu wallet que no están acreditados. Contactá a @${SUPPORT_USERNAME} con este mensaje para que te los acrediten.`,
+      realBalance: realBalance,
+      savedBalance: savedBalance
+    });
+
+  } catch (e) {
+    releaseLock(lockKey);
+    console.error('❌ Error en sync-wallet:', e.message);
+    res.status(500).json({ error: 'Error: ' + e.message });
+  }
 });
 
 app.post('/move-to-game', requireAuth, async (req, res) => {
@@ -1111,7 +1055,6 @@ app.post('/move-to-game', requireAuth, async (req, res) => {
     const realBalance = parseFloat(ethers.formatUnits(realBalanceWei, 18));
     if (realBalance < amount) { releaseLock(lockKey); return res.status(400).json({ error: 'La wallet no tiene fondos suficientes' }); }
     
-    // 🔥 Usamos txProvider y txWallet para las transacciones
     const bnbNeeded = ethers.parseEther('0.000002');
     const bnbBalance = await txProvider.getBalance(user.deposit_address);
     if (bnbBalance < bnbNeeded) { 
@@ -1120,7 +1063,7 @@ app.post('/move-to-game', requireAuth, async (req, res) => {
     }
     
     const pk = decryptPrivateKey(user.deposit_private_key);
-    const userSigner = new ethers.Wallet(pk, txProvider); // 🔥 Usa txProvider
+    const userSigner = new ethers.Wallet(pk, txProvider);
     const userToken = new ethers.Contract(TOKEN_ADDRESS, ABI, userSigner);
     const amountWei = ethers.parseUnits(amount.toString(), 18);
     const tx = await userToken.transfer(wallet.address, amountWei);
@@ -1274,7 +1217,6 @@ app.post('/withdraw', requireAuth, async (req, res) => {
     let tx;
     try {
       const amountWei = ethers.parseUnits(amount.toString(), 18);
-      // 🔥 Usamos txToken (conectado a txWallet) para el retiro
       tx = await txToken.transfer(userWallet, amountWei);
       await tx.wait();
     } catch (txErr) {
@@ -1472,7 +1414,7 @@ app.get('/history/:userId', requireAuth, async (req, res) => {
   } catch (error) { res.status(500).json({ error: 'Error: ' + error.message }); }
 });
 
-// ==== PRECIO JHOAL ====
+// ==== PRECIOS ====
 app.get('/price', async (req, res) => {
   try {
     const price = await getJhoalPrice();
@@ -1481,7 +1423,6 @@ app.get('/price', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ==== PRECIO BTC ====
 app.get('/btc-price', async (req, res) => {
   try {
     const price = await getBTCPrice();
@@ -1506,7 +1447,7 @@ app.get('/huerto-warning', (req, res) => {
   });
 });
 
-app.get('/', (req, res) => res.json({ status: 'Horus Faucet + Dados + Huerto + Historial + Luna Llena + Bendición + AdsGram + Referidos + Predicciones + hCaptcha funcionando' }));
+app.get('/', (req, res) => res.json({ status: 'Horus Faucet + Dados + Huerto + Historial + Luna Llena + Bendición + AdsGram + Referidos + Predicciones + hCaptcha + Verificación de Depósitos por Hash' }));
 
 // ==== ENDPOINTS DE PREDICCIÓN ====
 app.get('/prediction/current', requireAuth, async (req, res) => {
@@ -1798,14 +1739,15 @@ app.listen(process.env.PORT || 3000, () => {
   console.log('🔒 Locks anti-doble-click: ACTIVADOS');
   console.log('⏳ Cooldown de compra de plantas: ' + BUY_COOLDOWN + 's');
   console.log('🚫 Venta de plantas: DESHABILITADA');
-  console.log('⏳ Cooldown entre retiros: ' + WITHDRAW_COOLDOWN + 's')
+  console.log('⏳ Cooldown entre retiros: ' + WITHDRAW_COOLDOWN + 's');
   console.log('🎲 Dados: x0=46% | x1.1=41% | x2=6% | x4=3% | x6=2% | x8=1% | x10=1% | EV=0.991');
   console.log('🔮 Predicciones: rango ±$' + PREDICTION_RANGE + ' | SIN cooldown de anuncios');
   console.log('🪙 BTC: PancakeSwap BTCB/USDT');
   console.log('💰 JHOAL: PancakeSwap JHOAL/USDT');
   console.log('🔥 Wallet de quema: ' + BURN_WALLET);
   console.log('🧹 Limpieza automática de plantas: ACTIVADA');
-  console.log('📦 Monitor de depósitos: INICIADO (Bloque inicial: ' + MONITOR_START_BLOCK + ')');
+  console.log('✅ VERIFICACIÓN DE DEPÓSITOS POR HASH: ACTIVA');
+  console.log('⏰ Plazo máximo para verificar: ' + VERIFY_DEPOSIT_MAX_DAYS + ' días');
 
   cleanupOldPlants();
   cleanupExpiredPlants();
@@ -1817,7 +1759,4 @@ app.listen(process.env.PORT || 3000, () => {
 
   setInterval(sendPendingBurns, 60 * 60 * 1000);
   scheduleBurnAtMidnight();
-
-  setInterval(checkDeposits, 3 * 60 * 1000);
-  setTimeout(checkDeposits, 15 * 1000);
 });
