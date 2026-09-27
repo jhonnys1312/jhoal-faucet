@@ -128,9 +128,9 @@ async function verificarHCaptcha(token, remoteip) {
 
 // ==== MONITOR DE DEPÓSITOS ====
 const MONITOR_START_BLOCK = 124214834;
-const BATCH_SIZE = 100;
-const BLOCKS_PER_CYCLE = 500;
-const BATCH_DELAY_MS = 500;
+const BATCH_SIZE = 5;
+const BLOCKS_PER_CYCLE = 50;
+const BATCH_DELAY_MS = 200;
 
 // ==== LUNA LLENA ====
 const MOON_GROWTH_MULTIPLIER = 1.9;
