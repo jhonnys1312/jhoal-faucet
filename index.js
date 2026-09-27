@@ -127,10 +127,10 @@ async function verificarHCaptcha(token, remoteip) {
 }
 
 // ==== MONITOR DE DEPÓSITOS ====
-const MONITOR_START_BLOCK = 124249851;
+const MONITOR_START_BLOCK = 124251419 ;
 const BATCH_SIZE = 5;
-const BLOCKS_PER_CYCLE = 200;
-const BATCH_DELAY_MS = 1000;
+const BLOCKS_PER_CYCLE = 500;
+const BATCH_DELAY_MS = 200;
 
 // ==== LUNA LLENA ====
 const MOON_GROWTH_MULTIPLIER = 1.9;
