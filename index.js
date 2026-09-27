@@ -127,7 +127,7 @@ async function verificarHCaptcha(token, remoteip) {
 }
 
 // ==== MONITOR DE DEPÓSITOS ====
-const MONITOR_START_BLOCK = 124214834;
+const MONITOR_START_BLOCK = 124249851;
 const BATCH_SIZE = 5;
 const BLOCKS_PER_CYCLE = 200;
 const BATCH_DELAY_MS = 1000;
