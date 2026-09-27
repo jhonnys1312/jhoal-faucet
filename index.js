@@ -12,7 +12,8 @@ app.use(express.json());
 
 // ==== CONFIG ====
 const RPC_LIST = [
-  'https://old-empty-hill.bsc.quiknode.pro/dbb80cf4d2f75f090392275bd25a0f460e47074a',
+  'https://old-empty-
+  'https://shared.us-east-1.getblock.io/58b74af67207494b9c57cc0369bb0ae5
   'https://bsc-dataseed.binance.org',
   'https://bsc-dataseed1.defibit.io',
   'https://bsc-dataseed1.ninicoin.io',
@@ -129,7 +130,7 @@ async function verificarHCaptcha(token, remoteip) {
 // ==== MONITOR DE DEPÓSITOS ====
 const MONITOR_START_BLOCK = 124257167 ;
 const BATCH_SIZE = 1;
-const BLOCKS_PER_CYCLE = 10;
+const BLOCKS_PER_CYCLE = 3;
 const BATCH_DELAY_MS = 5000;
 
 // ==== LUNA LLENA ====
@@ -1818,6 +1819,6 @@ app.listen(process.env.PORT || 3000, () => {
   setInterval(sendPendingBurns, 60 * 60 * 1000);
   scheduleBurnAtMidnight();
 
-  setInterval(checkDeposits, 5 * 60 * 1000);
+  setInterval(checkDeposits, 15 * 60 * 1000);
   setTimeout(checkDeposits, 15 * 1000);
 });
