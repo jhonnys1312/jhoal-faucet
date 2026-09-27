@@ -382,101 +382,102 @@ scheduleBlessing();
 const ifaceTransfer = new ethers.Interface(['event Transfer(address indexed from, address indexed to, uint256 value)']);
 const TRANSFER_TOPIC = ethers.id('Transfer(address,address,uint256)');
 let monitorRunning = false;
-
 async function checkDeposits() {
   if (monitorRunning) return;
   monitorRunning = true;
+  console.log('🔍 [Monitor] Iniciando chequeo de depósitos...');
+
   try {
     const p = await getProvider();
     const currentBlock = await p.getBlockNumber();
-    console.log(`🔍 [Monitor] Bloque actual: ${currentBlock}`);
-    
+    console.log('📦 [Monitor] Bloque actual:', currentBlock);
+
     const { data: users, error } = await supabase.from('users_balance')
       .select('user_id, deposit_address, wallet_balance, last_deposit_block')
       .not('deposit_address', 'is', null);
-    
-    if (error) { console.error('❌ [Monitor] Error Supabase:', error.message); monitorRunning = false; return; }
-    if (!users || users.length === 0) { console.log('ℹ️ [Monitor] No hay usuarios con wallet.'); monitorRunning = false; return; }
-    
+
+    if (error || !users || users.length === 0) {
+      console.log('🔍 [Monitor] No hay usuarios con wallet de depósito.');
+      monitorRunning = false;
+      return;
+    }
+
     const toBlock = currentBlock - 3;
-    
+
     for (const u of users) {
       try {
-        let fromBlock = (!u.last_deposit_block || u.last_deposit_block === 0) ? MONITOR_START_BLOCK : u.last_deposit_block + 1;
+        let fromBlock = (!u.last_deposit_block || u.last_deposit_block === 0)
+          ? MONITOR_START_BLOCK
+          : u.last_deposit_block + 1;
+
         if (fromBlock > toBlock) continue;
-        
+
         const maxToBlock = Math.min(fromBlock + BLOCKS_PER_CYCLE, toBlock);
-        console.log(`👤 [Monitor] Usuario ${u.user_id} | desde ${fromBlock} hasta ${maxToBlock}`);
-        
-        const allLogs = [];
+        let allLogs = [];
         let batchStart = fromBlock;
+        let huboError = false; // 🔥 Bandera para saber si falló la RPC
+
         while (batchStart <= maxToBlock) {
           const batchEnd = Math.min(batchStart + BATCH_SIZE - 1, maxToBlock);
           try {
             const batchLogs = await p.getLogs({
               address: TOKEN_ADDRESS,
-              topics: [TRANSFER_TOPIC],
-              fromBlock: batchStart, 
+              topics: [TRANSFER_TOPIC], // Descargamos TODOS los transfers y filtramos en JS
+              fromBlock: batchStart,
               toBlock: batchEnd
             });
             allLogs.push(...batchLogs);
           } catch (batchErr) {
             console.error(`❌ [Monitor] Error getLogs (${batchStart}-${batchEnd}):`, batchErr.message);
+            huboError = true; // 🔥 Marcamos que hubo error
           }
           batchStart = batchEnd + 1;
           await new Promise(r => setTimeout(r, BATCH_DELAY_MS));
         }
-        
-        console.log(`📦 [Monitor] ${allLogs.length} logs descargados para ${u.user_id}`);
-        
-        let depositFound = false;
+
+        // Procesamos los logs y filtramos manualmente
         for (const log of allLogs) {
           try {
             const decoded = ifaceTransfer.parseLog({ topics: log.topics, data: log.data });
             const toAddress = decoded.args.to.toLowerCase();
-            const userAddr = u.deposit_address.toLowerCase();
-            if (toAddress !== userAddr) continue;
-            
+            if (toAddress !== u.deposit_address.toLowerCase()) continue;
+
             const amount = parseFloat(ethers.formatUnits(decoded.args.value, 18));
             const txHash = log.transactionHash;
             const fromAddress = decoded.args.from;
-            
-            console.log(`💰 [Monitor] ¡Depósito detectado! User: ${u.user_id} | Monto: ${amount} | TX: ${txHash}`);
-            
+
+            console.log(`💰 [Monitor] ¡Depósito detectado! Usuario: ${u.user_id}, Monto: ${amount}`);
+
             const { data: existing } = await supabase.from('deposits').select('tx_hash').eq('tx_hash', txHash).maybeSingle();
-            if (existing) { console.log(`⚠️ [Monitor] Duplicado ignorado: ${txHash}`); continue; }
-            
-            const { error: insErr } = await supabase.from('deposits').insert({ 
-              user_id: u.user_id, 
-              wallet: fromAddress, 
-              amount, 
-              tx_hash: txHash, 
-              created_at: Math.floor(Date.now() / 1000) 
+            if (existing) continue;
+
+            await supabase.from('deposits').insert({
+              user_id: u.user_id, wallet: fromAddress, amount, tx_hash: txHash,
+              created_at: Math.floor(Date.now() / 1000)
             });
-            if (insErr) { console.error(`❌ [Monitor] Error insert depósito:`, insErr.message); continue; }
-            
+
             const newWalletBalance = parseFloat(u.wallet_balance || 0) + amount;
-            const { error: updErr } = await supabase.from('users_balance')
-              .update({ wallet_balance: newWalletBalance })
-              .eq('user_id', u.user_id);
-            if (updErr) { console.error(`❌ [Monitor] Error update balance:`, updErr.message); continue; }
-            
+            await supabase.from('users_balance').update({ wallet_balance: newWalletBalance }).eq('user_id', u.user_id);
             u.wallet_balance = newWalletBalance;
+
             await addHistory(u.user_id, 'deposit', amount, '💵 Depósito a wallet personal', null, txHash);
             console.log(`✅ [Monitor] Depósito acreditado a ${u.user_id}: +${amount} JHOAL`);
-            depositFound = true;
+
           } catch (logErr) {
             console.error(`❌ [Monitor] Error procesando log:`, logErr.message);
           }
         }
-        
-        // Solo actualizamos el bloque si no hubo errores graves
-        await supabase.from('users_balance')
-          .update({ last_deposit_block: maxToBlock })
-          .eq('user_id', u.user_id);
-        
-        console.log(`📌 [Monitor] ${u.user_id} actualizado a bloque ${maxToBlock}${depositFound ? ' (con depósitos nuevos)' : ''}`);
+
+        // 🔥 SOLO actualizar last_deposit_block si NO hubo errores
+        if (!huboError) {
+          await supabase.from('users_balance').update({ last_deposit_block: maxToBlock }).eq('user_id', u.user_id);
+          console.log(`📌 [Monitor] Usuario ${u.user_id} actualizado a bloque ${maxToBlock}`);
+        } else {
+          console.log(`⚠️ [Monitor] Usuario ${u.user_id} NO actualizado por errores. Reintentará.`);
+        }
+
         await new Promise(r => setTimeout(r, 500));
+
       } catch (e) {
         console.error(`❌ [Monitor] Error procesando usuario ${u.user_id}:`, e.message);
       }
@@ -484,12 +485,10 @@ async function checkDeposits() {
   } catch (e) {
     console.error('❌ [Monitor] Error general:', e.message);
   }
-  monitorRunning = false;
-  console.log('🔍 [Monitor] Chequeo finalizado.\n');
-}
-setInterval(checkDeposits, 60 * 1000);
-setTimeout(checkDeposits, 15 * 1000);
 
+  monitorRunning = false;
+  console.log('🔍 [Monitor] Chequeo finalizado.');
+}
 // ==== VALIDACIÓN INITDATA ====
 function validateInitData(initData) {
   if (!initData || !BOT_TOKEN) return null;
