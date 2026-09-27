@@ -127,10 +127,10 @@ async function verificarHCaptcha(token, remoteip) {
 }
 
 // ==== MONITOR DE DEPÓSITOS ====
-const MONITOR_START_BLOCK = 124251419 ;
+const MONITOR_START_BLOCK = 124252566;
 const BATCH_SIZE = 5;
-const BLOCKS_PER_CYCLE = 500;
-const BATCH_DELAY_MS = 200;
+const BLOCKS_PER_CYCLE = 50;
+const BATCH_DELAY_MS = 150;
 
 // ==== LUNA LLENA ====
 const MOON_GROWTH_MULTIPLIER = 1.9;
@@ -387,108 +387,134 @@ let monitorRunning = false;
 async function checkDeposits() {
   if (monitorRunning) return;
   monitorRunning = true;
-  console.log('🔍 [Monitor] Iniciando chequeo de depósitos...');
 
   try {
     const p = await getProvider();
     const currentBlock = await p.getBlockNumber();
-    console.log('📦 [Monitor] Bloque actual:', currentBlock);
 
     const { data: users, error } = await supabase.from('users_balance')
       .select('user_id, deposit_address, wallet_balance, last_deposit_block')
       .not('deposit_address', 'is', null);
 
     if (error || !users || users.length === 0) {
-      console.log('🔍 [Monitor] No hay usuarios con wallet de depósito.');
       monitorRunning = false;
       return;
     }
 
+    // Bloque más bajo entre todos los usuarios
+    const bloques = users
+      .map(u => u.last_deposit_block || MONITOR_START_BLOCK)
+      .filter(b => b !== null && b !== undefined);
+    
+    if (bloques.length === 0) {
+      monitorRunning = false;
+      return;
+    }
+
+    const fromBlockGlobal = Math.min(...bloques) + 1;
     const toBlock = currentBlock - 3;
 
-    for (const u of users) {
+    if (fromBlockGlobal > toBlock) {
+      monitorRunning = false;
+      return;
+    }
+
+    console.log(`🔍 [Monitor] Escaneando ${fromBlockGlobal} a ${toBlock} (${toBlock - fromBlockGlobal} bloques)`);
+
+    // 🔥 CLAVE: Pedimos bloques de 5 en 5 pero en UNA SOLA petición por lote
+    let allLogs = [];
+    let batchStart = fromBlockGlobal;
+    const BATCH_SIZE = 5; // Límite de QuickNode
+
+    while (batchStart <= toBlock) {
+      const batchEnd = Math.min(batchStart + BATCH_SIZE - 1, toBlock);
+      
       try {
-        let fromBlock = (!u.last_deposit_block || u.last_deposit_block === 0)
-          ? MONITOR_START_BLOCK
-          : u.last_deposit_block + 1;
+        const batchLogs = await p.getLogs({
+          address: TOKEN_ADDRESS,
+          topics: [TRANSFER_TOPIC],
+          fromBlock: batchStart,
+          toBlock: batchEnd
+        });
+        allLogs.push(...batchLogs);
+      } catch (batchErr) {
+        console.error(`❌ Error getLogs (${batchStart}-${batchEnd}):`, batchErr.message);
+        await new Promise(r => setTimeout(r, 2000));
+        continue;
+      }
+      
+      batchStart = batchEnd + 1;
+      await new Promise(r => setTimeout(r, 150)); // Pausa corta pero segura
+    }
 
-        if (fromBlock > toBlock) continue;
+    console.log(`📥 [Monitor] ${allLogs.length} transfers encontrados`);
 
-        const maxToBlock = Math.min(fromBlock + BLOCKS_PER_CYCLE, toBlock);
-        let allLogs = [];
-        let batchStart = fromBlock;
-        let lastSuccessfulBlock = fromBlock - 1;
+    // Procesamos los logs
+    const userMap = {};
+    users.forEach(u => {
+      userMap[u.deposit_address.toLowerCase()] = u;
+    });
 
-        while (batchStart <= maxToBlock) {
-          const batchEnd = Math.min(batchStart + BATCH_SIZE - 1, maxToBlock);
-          try {
-            const batchLogs = await p.getLogs({
-              address: TOKEN_ADDRESS,
-              topics: [TRANSFER_TOPIC],
-              fromBlock: batchStart,
-              toBlock: batchEnd
-            });
-            allLogs.push(...batchLogs);
-            lastSuccessfulBlock = batchEnd;
-          } catch (batchErr) {
-            console.error(`❌ [Monitor] Error getLogs (${batchStart}-${batchEnd}):`, batchErr.message);
-            await new Promise(r => setTimeout(r, 2000));
-          }
-          batchStart = batchEnd + 1;
-          await new Promise(r => setTimeout(r, BATCH_DELAY_MS));
-        }
+    let depositosAcreditados = 0;
 
-        for (const log of allLogs) {
-          try {
-            const decoded = ifaceTransfer.parseLog({ topics: log.topics, data: log.data });
-            const toAddress = decoded.args.to.toLowerCase();
-            if (toAddress !== u.deposit_address.toLowerCase()) continue;
+    for (const log of allLogs) {
+      try {
+        const decoded = ifaceTransfer.parseLog({ topics: log.topics, data: log.data });
+        const toAddress = decoded.args.to.toLowerCase();
+        const user = userMap[toAddress];
+        if (!user) continue;
 
-            const amount = parseFloat(ethers.formatUnits(decoded.args.value, 18));
-            const txHash = log.transactionHash;
-            const fromAddress = decoded.args.from;
+        const blockNum = log.blockNumber;
+        if (user.last_deposit_block && blockNum <= user.last_deposit_block) continue;
 
-            console.log(`💰 [Monitor] ¡Depósito detectado! Usuario: ${u.user_id}, Monto: ${amount}`);
+        const amount = parseFloat(ethers.formatUnits(decoded.args.value, 18));
+        const txHash = log.transactionHash;
+        const fromAddress = decoded.args.from;
 
-            const { data: existing } = await supabase.from('deposits').select('tx_hash').eq('tx_hash', txHash).maybeSingle();
-            if (existing) continue;
+        const { data: existing } = await supabase.from('deposits').select('tx_hash').eq('tx_hash', txHash).maybeSingle();
+        if (existing) continue;
 
-            await supabase.from('deposits').insert({
-              user_id: u.user_id, wallet: fromAddress, amount, tx_hash: txHash,
-              created_at: Math.floor(Date.now() / 1000)
-            });
+        await supabase.from('deposits').insert({
+          user_id: user.user_id, wallet: fromAddress, amount, tx_hash: txHash,
+          created_at: Math.floor(Date.now() / 1000)
+        });
 
-            const newWalletBalance = parseFloat(u.wallet_balance || 0) + amount;
-            await supabase.from('users_balance').update({ wallet_balance: newWalletBalance }).eq('user_id', u.user_id);
-            u.wallet_balance = newWalletBalance;
+        const newWalletBalance = parseFloat(user.wallet_balance || 0) + amount;
+        await supabase.from('users_balance').update({ 
+          wallet_balance: newWalletBalance,
+          last_deposit_block: blockNum 
+        }).eq('user_id', user.user_id);
+        
+        user.wallet_balance = newWalletBalance;
+        user.last_deposit_block = blockNum;
 
-            await addHistory(u.user_id, 'deposit', amount, '💵 Depósito a wallet personal', null, txHash);
-            console.log(`✅ [Monitor] Depósito acreditado a ${u.user_id}: +${amount} JHOAL`);
+        await addHistory(user.user_id, 'deposit', amount, '💵 Depósito a wallet personal', null, txHash);
+        console.log(`✅ Depósito: ${user.user_id} +${amount} JHOAL`);
+        depositosAcreditados++;
 
-          } catch (logErr) {
-            console.error(`❌ [Monitor] Error procesando log:`, logErr.message);
-          }
-        }
-
-        if (lastSuccessfulBlock >= fromBlock) {
-          await supabase.from('users_balance').update({ last_deposit_block: lastSuccessfulBlock }).eq('user_id', u.user_id);
-          console.log(`📌 [Monitor] Usuario ${u.user_id} actualizado a bloque ${lastSuccessfulBlock}`);
-        } else {
-          console.log(`⚠️ [Monitor] Usuario ${u.user_id} no pudo avanzar. Reintentará desde ${fromBlock}.`);
-        }
-
-        await new Promise(r => setTimeout(r, 1000));
-
-      } catch (e) {
-        console.error(`❌ [Monitor] Error procesando usuario ${u.user_id}:`, e.message);
+      } catch (logErr) {
+        console.error(`❌ Error procesando log:`, logErr.message);
       }
     }
+
+    // Actualizamos last_deposit_block de todos los usuarios al bloque final
+    if (allLogs.length > 0 || fromBlockGlobal <= toBlock) {
+      for (const u of users) {
+        if (u.last_deposit_block < toBlock) {
+          await supabase.from('users_balance')
+            .update({ last_deposit_block: toBlock })
+            .eq('user_id', u.user_id);
+        }
+      }
+    }
+
+    console.log(`✅ [Monitor] Chequeo finalizado. Depósitos acreditados: ${depositosAcreditados}`);
+
   } catch (e) {
     console.error('❌ [Monitor] Error general:', e.message);
   }
 
   monitorRunning = false;
-  console.log('🔍 [Monitor] Chequeo finalizado.');
 }
 
 // ==== VALIDACIÓN INITDATA ====
@@ -1759,7 +1785,7 @@ app.listen(process.env.PORT || 3000, () => {
   console.log('🔒 Locks anti-doble-click: ACTIVADOS');
   console.log('⏳ Cooldown de compra de plantas: ' + BUY_COOLDOWN + 's');
   console.log('🚫 Venta de plantas: DESHABILITADA');
-  console.log('⏳ Cooldown entre retiros: ' + WITHDRAW_COOLDOWN + 's');
+  console.log('⏳ Cooldown entre retiros: ' + WITHDRAW_COOLDOWN + 's')
   console.log('🎲 Dados: x0=46% | x1.1=41% | x2=6% | x4=3% | x6=2% | x8=1% | x10=1% | EV=0.991');
   console.log('🔮 Predicciones: rango ±$' + PREDICTION_RANGE + ' | SIN cooldown de anuncios');
   console.log('🪙 BTC: PancakeSwap BTCB/USDT');
