@@ -163,8 +163,13 @@ const BTC_CACHE_MS = 60 * 1000;
 let jhoalPriceCache = { price: 0, updatedAt: 0 };
 const JHOAL_CACHE_MS = 60 * 1000;
 
+// 🔥 PROVIDER PRINCIPAL (QuickNode) - Solo para lectura y monitor
 const provider = new ethers.JsonRpcProvider(RPC_LIST[0]);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
+
+// 🔥 PROVIDER PARA TRANSACCIONES (BSC Público) - Soluciona el error de getFeeData
+const txProvider = new ethers.JsonRpcProvider('https://bsc-dataseed1.binance.org');
+const txWallet = new ethers.Wallet(PRIVATE_KEY, txProvider);
 
 const ABI = [
   'function transfer(address to, uint256 amount) returns (bool)',
@@ -173,6 +178,7 @@ const ABI = [
   'function symbol() view returns (string)'
 ];
 const token = new ethers.Contract(TOKEN_ADDRESS, ABI, wallet);
+const txToken = new ethers.Contract(TOKEN_ADDRESS, ABI, txWallet);
 
 const PAIR_ABI = [
   'function getReserves() view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast)',
@@ -988,7 +994,7 @@ async function sendPendingBurns() {
     console.log(`🔥 Enviando ${totalBurn.toFixed(2)} JHOAL a quema...`);
 
     const amountWei = ethers.parseUnits(totalBurn.toFixed(18), 18);
-    const tx = await token.transfer(BURN_WALLET, amountWei);
+    const tx = await txToken.transfer(BURN_WALLET, amountWei);
     await tx.wait();
 
     const now = Math.floor(Date.now() / 1000);
@@ -1104,11 +1110,17 @@ app.post('/move-to-game', requireAuth, async (req, res) => {
     const realBalanceWei = await token.balanceOf(user.deposit_address);
     const realBalance = parseFloat(ethers.formatUnits(realBalanceWei, 18));
     if (realBalance < amount) { releaseLock(lockKey); return res.status(400).json({ error: 'La wallet no tiene fondos suficientes' }); }
+    
+    // 🔥 Usamos txProvider y txWallet para las transacciones
     const bnbNeeded = ethers.parseEther('0.000002');
-    const bnbBalance = await provider.getBalance(user.deposit_address);
-    if (bnbBalance < bnbNeeded) { const bnbTx = await wallet.sendTransaction({ to: user.deposit_address, value: bnbNeeded }); await bnbTx.wait(); }
+    const bnbBalance = await txProvider.getBalance(user.deposit_address);
+    if (bnbBalance < bnbNeeded) { 
+      const bnbTx = await txWallet.sendTransaction({ to: user.deposit_address, value: bnbNeeded }); 
+      await bnbTx.wait(); 
+    }
+    
     const pk = decryptPrivateKey(user.deposit_private_key);
-    const userSigner = new ethers.Wallet(pk, provider);
+    const userSigner = new ethers.Wallet(pk, txProvider); // 🔥 Usa txProvider
     const userToken = new ethers.Contract(TOKEN_ADDRESS, ABI, userSigner);
     const amountWei = ethers.parseUnits(amount.toString(), 18);
     const tx = await userToken.transfer(wallet.address, amountWei);
@@ -1262,7 +1274,8 @@ app.post('/withdraw', requireAuth, async (req, res) => {
     let tx;
     try {
       const amountWei = ethers.parseUnits(amount.toString(), 18);
-      tx = await token.transfer(userWallet, amountWei);
+      // 🔥 Usamos txToken (conectado a txWallet) para el retiro
+      tx = await txToken.transfer(userWallet, amountWei);
       await tx.wait();
     } catch (txErr) {
       console.error('❌ TX falló, revirtiendo débito:', txErr.message);
