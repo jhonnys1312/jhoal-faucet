@@ -12,7 +12,6 @@ app.use(express.json());
 
 // ==== CONFIG ====
 const RPC_LIST = [
-  'https://old-empty-
   'https://shared.us-east-1.getblock.io/58b74af67207494b9c57cc0369bb0ae5',
   'https://bsc-dataseed.binance.org',
   'https://bsc-dataseed1.defibit.io',
