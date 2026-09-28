@@ -57,7 +57,7 @@ const COOLDOWN = 30 * 60;
 const MIN_BET = 0.1;
 const MAX_BET = 1000;
 const WITHDRAW_COOLDOWN = 5 * 60;
-const VERIFY_DEPOSIT_MAX_DAYS = 7; // Días máximos para verificar un depósito
+const VERIFY_DEPOSIT_MAX_DAYS = 7;
 
 // ==== REFERIDOS ====
 const REFERRAL_REWARD = 1000;
@@ -858,12 +858,11 @@ app.post('/my-deposit-wallet', requireAuth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ==== VERIFICAR DEPÓSITO POR HASH (NUEVO) ====
+// ==== VERIFICAR DEPÓSITO POR HASH ====
 app.post('/verify-deposit', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { txHash } = req.body;
 
-  // Validación 1: Formato del hash
   if (!txHash || typeof txHash !== 'string' || !txHash.startsWith('0x') || txHash.length !== 66) {
     return res.status(400).json({ error: 'Hash de transacción inválido' });
   }
@@ -880,7 +879,6 @@ app.post('/verify-deposit', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'No tienes wallet de depósito asignada' });
     }
 
-    // Validación 2: ¿Ya fue acreditada antes? (SIN gastar CU)
     const { data: existing } = await supabase.from('deposits').select('tx_hash, amount').eq('tx_hash', txHash).maybeSingle();
     if (existing) {
       releaseLock(lockKey);
@@ -889,7 +887,6 @@ app.post('/verify-deposit', requireAuth, async (req, res) => {
       });
     }
 
-    // Validación 3: Consultar la blockchain (GASTA CU)
     const p = await getProvider();
     const tx = await p.getTransaction(txHash);
     const receipt = await p.getTransactionReceipt(txHash);
@@ -904,13 +901,11 @@ app.post('/verify-deposit', requireAuth, async (req, res) => {
       return res.status(400).json({ error: '❌ La transacción falló en la blockchain' });
     }
 
-    // Validación 4: ¿El destino es el contrato de JHOAL?
     if (!tx.to || tx.to.toLowerCase() !== TOKEN_ADDRESS.toLowerCase()) {
       releaseLock(lockKey);
       return res.status(400).json({ error: '❌ La transacción no es del token JHOAL' });
     }
 
-    // Validación 5: Decodificar para obtener destinatario y monto
     const iface = new ethers.Interface([
       'function transfer(address to, uint256 amount) returns (bool)'
     ]);
@@ -930,7 +925,6 @@ app.post('/verify-deposit', requireAuth, async (req, res) => {
     const toAddress = decoded.args.to.toLowerCase();
     const amount = parseFloat(ethers.formatUnits(decoded.args.amount, 18));
 
-    // Validación 6: ¿El destinatario es la wallet del usuario logueado? (FILTRO ANTI-ROBO)
     if (toAddress !== user.deposit_address.toLowerCase()) {
       releaseLock(lockKey);
       return res.status(400).json({ 
@@ -938,13 +932,11 @@ app.post('/verify-deposit', requireAuth, async (req, res) => {
       });
     }
 
-    // Validación 7: ¿El monto es válido?
     if (amount <= 0) {
       releaseLock(lockKey);
       return res.status(400).json({ error: '❌ Monto inválido (0 o negativo)' });
     }
 
-    // Validación 8: ¿La transacción es reciente? (máximo 7 días)
     const block = await p.getBlock(receipt.blockNumber);
     const txTimestamp = block.timestamp;
     const now = Math.floor(Date.now() / 1000);
@@ -957,7 +949,6 @@ app.post('/verify-deposit', requireAuth, async (req, res) => {
       });
     }
 
-    // ¡TODO OK! Acreditar el depósito
     await supabase.from('deposits').insert({
       user_id: userId,
       wallet: tx.from,
@@ -993,7 +984,7 @@ app.post('/verify-deposit', requireAuth, async (req, res) => {
   }
 });
 
-// ==== SINCRONIZAR WALLET (respaldo por si el usuario no tiene el hash) ====
+// ==== SINCRONIZAR WALLET ====
 app.post('/sync-wallet', requireAuth, async (req, res) => {
   const userId = req.userId;
   const lockKey = `sync_${userId}`;
@@ -1341,7 +1332,6 @@ app.post('/harvest', requireAuth, async (req, res) => {
   } catch (error) { releaseLock(lockKey); res.status(500).json({ error: 'Error: ' + error.message }); }
 });
 
-// ==== SELL PLANT (DESHABILITADO) ====
 app.post('/sell-plant', requireAuth, async (req, res) => {
   return res.status(400).json({ error: '🚫 La venta de plantas está deshabilitada. Las plantas duran 30 días y luego expiran automáticamente.' });
 });
@@ -1414,7 +1404,6 @@ app.get('/history/:userId', requireAuth, async (req, res) => {
   } catch (error) { res.status(500).json({ error: 'Error: ' + error.message }); }
 });
 
-// ==== PRECIOS ====
 app.get('/price', async (req, res) => {
   try {
     const price = await getJhoalPrice();
@@ -1507,6 +1496,7 @@ app.get('/prediction/current', requireAuth, async (req, res) => {
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
+
 app.post('/prediction/watch-ad', requireAuth, async (req, res) => {
   const userId = req.userId;
   const lockKey = `pred_ad_${userId}`;
@@ -1516,7 +1506,6 @@ app.post('/prediction/watch-ad', requireAuth, async (req, res) => {
     const user = await ensureUser(userId);
     const now = Math.floor(Date.now() / 1000);
     
-    // ===== VALIDACIÓN 1: ¿Está bloqueado? =====
     const blockedUntil = parseInt(user.prediction_blocked_until || 0);
     if (blockedUntil > now) {
       releaseLock(lockKey);
@@ -1527,9 +1516,7 @@ app.post('/prediction/watch-ad', requireAuth, async (req, res) => {
         error: `🚨 ACTIVIDAD SOSPECHOSA DETECTADA. Tu cuenta está suspendida temporalmente. Debes esperar ${horas}h ${minutos}m para la verificación. Si crees que es un error, contacta a @Jhoalsupportbot.` 
       });
     }
-    // ==========================================
     
-    // ===== VALIDACIÓN 2: Contar rondas en la última hora =====
     const unaHoraAtras = now - 3600;
     const { count, error: countErr } = await supabase
       .from('history')
@@ -1543,9 +1530,8 @@ app.post('/prediction/watch-ad', requireAuth, async (req, res) => {
       return res.status(500).json({ error: 'Error interno' });
     }
     
-    // Si ya tiene 16 o más rondas en la última hora → BLOQUEAR
     if (count >= 16) {
-      const bloqueadoHasta = now + 86400; // 24 horas
+      const bloqueadoHasta = now + 86400;
       await supabase.from('users_balance')
         .update({ prediction_blocked_until: bloqueadoHasta })
         .eq('user_id', userId);
@@ -1556,24 +1542,18 @@ app.post('/prediction/watch-ad', requireAuth, async (req, res) => {
         error: `🚨 ACTIVIDAD SOSPECHOSA DETECTADA. Tu cuenta ha sido suspendida por seguridad. Nuestro sistema verificará tu actividad en las próximas 24 horas. Si crees que es un error, contacta a @Jhoalsupportbot.` 
       });
     }
-    // =========================================================
     
-    // ===== VALIDACIÓN 3: Cooldown anti-spam de 3 segundos =====
     if (user.last_prediction_ad && now - user.last_prediction_ad < 3) {
       releaseLock(lockKey);
       return res.status(429).json({ error: '⏳ Esperá ' + (3 - (now - user.last_prediction_ad)) + 's' });
     }
-    // ==========================================================
     
-    // ===== VALIDACIÓN 4: Hay ronda activa =====
     const round = await ensurePredictionRound();
     if (!round || round.status !== 'open') { 
       releaseLock(lockKey); 
       return res.status(400).json({ error: 'No hay ronda activa. Esperá la próxima.' }); 
     }
-    // ==========================================
     
-    // ===== TODO OK: Aportar a la pool =====
     const newAdsPool = parseFloat(round.ads_pool || 0) + PREDICTION_AD_REWARD;
     const newTotalPool = parseFloat(round.total_pool || 0) + PREDICTION_AD_REWARD;
     
@@ -1602,6 +1582,39 @@ app.post('/prediction/watch-ad', requireAuth, async (req, res) => {
     releaseLock(lockKey); 
     res.status(500).json({ error: e.message }); 
   }
+});
+
+app.post('/prediction/bet', requireAuth, async (req, res) => {
+  const userId = req.userId;
+  const { predictedPrice } = req.body;
+  if (!predictedPrice || isNaN(predictedPrice) || predictedPrice <= 0) return res.status(400).json({ error: 'Precio inválido' });
+  const lockKey = `prediction_${userId}`;
+  if (!acquireLock(lockKey)) return res.status(429).json({ error: '⏳ Esperá un momento' });
+  try {
+    const user = await ensureUser(userId);
+    const now = Math.floor(Date.now() / 1000);
+    const roundNumber = Math.floor(now / PREDICTION_ROUND_DURATION);
+    const { data: round } = await supabase.from('prediction_rounds').select('*').eq('round_number', roundNumber).maybeSingle();
+    if (!round || round.status !== 'open') { releaseLock(lockKey); return res.status(400).json({ error: 'No hay ronda activa. Esperá la próxima.' }); }
+    const adRecent = user.last_prediction_ad && (now - user.last_prediction_ad) <= (PREDICTION_ROUND_DURATION / 2);
+    const adThisRound = user.last_prediction_ad && user.last_prediction_ad >= round.started_at;
+    if (!adRecent && !adThisRound) { releaseLock(lockKey); return res.status(403).json({ error: 'AD_REQUIRED', message: '📺 Mirá un anuncio para predecir' }); }
+    if (now >= round.closes_at) { releaseLock(lockKey); return res.status(400).json({ error: 'La ronda ya cerró' }); }
+    if (now >= round.closes_at - PREDICTION_BLOCK_LAST_SECONDS) { releaseLock(lockKey); return res.status(400).json({ error: '⏰ Últimos segundos. Esperá la próxima ronda.' }); }
+    const startPrice = parseFloat(round.start_price);
+    const minPrice = startPrice * 0.8;
+    const maxPrice = startPrice * 1.2;
+    if (predictedPrice < minPrice || predictedPrice > maxPrice) {
+      releaseLock(lockKey);
+      return res.status(400).json({ error: `El precio debe estar entre $${minPrice.toFixed(2)} y $${maxPrice.toFixed(2)}` });
+    }
+    const { data: existing } = await supabase.from('predictions').select('id').eq('round_id', round.id).eq('user_id', userId).maybeSingle();
+    if (existing) { releaseLock(lockKey); return res.status(400).json({ error: 'Ya hiciste tu predicción para esta ronda' }); }
+    await supabase.from('predictions').insert({ round_id: round.id, user_id: userId, predicted_price: predictedPrice, created_at: now });
+    await addHistory(userId, 'prediction_bet', 0, `🔮 Predijiste $${predictedPrice} para Ronda #${round.round_number}`, null, null);
+    releaseLock(lockKey);
+    res.json({ success: true, message: `¡Predicción registrada! $${predictedPrice}`, predictedPrice });
+  } catch (e) { releaseLock(lockKey); res.status(500).json({ error: e.message }); }
 });
 
 app.get('/prediction/history/:userId', requireAuth, async (req, res) => {
@@ -1683,14 +1696,20 @@ if (BOT_TOKEN) {
       '🎁 Gana *1000 JHOAL* por cada amigo que invites\n' +
       '📜 Mirá tu *Historial*\n\n' +
       '👉 Toca "Abrir Horus Faucet" para empezar.',
-      { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '🏛 Abrir Horus Faucet', web_app: { url: MINI_APP_URL } }]] } }
+      { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [
+        [{ text: '🏛 Abrir Horus Faucet', web_app: { url: MINI_APP_URL } }],
+        [{ text: '💬 Únete al Grupo', url: 'https://t.me/horusfaucet' }]
+      ] } }
     );
   });
 
   bot.onText(/\/faucet/, (msg) => {
     bot.sendMessage(msg.chat.id, '🏛 *Abrir Horus Faucet*', {
       parse_mode: 'Markdown',
-      reply_markup: { inline_keyboard: [[{ text: '🏛 Abrir Horus Faucet', web_app: { url: MINI_APP_URL } }]] }
+      reply_markup: { inline_keyboard: [
+        [{ text: '🏛 Abrir Horus Faucet', web_app: { url: MINI_APP_URL } }],
+        [{ text: '💬 Únete al Grupo', url: 'https://t.me/horusfaucet' }]
+      ] }
     });
   });
 
@@ -1746,19 +1765,14 @@ if (BOT_TOKEN) {
 }
 
 // ==== BOT DE SOPORTE ====
-// ==== BOT DE SOPORTE COMPLETO (TEXTO + FOTOS + VIDEOS + DOCUMENTOS) ====
 if (SUPPORT_BOT_TOKEN && SUPPORT_CHAT_ID) {
   const supportBot = new TelegramBot(SUPPORT_BOT_TOKEN, { polling: true });
   console.log('Bot de soporte iniciado');
   
-  // Mapa para guardar a qué usuario responder
   const replyToUser = new Map();
-  
-  // ===== COMANDOS DEL ADMIN =====
   
   supportBot.onText(/\/start/, (msg) => {
     const chatId = msg.chat.id;
-    // Si es el admin
     if (String(chatId) === String(SUPPORT_CHAT_ID)) {
       supportBot.sendMessage(chatId,
         '🛠️ *PANEL DE SOPORTE - HORUS FAUCET*\n\n' +
@@ -1772,8 +1786,6 @@ if (SUPPORT_BOT_TOKEN && SUPPORT_CHAT_ID) {
       );
       return;
     }
-    
-    // Si es un usuario normal
     supportBot.sendMessage(chatId,
       '🆘 *SOPORTE HORUS FAUCET*\n\n' +
       '¡Hola, ' + (msg.from.first_name || 'usuario') + '!\n\n' +
@@ -1788,14 +1800,11 @@ if (SUPPORT_BOT_TOKEN && SUPPORT_CHAT_ID) {
     );
   });
   
-  // Comando /reply - Solo para el admin
   supportBot.onText(/\/reply (\d+) (.+)/, (msg, match) => {
     const chatId = msg.chat.id;
-    if (String(chatId) !== String(SUPPORT_CHAT_ID)) return; // Solo el admin
-    
+    if (String(chatId) !== String(SUPPORT_CHAT_ID)) return;
     const targetUserId = match[1];
     const replyMessage = match[2];
-    
     supportBot.sendMessage(targetUserId,
       '📬 *RESPUESTA DEL SOPORTE*\n\n' + replyMessage,
       { parse_mode: 'Markdown' }
@@ -1806,16 +1815,13 @@ if (SUPPORT_BOT_TOKEN && SUPPORT_CHAT_ID) {
     });
   });
   
-  // Comando /list - Ver últimos usuarios
   supportBot.onText(/\/list/, (msg) => {
     const chatId = msg.chat.id;
     if (String(chatId) !== String(SUPPORT_CHAT_ID)) return;
-    
     if (replyToUser.size === 0) {
       supportBot.sendMessage(chatId, '📋 No hay usuarios en el historial reciente.');
       return;
     }
-    
     let list = '📋 *ÚLTIMOS USUARIOS QUE ESCRIBIERON:*\n\n';
     let count = 0;
     for (const [userId, data] of replyToUser.entries()) {
@@ -1825,20 +1831,16 @@ if (SUPPORT_BOT_TOKEN && SUPPORT_CHAT_ID) {
       list += `   🆔 \`${userId}\`\n`;
       list += `   💬 "${(data.lastMessage || '').substring(0, 50)}"\n\n`;
     }
-    
     supportBot.sendMessage(chatId, list, { parse_mode: 'Markdown' });
   });
   
-  // Comando /clear - Limpiar historial
   supportBot.onText(/\/clear/, (msg) => {
     const chatId = msg.chat.id;
     if (String(chatId) !== String(SUPPORT_CHAT_ID)) return;
-    
     replyToUser.clear();
     supportBot.sendMessage(chatId, '🗑️ Historial limpiado.');
   });
   
-  // Comando /help - Ayuda
   supportBot.onText(/\/help/, (msg) => {
     const chatId = msg.chat.id;
     supportBot.sendMessage(chatId,
@@ -1852,21 +1854,11 @@ if (SUPPORT_BOT_TOKEN && SUPPORT_CHAT_ID) {
     );
   });
   
-  // ===== RECEPCIÓN DE MENSAJES (TEXTO, FOTOS, VIDEOS, DOCUMENTOS) =====
-  
   supportBot.on('message', async (msg) => {
     const chatId = msg.chat.id;
     const text = msg.text;
-    
-    // Ignorar comandos (empiezan con /)
     if (text && text.startsWith('/')) return;
-    
-    // Si es el admin escribiendo, ignorar (no reenviar a sí mismo)
-    if (String(chatId) === String(SUPPORT_CHAT_ID)) {
-      return;
-    }
-    
-    // Guardar información del usuario
+    if (String(chatId) === String(SUPPORT_CHAT_ID)) return;
     const userInfo = {
       name: msg.from.first_name || 'Usuario',
       username: msg.from.username ? '@' + msg.from.username : 'sin username',
@@ -1874,78 +1866,52 @@ if (SUPPORT_BOT_TOKEN && SUPPORT_CHAT_ID) {
       lastMessage: text || '[multimedia]'
     };
     replyToUser.set(String(msg.from.id), userInfo);
-    
-    // Header del mensaje
     const header = '📩 *NUEVO MENSAJE DE SOPORTE*\n\n' +
       '👤 De: ' + (msg.from.first_name || 'Usuario') + '\n' +
       '🔗 Username: ' + (msg.from.username ? '@' + msg.from.username : 'sin username') + '\n' +
       '🆔 ID: `' + msg.from.id + '`\n\n';
-    
     try {
-      // ===== MENSAJE DE TEXTO =====
       if (msg.text) {
         await supportBot.sendMessage(SUPPORT_CHAT_ID, header + '💬 Mensaje:\n' + msg.text, { parse_mode: 'Markdown' });
         await supportBot.sendMessage(chatId, '✅ *Mensaje recibido*\n\nTu consulta fue enviada al equipo de soporte.', { parse_mode: 'Markdown' });
-      }
-      
-      // ===== FOTO =====
-      else if (msg.photo) {
-        const photo = msg.photo[msg.photo.length - 1]; // La más grande
+      } else if (msg.photo) {
+        const photo = msg.photo[msg.photo.length - 1];
         await supportBot.sendPhoto(SUPPORT_CHAT_ID, photo.file_id, {
           caption: header + '📷 *Foto*' + (msg.caption ? '\n\n💬 ' + msg.caption : ''),
           parse_mode: 'Markdown'
         });
         await supportBot.sendMessage(chatId, '✅ *Foto recibida*\n\nTu consulta fue enviada al equipo de soporte.', { parse_mode: 'Markdown' });
-      }
-      
-      // ===== VIDEO =====
-      else if (msg.video) {
+      } else if (msg.video) {
         await supportBot.sendVideo(SUPPORT_CHAT_ID, msg.video.file_id, {
           caption: header + '🎥 *Video*' + (msg.caption ? '\n\n💬 ' + msg.caption : ''),
           parse_mode: 'Markdown'
         });
         await supportBot.sendMessage(chatId, '✅ *Video recibido*\n\nTu consulta fue enviada al equipo de soporte.', { parse_mode: 'Markdown' });
-      }
-      
-      // ===== AUDIO =====
-      else if (msg.audio || msg.voice) {
+      } else if (msg.audio || msg.voice) {
         const audioFile = msg.audio ? msg.audio.file_id : msg.voice.file_id;
         await supportBot.sendAudio(SUPPORT_CHAT_ID, audioFile, {
           caption: header + '🎤 *Audio*',
           parse_mode: 'Markdown'
         });
         await supportBot.sendMessage(chatId, '✅ *Audio recibido*\n\nTu consulta fue enviada al equipo de soporte.', { parse_mode: 'Markdown' });
-      }
-      
-      // ===== DOCUMENTO =====
-      else if (msg.document) {
+      } else if (msg.document) {
         await supportBot.sendDocument(SUPPORT_CHAT_ID, msg.document.file_id, {
           caption: header + '📎 *Documento*' + (msg.caption ? '\n\n💬 ' + msg.caption : ''),
           parse_mode: 'Markdown'
         });
         await supportBot.sendMessage(chatId, '✅ *Documento recibido*\n\nTu consulta fue enviada al equipo de soporte.', { parse_mode: 'Markdown' });
-      }
-      
-      // ===== STICKER =====
-      else if (msg.sticker) {
+      } else if (msg.sticker) {
         await supportBot.sendSticker(SUPPORT_CHAT_ID, msg.sticker.file_id);
         await supportBot.sendMessage(SUPPORT_CHAT_ID, header + '🎨 *Sticker*', { parse_mode: 'Markdown' });
         await supportBot.sendMessage(chatId, '✅ *Sticker recibido*', { parse_mode: 'Markdown' });
-      }
-      
-      // ===== UBICACIÓN =====
-      else if (msg.location) {
+      } else if (msg.location) {
         await supportBot.sendLocation(SUPPORT_CHAT_ID, msg.location.latitude, msg.location.longitude);
         await supportBot.sendMessage(SUPPORT_CHAT_ID, header + '📍 *Ubicación*', { parse_mode: 'Markdown' });
         await supportBot.sendMessage(chatId, '✅ *Ubicación recibida*', { parse_mode: 'Markdown' });
-      }
-      
-      // ===== OTROS TIPOS =====
-      else {
+      } else {
         await supportBot.sendMessage(SUPPORT_CHAT_ID, header + '❓ Mensaje de tipo no soportado', { parse_mode: 'Markdown' });
         await supportBot.sendMessage(chatId, '⚠️ *Tipo de mensaje no soportado*\n\nProbá enviar texto, foto, video, audio o documento.', { parse_mode: 'Markdown' });
       }
-      
     } catch (err) {
       console.error('Error en bot de soporte:', err.message);
       try {
@@ -1954,7 +1920,6 @@ if (SUPPORT_BOT_TOKEN && SUPPORT_CHAT_ID) {
     }
   });
   
-  // Manejo de errores de polling
   supportBot.on('polling_error', (error) => {
     if (error.code === 'ETELEGRAM' && error.message.includes('409')) {
       console.log('⚠️ Conflicto de polling en bot de soporte');
@@ -1963,6 +1928,7 @@ if (SUPPORT_BOT_TOKEN && SUPPORT_CHAT_ID) {
   
   console.log('✅ Bot de soporte listo: texto, fotos, videos, audios, documentos, stickers, ubicación');
 }
+
 // ==== INICIAR SERVIDOR ====
 app.listen(process.env.PORT || 3000, () => {
   console.log('Horus Faucet corriendo en puerto', process.env.PORT || 3000);
