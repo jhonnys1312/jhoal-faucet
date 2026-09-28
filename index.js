@@ -1695,9 +1695,8 @@ bot.onText(/\/faucet/, (msg) => {
     reply_markup: { inline_keyboard: [
       [{ text: '🏛 Abrir Horus Faucet', web_app: { url: MINI_APP_URL } }],
       [{ text: '💬 Únete al Grupo', url: 'https://t.me/horusfaucet' }]
-    ] }
+     });
   });
-});
   
   bot.onText(/\/invitar|\/referidos|\/ref/, async (msg) => {
     const userId = String(msg.from.id);
