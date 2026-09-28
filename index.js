@@ -1683,21 +1683,17 @@ if (BOT_TOKEN) {
       '🎁 Gana *1000 JHOAL* por cada amigo que invites\n' +
       '📜 Mirá tu *Historial*\n\n' +
       '👉 Toca "Abrir Horus Faucet" para empezar.',
-      { parse_mode: 'Markdown',reply_markup: { inline_keyboard: [
-  [{ text: '🏛 Abrir Horus Faucet', web_app: { url: MINI_APP_URL } }],
-  [{ text: '💬 Únete al Grupo', url: 'https://t.me/horusfaucet' }]
-] }
+      { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '🏛 Abrir Horus Faucet', web_app: { url: MINI_APP_URL } }]] } }
     );
   });
-bot.onText(/\/faucet/, (msg) => {
-  bot.sendMessage(msg.chat.id, '🏛 *Abrir Horus Faucet*', {
-    parse_mode: 'Markdown',
-    reply_markup: { inline_keyboard: [
-      [{ text: '🏛 Abrir Horus Faucet', web_app: { url: MINI_APP_URL } }],
-      [{ text: '💬 Únete al Grupo', url: 'https://t.me/horusfaucet' }]
-     });
+
+  bot.onText(/\/faucet/, (msg) => {
+    bot.sendMessage(msg.chat.id, '🏛 *Abrir Horus Faucet*', {
+      parse_mode: 'Markdown',
+      reply_markup: { inline_keyboard: [[{ text: '🏛 Abrir Horus Faucet', web_app: { url: MINI_APP_URL } }]] }
+    });
   });
-  
+
   bot.onText(/\/invitar|\/referidos|\/ref/, async (msg) => {
     const userId = String(msg.from.id);
     const link = 'https://t.me/' + REFERRAL_BOT_USERNAME + '?start=ref_' + userId;
@@ -1995,6 +1991,5 @@ app.listen(process.env.PORT || 3000, () => {
   predictionLoop();
   setInterval(predictionLoop, 15 * 1000);
 
-  setInterval(sendPendingBurns, 60 * 60 * 1000);
   scheduleBurnAtMidnight();
 });
