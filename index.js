@@ -1748,27 +1748,8 @@ if (BOT_TOKEN) {
 // ==== BOT DE SOPORTE ====
 if (SUPPORT_BOT_TOKEN && SUPPORT_CHAT_ID) {
   const supportBot = new TelegramBot(SUPPORT_BOT_TOKEN, { polling: true });
-  console.log('Bot de soporte iniciado');
-  supportBot.onText(/\/start/, (msg) => {
-    supportBot.sendMessage(msg.chat.id,
-      '🆘 *SOPORTE HORUS FAUCET*\n\n¡Hola, ' + (msg.from.first_name || 'usuario') + '!\n\nPodés enviarme texto, fotos, videos, audios o documentos.\n\nTe vamos a responder a la brevedad.',
-      { parse_mode: 'Markdown' }
-    );
-  });
-  supportBot.on('message', (msg) => {
-    const chatId = msg.chat.id;
-    const text = msg.text;
-    if (text && text.startsWith('/')) return;
-    const header = '📩 *NUEVO MENSAJE DE SOPORTE*\n\n👤 De: ' + (msg.from.first_name || 'Usuario') + '\n🔗 Username: ' + (msg.from.username ? '@' + msg.from.username : 'sin username') + '\n🆔 ID: `' + msg.from.id + '`\n\n';
-    try {
-      if (msg.text) {
-        supportBot.sendMessage(SUPPORT_CHAT_ID, header + '💬 Mensaje:\n' + msg.text, { parse_mode: 'Markdown' });
-        supportBot.sendMessage(chatId, '✅ *Mensaje recibido*', { parse_mode: 'Markdown' });
-      }
-    } catch (err) {}
-  });
+  ...
 }
-
 // ==== INICIAR SERVIDOR ====
 app.listen(process.env.PORT || 3000, () => {
   console.log('Horus Faucet corriendo en puerto', process.env.PORT || 3000);
