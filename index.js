@@ -1515,22 +1515,46 @@ app.post('/prediction/watch-ad', requireAuth, async (req, res) => {
   try {
     const user = await ensureUser(userId);
     const now = Math.floor(Date.now() / 1000);
+    
+    // ===== VALIDACIÓN NUEVA: 1 anuncio por ronda =====
+    const roundNumber = Math.floor(now / PREDICTION_ROUND_DURATION);
+    const roundStart = roundNumber * PREDICTION_ROUND_DURATION;
+    const lastAd = user.last_prediction_ad || 0;
+    
+    if (lastAd >= roundStart) {
+      releaseLock(lockKey);
+      return res.status(400).json({ 
+        error: '❌ Ya miraste un anuncio para esta ronda. Esperá la próxima.' 
+      });
+    }
+    // ===================================================
+    
+    // Validación del cooldown de 3 segundos (anti-spam rápido)
     if (user.last_prediction_ad && now - user.last_prediction_ad < 3) {
       releaseLock(lockKey);
       return res.status(429).json({ error: '⏳ Esperá ' + (3 - (now - user.last_prediction_ad)) + 's' });
     }
+    
     const round = await ensurePredictionRound();
-    if (!round || round.status !== 'open') { releaseLock(lockKey); return res.status(400).json({ error: 'No hay ronda activa. Esperá la próxima.' }); }
+    if (!round || round.status !== 'open') { 
+      releaseLock(lockKey); 
+      return res.status(400).json({ error: 'No hay ronda activa. Esperá la próxima.' }); 
+    }
+    
     const newAdsPool = parseFloat(round.ads_pool || 0) + PREDICTION_AD_REWARD;
     const newTotalPool = parseFloat(round.total_pool || 0) + PREDICTION_AD_REWARD;
+    
     await supabase.from('prediction_rounds').update({ ads_pool: newAdsPool, total_pool: newTotalPool }).eq('id', round.id);
     await supabase.from('users_balance').update({ last_prediction_ad: now }).eq('user_id', userId);
     await addHistory(userId, 'prediction_ad', 0, '📺 Anuncio visto para predicción (+5 a la pool)', null, null);
+    
     releaseLock(lockKey);
     res.json({ success: true, message: `✅ +5 JHOAL a la pool. Pool actual: ${newTotalPool}`, newPool: newTotalPool, validFor: 0 });
-  } catch (e) { releaseLock(lockKey); res.status(500).json({ error: e.message }); }
+  } catch (e) { 
+    releaseLock(lockKey); 
+    res.status(500).json({ error: e.message }); 
+  }
 });
-
 app.post('/prediction/bet', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { predictedPrice } = req.body;
