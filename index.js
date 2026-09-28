@@ -1746,9 +1746,222 @@ if (BOT_TOKEN) {
 }
 
 // ==== BOT DE SOPORTE ====
+// ==== BOT DE SOPORTE COMPLETO (TEXTO + FOTOS + VIDEOS + DOCUMENTOS) ====
 if (SUPPORT_BOT_TOKEN && SUPPORT_CHAT_ID) {
   const supportBot = new TelegramBot(SUPPORT_BOT_TOKEN, { polling: true });
-  ...
+  console.log('Bot de soporte iniciado');
+  
+  // Mapa para guardar a qué usuario responder
+  const replyToUser = new Map();
+  
+  // ===== COMANDOS DEL ADMIN =====
+  
+  supportBot.onText(/\/start/, (msg) => {
+    const chatId = msg.chat.id;
+    // Si es el admin
+    if (String(chatId) === String(SUPPORT_CHAT_ID)) {
+      supportBot.sendMessage(chatId,
+        '🛠️ *PANEL DE SOPORTE - HORUS FAUCET*\n\n' +
+        'Comandos disponibles:\n\n' +
+        '📩 `/reply <user_id> <mensaje>` - Responder a un usuario\n' +
+        '📋 `/list` - Ver últimos usuarios que escribieron\n' +
+        '🗑️ `/clear` - Limpiar el historial de respuestas\n' +
+        '🆘 `/help` - Ver esta ayuda\n\n' +
+        '💡 Cuando un usuario te escriba, recibirás su ID. Usa `/reply <ID> <mensaje>` para responderle.',
+        { parse_mode: 'Markdown' }
+      );
+      return;
+    }
+    
+    // Si es un usuario normal
+    supportBot.sendMessage(chatId,
+      '🆘 *SOPORTE HORUS FAUCET*\n\n' +
+      '¡Hola, ' + (msg.from.first_name || 'usuario') + '!\n\n' +
+      '📝 Podés enviarme:\n' +
+      '• Texto\n' +
+      '• Fotos 📷\n' +
+      '• Videos 🎥\n' +
+      '• Audios 🎤\n' +
+      '• Documentos 📎\n\n' +
+      'Te vamos a responder a la brevedad.',
+      { parse_mode: 'Markdown' }
+    );
+  });
+  
+  // Comando /reply - Solo para el admin
+  supportBot.onText(/\/reply (\d+) (.+)/, (msg, match) => {
+    const chatId = msg.chat.id;
+    if (String(chatId) !== String(SUPPORT_CHAT_ID)) return; // Solo el admin
+    
+    const targetUserId = match[1];
+    const replyMessage = match[2];
+    
+    supportBot.sendMessage(targetUserId,
+      '📬 *RESPUESTA DEL SOPORTE*\n\n' + replyMessage,
+      { parse_mode: 'Markdown' }
+    ).then(() => {
+      supportBot.sendMessage(chatId, `✅ Respuesta enviada al usuario ${targetUserId}`);
+    }).catch((err) => {
+      supportBot.sendMessage(chatId, `❌ Error enviando respuesta: ${err.message}`);
+    });
+  });
+  
+  // Comando /list - Ver últimos usuarios
+  supportBot.onText(/\/list/, (msg) => {
+    const chatId = msg.chat.id;
+    if (String(chatId) !== String(SUPPORT_CHAT_ID)) return;
+    
+    if (replyToUser.size === 0) {
+      supportBot.sendMessage(chatId, '📋 No hay usuarios en el historial reciente.');
+      return;
+    }
+    
+    let list = '📋 *ÚLTIMOS USUARIOS QUE ESCRIBIERON:*\n\n';
+    let count = 0;
+    for (const [userId, data] of replyToUser.entries()) {
+      count++;
+      if (count > 20) break;
+      list += `👤 ${data.name || 'Usuario'}\n`;
+      list += `   🆔 \`${userId}\`\n`;
+      list += `   💬 "${(data.lastMessage || '').substring(0, 50)}"\n\n`;
+    }
+    
+    supportBot.sendMessage(chatId, list, { parse_mode: 'Markdown' });
+  });
+  
+  // Comando /clear - Limpiar historial
+  supportBot.onText(/\/clear/, (msg) => {
+    const chatId = msg.chat.id;
+    if (String(chatId) !== String(SUPPORT_CHAT_ID)) return;
+    
+    replyToUser.clear();
+    supportBot.sendMessage(chatId, '🗑️ Historial limpiado.');
+  });
+  
+  // Comando /help - Ayuda
+  supportBot.onText(/\/help/, (msg) => {
+    const chatId = msg.chat.id;
+    supportBot.sendMessage(chatId,
+      '🆘 *AYUDA DEL SOPORTE*\n\n' +
+      'Comandos:\n' +
+      '• `/reply <ID> <mensaje>` - Responder\n' +
+      '• `/list` - Ver usuarios\n' +
+      '• `/clear` - Limpiar historial\n\n' +
+      'Podés recibir: texto, fotos, videos, audios y documentos.',
+      { parse_mode: 'Markdown' }
+    );
+  });
+  
+  // ===== RECEPCIÓN DE MENSAJES (TEXTO, FOTOS, VIDEOS, DOCUMENTOS) =====
+  
+  supportBot.on('message', async (msg) => {
+    const chatId = msg.chat.id;
+    const text = msg.text;
+    
+    // Ignorar comandos (empiezan con /)
+    if (text && text.startsWith('/')) return;
+    
+    // Si es el admin escribiendo, ignorar (no reenviar a sí mismo)
+    if (String(chatId) === String(SUPPORT_CHAT_ID)) {
+      return;
+    }
+    
+    // Guardar información del usuario
+    const userInfo = {
+      name: msg.from.first_name || 'Usuario',
+      username: msg.from.username ? '@' + msg.from.username : 'sin username',
+      id: msg.from.id,
+      lastMessage: text || '[multimedia]'
+    };
+    replyToUser.set(String(msg.from.id), userInfo);
+    
+    // Header del mensaje
+    const header = '📩 *NUEVO MENSAJE DE SOPORTE*\n\n' +
+      '👤 De: ' + (msg.from.first_name || 'Usuario') + '\n' +
+      '🔗 Username: ' + (msg.from.username ? '@' + msg.from.username : 'sin username') + '\n' +
+      '🆔 ID: `' + msg.from.id + '`\n\n';
+    
+    try {
+      // ===== MENSAJE DE TEXTO =====
+      if (msg.text) {
+        await supportBot.sendMessage(SUPPORT_CHAT_ID, header + '💬 Mensaje:\n' + msg.text, { parse_mode: 'Markdown' });
+        await supportBot.sendMessage(chatId, '✅ *Mensaje recibido*\n\nTu consulta fue enviada al equipo de soporte.', { parse_mode: 'Markdown' });
+      }
+      
+      // ===== FOTO =====
+      else if (msg.photo) {
+        const photo = msg.photo[msg.photo.length - 1]; // La más grande
+        await supportBot.sendPhoto(SUPPORT_CHAT_ID, photo.file_id, {
+          caption: header + '📷 *Foto*' + (msg.caption ? '\n\n💬 ' + msg.caption : ''),
+          parse_mode: 'Markdown'
+        });
+        await supportBot.sendMessage(chatId, '✅ *Foto recibida*\n\nTu consulta fue enviada al equipo de soporte.', { parse_mode: 'Markdown' });
+      }
+      
+      // ===== VIDEO =====
+      else if (msg.video) {
+        await supportBot.sendVideo(SUPPORT_CHAT_ID, msg.video.file_id, {
+          caption: header + '🎥 *Video*' + (msg.caption ? '\n\n💬 ' + msg.caption : ''),
+          parse_mode: 'Markdown'
+        });
+        await supportBot.sendMessage(chatId, '✅ *Video recibido*\n\nTu consulta fue enviada al equipo de soporte.', { parse_mode: 'Markdown' });
+      }
+      
+      // ===== AUDIO =====
+      else if (msg.audio || msg.voice) {
+        const audioFile = msg.audio ? msg.audio.file_id : msg.voice.file_id;
+        await supportBot.sendAudio(SUPPORT_CHAT_ID, audioFile, {
+          caption: header + '🎤 *Audio*',
+          parse_mode: 'Markdown'
+        });
+        await supportBot.sendMessage(chatId, '✅ *Audio recibido*\n\nTu consulta fue enviada al equipo de soporte.', { parse_mode: 'Markdown' });
+      }
+      
+      // ===== DOCUMENTO =====
+      else if (msg.document) {
+        await supportBot.sendDocument(SUPPORT_CHAT_ID, msg.document.file_id, {
+          caption: header + '📎 *Documento*' + (msg.caption ? '\n\n💬 ' + msg.caption : ''),
+          parse_mode: 'Markdown'
+        });
+        await supportBot.sendMessage(chatId, '✅ *Documento recibido*\n\nTu consulta fue enviada al equipo de soporte.', { parse_mode: 'Markdown' });
+      }
+      
+      // ===== STICKER =====
+      else if (msg.sticker) {
+        await supportBot.sendSticker(SUPPORT_CHAT_ID, msg.sticker.file_id);
+        await supportBot.sendMessage(SUPPORT_CHAT_ID, header + '🎨 *Sticker*', { parse_mode: 'Markdown' });
+        await supportBot.sendMessage(chatId, '✅ *Sticker recibido*', { parse_mode: 'Markdown' });
+      }
+      
+      // ===== UBICACIÓN =====
+      else if (msg.location) {
+        await supportBot.sendLocation(SUPPORT_CHAT_ID, msg.location.latitude, msg.location.longitude);
+        await supportBot.sendMessage(SUPPORT_CHAT_ID, header + '📍 *Ubicación*', { parse_mode: 'Markdown' });
+        await supportBot.sendMessage(chatId, '✅ *Ubicación recibida*', { parse_mode: 'Markdown' });
+      }
+      
+      // ===== OTROS TIPOS =====
+      else {
+        await supportBot.sendMessage(SUPPORT_CHAT_ID, header + '❓ Mensaje de tipo no soportado', { parse_mode: 'Markdown' });
+        await supportBot.sendMessage(chatId, '⚠️ *Tipo de mensaje no soportado*\n\nProbá enviar texto, foto, video, audio o documento.', { parse_mode: 'Markdown' });
+      }
+      
+    } catch (err) {
+      console.error('Error en bot de soporte:', err.message);
+      try {
+        await supportBot.sendMessage(chatId, '❌ Hubo un error. Intentá de nuevo.', { parse_mode: 'Markdown' });
+      } catch (e) {}
+    }
+  });
+  
+  // Manejo de errores de polling
+  supportBot.on('polling_error', (error) => {
+    if (error.code === 'ETELEGRAM' && error.message.includes('409')) {
+      console.log('⚠️ Conflicto de polling en bot de soporte');
+    }
+  });
+  
+  console.log('✅ Bot de soporte listo: texto, fotos, videos, audios, documentos, stickers, ubicación');
 }
 // ==== INICIAR SERVIDOR ====
 app.listen(process.env.PORT || 3000, () => {
