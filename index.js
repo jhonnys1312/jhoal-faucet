@@ -1507,85 +1507,101 @@ app.get('/prediction/current', requireAuth, async (req, res) => {
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
-
 app.post('/prediction/watch-ad', requireAuth, async (req, res) => {
   const userId = req.userId;
   const lockKey = `pred_ad_${userId}`;
   if (!acquireLock(lockKey)) return res.status(429).json({ error: '⏳ Esperá un momento' });
+  
   try {
     const user = await ensureUser(userId);
     const now = Math.floor(Date.now() / 1000);
     
-    // ===== VALIDACIÓN NUEVA: 1 anuncio por ronda =====
-    const roundNumber = Math.floor(now / PREDICTION_ROUND_DURATION);
-    const roundStart = roundNumber * PREDICTION_ROUND_DURATION;
-    const lastAd = user.last_prediction_ad || 0;
-    
-    if (lastAd >= roundStart) {
+    // ===== VALIDACIÓN 1: ¿Está bloqueado? =====
+    const blockedUntil = parseInt(user.prediction_blocked_until || 0);
+    if (blockedUntil > now) {
       releaseLock(lockKey);
-      return res.status(400).json({ 
-        error: '❌ Ya miraste un anuncio para esta ronda. Esperá la próxima.' 
+      const remaining = blockedUntil - now;
+      const horas = Math.floor(remaining / 3600);
+      const minutos = Math.floor((remaining % 3600) / 60);
+      return res.status(429).json({ 
+        error: `🚨 ACTIVIDAD SOSPECHOSA DETECTADA. Tu cuenta está suspendida temporalmente. Debes esperar ${horas}h ${minutos}m para la verificación. Si crees que es un error, contacta a @Jhoalsupportbot.` 
       });
     }
-    // ===================================================
+    // ==========================================
     
-    // Validación del cooldown de 3 segundos (anti-spam rápido)
+    // ===== VALIDACIÓN 2: Contar rondas en la última hora =====
+    const unaHoraAtras = now - 3600;
+    const { count, error: countErr } = await supabase
+      .from('history')
+      .select('*', { count: 'exact', head: true })
+      .eq('user_id', userId)
+      .eq('type', 'prediction_ad')
+      .gte('created_at', unaHoraAtras);
+    
+    if (countErr) {
+      releaseLock(lockKey);
+      return res.status(500).json({ error: 'Error interno' });
+    }
+    
+    // Si ya tiene 16 o más rondas en la última hora → BLOQUEAR
+    if (count >= 16) {
+      const bloqueadoHasta = now + 86400; // 24 horas
+      await supabase.from('users_balance')
+        .update({ prediction_blocked_until: bloqueadoHasta })
+        .eq('user_id', userId);
+      
+      releaseLock(lockKey);
+      console.log(`🚫 BLOQUEO POR ABUSO: Usuario ${userId} | Rondas última hora: ${count}`);
+      return res.status(429).json({ 
+        error: `🚨 ACTIVIDAD SOSPECHOSA DETECTADA. Tu cuenta ha sido suspendida por seguridad. Nuestro sistema verificará tu actividad en las próximas 24 horas. Si crees que es un error, contacta a @Jhoalsupportbot.` 
+      });
+    }
+    // =========================================================
+    
+    // ===== VALIDACIÓN 3: Cooldown anti-spam de 3 segundos =====
     if (user.last_prediction_ad && now - user.last_prediction_ad < 3) {
       releaseLock(lockKey);
       return res.status(429).json({ error: '⏳ Esperá ' + (3 - (now - user.last_prediction_ad)) + 's' });
     }
+    // ==========================================================
     
+    // ===== VALIDACIÓN 4: Hay ronda activa =====
     const round = await ensurePredictionRound();
     if (!round || round.status !== 'open') { 
       releaseLock(lockKey); 
       return res.status(400).json({ error: 'No hay ronda activa. Esperá la próxima.' }); 
     }
+    // ==========================================
     
+    // ===== TODO OK: Aportar a la pool =====
     const newAdsPool = parseFloat(round.ads_pool || 0) + PREDICTION_AD_REWARD;
     const newTotalPool = parseFloat(round.total_pool || 0) + PREDICTION_AD_REWARD;
     
-    await supabase.from('prediction_rounds').update({ ads_pool: newAdsPool, total_pool: newTotalPool }).eq('id', round.id);
-    await supabase.from('users_balance').update({ last_prediction_ad: now }).eq('user_id', userId);
-    await addHistory(userId, 'prediction_ad', 0, '📺 Anuncio visto para predicción (+5 a la pool)', null, null);
+    await supabase.from('prediction_rounds').update({ 
+      ads_pool: newAdsPool, 
+      total_pool: newTotalPool 
+    }).eq('id', round.id);
+    
+    await supabase.from('users_balance').update({ 
+      last_prediction_ad: now 
+    }).eq('user_id', userId);
+    
+    await addHistory(userId, 'prediction_ad', 0, 
+      '📺 Anuncio visto para predicción (+5 a la pool)', 
+      null, null);
     
     releaseLock(lockKey);
-    res.json({ success: true, message: `✅ +5 JHOAL a la pool. Pool actual: ${newTotalPool}`, newPool: newTotalPool, validFor: 0 });
+    res.json({ 
+      success: true, 
+      message: `✅ +5 JHOAL a la pool. Pool actual: ${newTotalPool}`, 
+      newPool: newTotalPool, 
+      validFor: 0 
+    });
+    
   } catch (e) { 
     releaseLock(lockKey); 
     res.status(500).json({ error: e.message }); 
   }
-});
-app.post('/prediction/bet', requireAuth, async (req, res) => {
-  const userId = req.userId;
-  const { predictedPrice } = req.body;
-  if (!predictedPrice || isNaN(predictedPrice) || predictedPrice <= 0) return res.status(400).json({ error: 'Precio inválido' });
-  const lockKey = `prediction_${userId}`;
-  if (!acquireLock(lockKey)) return res.status(429).json({ error: '⏳ Esperá un momento' });
-  try {
-    const user = await ensureUser(userId);
-    const now = Math.floor(Date.now() / 1000);
-    const roundNumber = Math.floor(now / PREDICTION_ROUND_DURATION);
-    const { data: round } = await supabase.from('prediction_rounds').select('*').eq('round_number', roundNumber).maybeSingle();
-    if (!round || round.status !== 'open') { releaseLock(lockKey); return res.status(400).json({ error: 'No hay ronda activa. Esperá la próxima.' }); }
-    const adRecent = user.last_prediction_ad && (now - user.last_prediction_ad) <= (PREDICTION_ROUND_DURATION / 2);
-    const adThisRound = user.last_prediction_ad && user.last_prediction_ad >= round.started_at;
-    if (!adRecent && !adThisRound) { releaseLock(lockKey); return res.status(403).json({ error: 'AD_REQUIRED', message: '📺 Mirá un anuncio para predecir' }); }
-    if (now >= round.closes_at) { releaseLock(lockKey); return res.status(400).json({ error: 'La ronda ya cerró' }); }
-    if (now >= round.closes_at - PREDICTION_BLOCK_LAST_SECONDS) { releaseLock(lockKey); return res.status(400).json({ error: '⏰ Últimos segundos. Esperá la próxima ronda.' }); }
-    const startPrice = parseFloat(round.start_price);
-    const minPrice = startPrice * 0.8;
-    const maxPrice = startPrice * 1.2;
-    if (predictedPrice < minPrice || predictedPrice > maxPrice) {
-      releaseLock(lockKey);
-      return res.status(400).json({ error: `El precio debe estar entre $${minPrice.toFixed(2)} y $${maxPrice.toFixed(2)}` });
-    }
-    const { data: existing } = await supabase.from('predictions').select('id').eq('round_id', round.id).eq('user_id', userId).maybeSingle();
-    if (existing) { releaseLock(lockKey); return res.status(400).json({ error: 'Ya hiciste tu predicción para esta ronda' }); }
-    await supabase.from('predictions').insert({ round_id: round.id, user_id: userId, predicted_price: predictedPrice, created_at: now });
-    await addHistory(userId, 'prediction_bet', 0, `🔮 Predijiste $${predictedPrice} para Ronda #${round.round_number}`, null, null);
-    releaseLock(lockKey);
-    res.json({ success: true, message: `¡Predicción registrada! $${predictedPrice}`, predictedPrice });
-  } catch (e) { releaseLock(lockKey); res.status(500).json({ error: e.message }); }
 });
 
 app.get('/prediction/history/:userId', requireAuth, async (req, res) => {
