@@ -1814,7 +1814,42 @@ if (SUPPORT_BOT_TOKEN && SUPPORT_CHAT_ID) {
       supportBot.sendMessage(chatId, `❌ Error enviando respuesta: ${err.message}`);
     });
   });
-  
+    // ===== COMANDO /reply CON FOTO =====
+  supportBot.on('photo', (msg) => {
+    const chatId = msg.chat.id;
+    
+    // Solo procesar si viene del admin
+    if (String(chatId) !== String(SUPPORT_CHAT_ID)) return;
+    
+    // Verificar que tenga caption
+    const caption = msg.caption;
+    if (!caption || !caption.startsWith('/reply')) return;
+    
+    // Extraer user_id y mensaje del caption
+    const match = caption.match(/\/reply (\d+)\s+(.+)/);
+    if (!match) {
+      supportBot.sendMessage(chatId, 
+        '❌ Formato incorrecto.\n\nUsá: `/reply <user_id> <mensaje>` en el caption de la foto.',
+        { parse_mode: 'Markdown' }
+      );
+      return;
+    }
+    
+    const targetUserId = match[1];
+    const replyMessage = match[2];
+    const photo = msg.photo[msg.photo.length - 1];
+    
+    // Enviar la foto al usuario con el mensaje
+    supportBot.sendPhoto(targetUserId, photo.file_id, {
+      caption: '📬 *RESPUESTA DEL SOPORTE*\n\n' + replyMessage,
+      parse_mode: 'Markdown'
+    }).then(() => {
+      supportBot.sendMessage(chatId, `✅ Foto enviada al usuario ${targetUserId}`);
+      console.log(`📷 Foto enviada a ${targetUserId}`);
+    }).catch((err) => {
+      supportBot.sendMessage(chatId, `❌ Error enviando foto: ${err.message}`);
+    });
+  });
   supportBot.onText(/\/list/, (msg) => {
     const chatId = msg.chat.id;
     if (String(chatId) !== String(SUPPORT_CHAT_ID)) return;
