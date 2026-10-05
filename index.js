@@ -1233,6 +1233,120 @@ app.get('/withdrawals/pending/:userId', requireAuth, async (req, res) => {
 
 app.get('/deposit-info', (req, res) => res.json({ success: true, depositWallet: wallet.address, tokenAddress: TOKEN_ADDRESS, minDeposit: 1 }));
 
+// ==== SKILLS DE LA CULEBRITA ====
+
+const SKILL_PRICES = {
+  1: 20000, // básica
+  2: 40000, // media
+  3: 60000  // pro
+};
+
+const SKILL_NAMES = {
+  ataque: { 1: 'Ataque Básico', 2: 'Ataque Media', 3: 'Ataque Pro' },
+  defensa: { 1: 'Defensa Básica', 2: 'Defensa Media', 3: 'Defensa Pro' },
+  iman: { 1: 'Imán Básico', 2: 'Imán Media', 3: 'Imán Pro' }
+};
+
+// Obtener skills del jugador
+app.get('/my-skills/:userId', requireAuth, async (req, res) => {
+  try {
+    const userId = req.userId;
+    const { data, error } = await supabase
+      .from('user_skills')
+      .select('*')
+      .eq('user_id', userId)
+      .maybeSingle();
+    if (error) throw error;
+    if (!data) {
+      return res.json({
+        success: true,
+        skills: { ataque_level: 0, defensa_level: 0, iman_level: 0 }
+      });
+    }
+    res.json({ success: true, skills: data });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Comprar skill
+app.post('/buy-skill', requireAuth, async (req, res) => {
+  const userId = req.userId;
+  const { skillType, level } = req.body;
+
+  if (!['ataque', 'defensa', 'iman'].includes(skillType)) {
+    return res.status(400).json({ error: 'Tipo de skill inválido' });
+  }
+  if (![1, 2, 3].includes(level)) {
+    return res.status(400).json({ error: 'Nivel inválido' });
+  }
+
+  const price = SKILL_PRICES[level];
+  const lockKey = `buy_skill_${userId}`;
+  if (!acquireLock(lockKey)) return res.status(429).json({ error: '⏳ Compra en proceso. Esperá.' });
+
+  try {
+    const user = await ensureUser(userId);
+    const balance = parseFloat(user.balance || 0);
+
+    if (balance < price) {
+      releaseLock(lockKey);
+      return res.status(400).json({ error: `Saldo insuficiente. Necesitás ${price.toLocaleString()} JHOAL` });
+    }
+
+    // Leer skills actuales
+    const { data: existing } = await supabase
+      .from('user_skills')
+      .select('*')
+      .eq('user_id', userId)
+      .maybeSingle();
+
+    const currentLevel = existing ? (existing[`${skillType}_level`] || 0) : 0;
+
+    if (level <= currentLevel) {
+      releaseLock(lockKey);
+      return res.status(400).json({ error: 'Ya tenés esta skill o una mejor' });
+    }
+
+    // Descontar saldo
+    const newBalance = balance - price;
+    await supabase.from('users_balance').update({ balance: newBalance }).eq('user_id', userId);
+
+    // Guardar skill
+    if (existing) {
+      await supabase.from('user_skills')
+        .update({ [`${skillType}_level`]: level, updated_at: Math.floor(Date.now() / 1000) })
+        .eq('user_id', userId);
+    } else {
+      const insertData = {
+        user_id: userId,
+        ataque_level: skillType === 'ataque' ? level : 0,
+        defensa_level: skillType === 'defensa' ? level : 0,
+        iman_level: skillType === 'iman' ? level : 0,
+        updated_at: Math.floor(Date.now() / 1000)
+      };
+      await supabase.from('user_skills').insert(insertData);
+    }
+
+    // Registrar en historial
+    await addHistory(userId, 'skill_purchase', -price, `🛒 Compra: ${SKILL_NAMES[skillType][level]}`, null, null);
+
+    releaseLock(lockKey);
+    console.log(`🛒 Skill comprada: ${userId} → ${SKILL_NAMES[skillType][level]} (-${price} JHOAL)`);
+
+    res.json({
+      success: true,
+      message: `✅ ¡${SKILL_NAMES[skillType][level]} comprada!`,
+      newBalance,
+      skill: { type: skillType, level }
+    });
+  } catch (e) {
+    releaseLock(lockKey);
+    console.error('Error en /buy-skill:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ==== BUY PLANT ====
 app.post('/buy-plant', requireAuth, async (req, res) => {
   const userId = req.userId;
