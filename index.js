@@ -707,7 +707,7 @@ async function resolvePredictionRounds() {
           }
           console.log(`✅ Ronda #${round.round_number} | Ganadores: ${winnersCount} | Repartido: ${distributed.toFixed(2)}`);
         } else {
-          const burnAmount = Math.floor(totalPool * 0.10 * 100) / 100;
+          const burnAmount = Math.floor(totalPool * 0.01 * 100) / 100;
           const accumulateAmount = totalPool - burnAmount;
           burned = burnAmount;
           accumulatedNext = accumulateAmount;
