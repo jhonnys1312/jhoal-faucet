@@ -1590,8 +1590,8 @@ app.get('/prediction/current', requireAuth, async (req, res) => {
     const adCooldownRemaining = 0;
 
     const { count: totalPreds } = await supabase.from('predictions').select('*', { count: 'exact', head: true }).eq('round_id', round.id);
-    const { data: burns } = await supabase.from('burn_wallet').select('amount');
-    const totalBurned = (burns || []).reduce((s, b) => s + parseFloat(b.amount), 0);
+const { data: totalBurnedData } = await supabase.rpc('get_total_burned');
+const totalBurned = parseFloat(totalBurnedData || 0);
 
     res.json({
       success: true, waitingNextRound: false, secondsUntilNextRound: 0,
