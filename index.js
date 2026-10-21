@@ -50,7 +50,7 @@ const SUPPORT_BOT_TOKEN = process.env.SUPPORT_BOT_TOKEN;
 const SUPPORT_CHAT_ID = process.env.SUPPORT_CHAT_ID;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_SECRET_KEY;
-const MINI_APP_URL = 'https://aged-math-48b9.jsac1234567890.workers.dev';
+const MINI_APP_URL = 'https://aged-math-48b9.jsac1234567890.workers.dev/';
 const SUPPORT_USERNAME = 'JhoalSupportbot';
 const COOLDOWN = 30 * 60;
 const MIN_BET = 0.1;
@@ -1836,6 +1836,20 @@ let bot = null;
 if (BOT_TOKEN) {
   bot = new TelegramBot(BOT_TOKEN, { polling: true });
   console.log('Bot principal iniciado');
+  // Esto actualiza el botón azul de abajo a la izquierda
+  bot.setChatMenuButton({
+    menu_button: {
+      type: 'web_app',
+      text: 'Abrir Faucet',
+      web_app: {
+        url: MINI_APP_URL // Usa la variable que ya cambiamos a Cloudflare
+      }
+    }
+  }).then(() => {
+    console.log('✅ Botón de menú (azul) actualizado a Cloudflare');
+  }).catch((err) => {
+    console.log('❌ Error actualizando botón de menú:', err.message);
+  });
   bot.on('polling_error', (error) => {
     if (error.code === 'ETELEGRAM' && error.message.includes('409')) console.log('⚠️ Conflicto de polling');
     else console.log('⚠️ Polling error:', error.code);
