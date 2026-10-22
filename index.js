@@ -421,33 +421,90 @@ const ROT_TIME = 60;
 const PLANT_LIFETIME_DAYS = 30;
 const PLANT_LIFETIME_SECONDS = PLANT_LIFETIME_DAYS * 24 * 60 * 60;
 
+// 🔥 ACTUALIZADO: devuelve hoursLeft y timeLeftText además de daysLeft
 function getPlantStatus(plant) {
   const now = Math.floor(Date.now() / 1000);
   const level = PLANT_LEVELS[plant.level];
   const createdAt = plant.created_at || now;
   const ageSeconds = now - createdAt;
   const lifetimeLeft = PLANT_LIFETIME_SECONDS - ageSeconds;
-  const daysLeft = Math.max(0, Math.floor(lifetimeLeft / 86400));
-  if (lifetimeLeft <= 0) return { status: 'expired', value: 0, minutesLeft: 0, progress: 0, canRefund: false, daysLeft: 0, expiresAt: createdAt + PLANT_LIFETIME_SECONDS };
-  if (plant.status === 'dry' || !plant.last_watered) return { status: 'dry', value: 0, minutesLeft: 0, progress: 0, canRefund: false, daysLeft, expiresAt: createdAt + PLANT_LIFETIME_SECONDS };
+
+  // Cálculo de tiempo restante detallado
+  let daysLeft = 0, hoursLeft = 0, minutesLeftLifetime = 0, timeLeftText = '';
+  if (lifetimeLeft > 0) {
+    daysLeft = Math.floor(lifetimeLeft / 86400);
+    hoursLeft = Math.floor((lifetimeLeft % 86400) / 3600);
+    minutesLeftLifetime = Math.floor((lifetimeLeft % 3600) / 60);
+    if (daysLeft > 0) {
+      timeLeftText = daysLeft + 'd ' + hoursLeft + 'h';
+    } else if (hoursLeft > 0) {
+      timeLeftText = hoursLeft + 'h ' + minutesLeftLifetime + 'm';
+    } else {
+      timeLeftText = minutesLeftLifetime + 'm';
+    }
+  } else {
+    timeLeftText = '0m';
+  }
+
+  if (lifetimeLeft <= 0) return {
+    status: 'expired', value: 0, minutesLeft: 0, progress: 0, canRefund: false,
+    daysLeft: 0, hoursLeft: 0, timeLeftText: '0m',
+    expiresAt: createdAt + PLANT_LIFETIME_SECONDS
+  };
+
+  if (plant.status === 'dry' || !plant.last_watered) return {
+    status: 'dry', value: 0, minutesLeft: 0, progress: 0, canRefund: false,
+    daysLeft, hoursLeft, timeLeftText,
+    expiresAt: createdAt + PLANT_LIFETIME_SECONDS
+  };
+
   const moonMult = parseFloat(plant.moon_multiplier || 1) || 1;
   const effectiveGrowTime = GROW_TIME_MIN / moonMult;
   const elapsed = (now - plant.last_watered) / 60;
+
   if (elapsed < effectiveGrowTime) {
     const progress = Math.floor((elapsed / effectiveGrowTime) * 100);
-    return { status: 'growing', value: 0, minutesLeft: Math.ceil(effectiveGrowTime - elapsed), progress: Math.min(progress, 99), canRefund: false, moonBoost: moonMult > 1, daysLeft, expiresAt: createdAt + PLANT_LIFETIME_SECONDS };
+    return {
+      status: 'growing', value: 0,
+      minutesLeft: Math.ceil(effectiveGrowTime - elapsed),
+      progress: Math.min(progress, 99), canRefund: false, moonBoost: moonMult > 1,
+      daysLeft, hoursLeft, timeLeftText,
+      expiresAt: createdAt + PLANT_LIFETIME_SECONDS
+    };
   }
+
   const elapsedSinceReady = elapsed - effectiveGrowTime;
   const perfectDuration = PERFECT_WINDOW - GROW_TIME_MIN;
-  if (elapsedSinceReady <= perfectDuration) return { status: 'ready', value: level.fruitValue, minutesLeft: Math.ceil(perfectDuration - elapsedSinceReady), progress: 100, canRefund: false, moonBoost: moonMult > 1, daysLeft, expiresAt: createdAt + PLANT_LIFETIME_SECONDS };
+
+  if (elapsedSinceReady <= perfectDuration) return {
+    status: 'ready', value: level.fruitValue,
+    minutesLeft: Math.ceil(perfectDuration - elapsedSinceReady),
+    progress: 100, canRefund: false, moonBoost: moonMult > 1,
+    daysLeft, hoursLeft, timeLeftText,
+    expiresAt: createdAt + PLANT_LIFETIME_SECONDS
+  };
+
   const witheringTotal = ROT_TIME - PERFECT_WINDOW;
   const witheringElapsed = elapsedSinceReady - perfectDuration;
+
   if (witheringElapsed <= witheringTotal) {
     const withering = witheringElapsed / witheringTotal;
     const value = level.fruitValue * (1 - withering * 0.1);
-    return { status: 'withering', value: Math.max(0, value), minutesLeft: Math.ceil(witheringTotal - witheringElapsed), progress: 100, canRefund: false, moonBoost: moonMult > 1, daysLeft, expiresAt: createdAt + PLANT_LIFETIME_SECONDS };
+    return {
+      status: 'withering', value: Math.max(0, value),
+      minutesLeft: Math.ceil(witheringTotal - witheringElapsed),
+      progress: 100, canRefund: false, moonBoost: moonMult > 1,
+      daysLeft, hoursLeft, timeLeftText,
+      expiresAt: createdAt + PLANT_LIFETIME_SECONDS
+    };
   }
-  return { status: 'rotten', value: 0, minutesLeft: 0, progress: 0, canRefund: true, moonBoost: moonMult > 1, daysLeft, expiresAt: createdAt + PLANT_LIFETIME_SECONDS };
+
+  return {
+    status: 'rotten', value: 0, minutesLeft: 0, progress: 0, canRefund: true,
+    moonBoost: moonMult > 1,
+    daysLeft, hoursLeft, timeLeftText,
+    expiresAt: createdAt + PLANT_LIFETIME_SECONDS
+  };
 }
 
 // ==== HELPERS ====
@@ -1124,7 +1181,7 @@ app.get('/balance-game/:userId', requireAuth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ==== BET (DADOS) ====
+// ==== BET (DADOS) — SIGUE USANDO hCaptcha ====
 app.post('/bet', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { amount, hcaptchaToken } = req.body;
@@ -1294,7 +1351,6 @@ app.post('/buy-skill', requireAuth, async (req, res) => {
       return res.status(400).json({ error: `Saldo insuficiente. Necesitás ${price.toLocaleString()} JHOAL` });
     }
 
-    // Leer skills actuales
     const { data: existing } = await supabase
       .from('user_skills')
       .select('*')
@@ -1308,11 +1364,9 @@ app.post('/buy-skill', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'Ya tenés esta skill o una mejor' });
     }
 
-    // Descontar saldo
     const newBalance = balance - price;
     await supabase.from('users_balance').update({ balance: newBalance }).eq('user_id', userId);
 
-    // Guardar skill
     if (existing) {
       await supabase.from('user_skills')
         .update({ [`${skillType}_level`]: level, updated_at: Math.floor(Date.now() / 1000) })
@@ -1328,7 +1382,6 @@ app.post('/buy-skill', requireAuth, async (req, res) => {
       await supabase.from('user_skills').insert(insertData);
     }
 
-    // Registrar en historial
     await addHistory(userId, 'skill_purchase', -price, `🛒 Compra: ${SKILL_NAMES[skillType][level]}`, null, null);
 
     releaseLock(lockKey);
@@ -1347,18 +1400,14 @@ app.post('/buy-skill', requireAuth, async (req, res) => {
   }
 });
 
-// ==== BUY PLANT ====
+// ==== BUY PLANT (SIN hCaptcha) ====
 app.post('/buy-plant', requireAuth, async (req, res) => {
   const userId = req.userId;
-  const { level, hcaptchaToken } = req.body;
+  const { level } = req.body;
   if (!level || !PLANT_LEVELS[level]) return res.status(400).json({ error: 'Nivel inválido' });
   const lockKey = `buy_${userId}`;
   if (!acquireLock(lockKey)) return res.status(429).json({ error: '⏳ Compra en proceso. Esperá.' });
   try {
-    if (!hcaptchaToken) { releaseLock(lockKey); return res.status(403).json({ error: 'HCAPTCHA_REQUIRED', message: 'Verificá que sos humano para comprar.', sitekey: HCAPTCHA_SITE_KEY }); }
-    const verifyResult = await verificarHCaptcha(hcaptchaToken, req.ip);
-    if (!verifyResult.success) { releaseLock(lockKey); return res.status(403).json({ error: 'HCAPTCHA_FAILED', message: 'Verificación fallida. Intentá de nuevo.', sitekey: HCAPTCHA_SITE_KEY }); }
-    console.log(`✅ hCaptcha verificado (BUY) para ${userId}`);
     const user = await ensureUser(userId);
     const nowSec = Math.floor(Date.now() / 1000);
     if (user.plant_buy_cooldown_until && user.plant_buy_cooldown_until > nowSec) {
@@ -1411,10 +1460,10 @@ app.post('/water-plant', requireAuth, async (req, res) => {
   } catch (error) { releaseLock(lockKey); res.status(500).json({ error: 'Error: ' + error.message }); }
 });
 
-// ==== HARVEST ====
+// ==== HARVEST (SIN hCaptcha) ====
 app.post('/harvest', requireAuth, async (req, res) => {
   const userId = req.userId;
-  const { plantId, hcaptchaToken } = req.body;
+  const { plantId } = req.body;
   if (!plantId) return res.status(400).json({ error: 'Faltan datos' });
   const lockKey = `harvest_${plantId}`;
   if (!acquireLock(lockKey)) return res.status(429).json({ error: '⏳ Ya estás cosechando. Esperá un momento.' });
@@ -1426,10 +1475,6 @@ app.post('/harvest', requireAuth, async (req, res) => {
     if (status.status !== 'ready' && status.status !== 'withering') { releaseLock(lockKey); return res.status(400).json({ error: 'Todavía no podés cosechar esta planta' }); }
     let value = status.value;
     if (value <= 0) { releaseLock(lockKey); return res.status(400).json({ error: 'El fruto está podrido' }); }
-    if (!hcaptchaToken) { releaseLock(lockKey); return res.status(403).json({ error: 'HCAPTCHA_REQUIRED', message: 'Verificá que sos humano para cosechar.', sitekey: HCAPTCHA_SITE_KEY }); }
-    const verifyResult = await verificarHCaptcha(hcaptchaToken, req.ip);
-    if (!verifyResult.success) { releaseLock(lockKey); return res.status(403).json({ error: 'HCAPTCHA_FAILED', message: 'Verificación fallida. Intentá de nuevo.', sitekey: HCAPTCHA_SITE_KEY }); }
-    console.log(`✅ hCaptcha verificado (HARVEST) para ${userId}`);
     let multiplicadorBendicion = 1;
     if (blessingState.active) { multiplicadorBendicion = BLESSING_FRUIT_MULTIPLIER; value = value * multiplicadorBendicion; }
     const user = await ensureUser(userId);
@@ -1461,6 +1506,7 @@ app.post('/refund-plant', requireAuth, async (req, res) => {
   else res.status(400).json({ error: result.error });
 });
 
+// 🔥 ACTUALIZADO: incluye hoursLeft y timeLeftText en la respuesta
 app.get('/my-plants/:userId', requireAuth, async (req, res) => {
   try {
     const userId = req.userId;
@@ -1477,7 +1523,11 @@ app.get('/my-plants/:userId', requireAuth, async (req, res) => {
         originalPrice: level.price, canSell: false, lastWatered: p.last_watered,
         canRefund: status.canRefund || false,
         refundAmount: status.canRefund ? (level.waterCost * 0.9) : 0,
-        moonBoost: status.moonBoost || false, daysLeft: status.daysLeft || 0, expiresAt: status.expiresAt || null
+        moonBoost: status.moonBoost || false,
+        daysLeft: status.daysLeft || 0,
+        hoursLeft: status.hoursLeft || 0,
+        timeLeftText: status.timeLeftText || '',
+        expiresAt: status.expiresAt || null
       };
     });
     const nowSec = Math.floor(Date.now() / 1000);
@@ -1549,7 +1599,7 @@ app.get('/huerto-warning', (req, res) => {
   });
 });
 
-app.get('/', (req, res) => res.json({ status: 'Horus Faucet + Dados + Huerto + Historial + Luna Llena + Bendición + AdsGram + Referidos + Predicciones + Minas + hCaptcha + Verificación de Depósitos por Hash' }));
+app.get('/', (req, res) => res.json({ status: 'Horus Faucet + Dados + Huerto + Historial + Luna Llena + Bendición + AdsGram + Referidos + Predicciones + Minas + hCaptcha (solo dados) + Verificación de Depósitos por Hash' }));
 
 // ==== ENDPOINTS DE PREDICCIÓN ====
 app.get('/prediction/current', requireAuth, async (req, res) => {
@@ -1786,7 +1836,6 @@ app.post('/mines/cashout', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { amount, type } = req.body;
 
-  // Validaciones
   if (!amount || amount <= 0) {
     return res.status(400).json({ error: 'Monto inválido' });
   }
@@ -1836,13 +1885,12 @@ let bot = null;
 if (BOT_TOKEN) {
   bot = new TelegramBot(BOT_TOKEN, { polling: true });
   console.log('Bot principal iniciado');
-  // Esto actualiza el botón azul de abajo a la izquierda
   bot.setChatMenuButton({
     menu_button: {
       type: 'web_app',
       text: 'Abrir Faucet',
       web_app: {
-        url: MINI_APP_URL // Usa la variable que ya cambiamos a Cloudflare
+        url: MINI_APP_URL
       }
     }
   }).then(() => {
@@ -2007,18 +2055,11 @@ if (SUPPORT_BOT_TOKEN && SUPPORT_CHAT_ID) {
       supportBot.sendMessage(chatId, `❌ Error enviando respuesta: ${err.message}`);
     });
   });
-    // ===== COMANDO /reply CON FOTO =====
   supportBot.on('photo', (msg) => {
     const chatId = msg.chat.id;
-    
-    // Solo procesar si viene del admin
     if (String(chatId) !== String(SUPPORT_CHAT_ID)) return;
-    
-    // Verificar que tenga caption
     const caption = msg.caption;
     if (!caption || !caption.startsWith('/reply')) return;
-    
-    // Extraer user_id y mensaje del caption
     const match = caption.match(/\/reply (\d+)\s+(.+)/);
     if (!match) {
       supportBot.sendMessage(chatId, 
@@ -2027,12 +2068,9 @@ if (SUPPORT_BOT_TOKEN && SUPPORT_CHAT_ID) {
       );
       return;
     }
-    
     const targetUserId = match[1];
     const replyMessage = match[2];
     const photo = msg.photo[msg.photo.length - 1];
-    
-    // Enviar la foto al usuario con el mensaje
     supportBot.sendPhoto(targetUserId, photo.file_id, {
       caption: '📬 *RESPUESTA DEL SOPORTE*\n\n' + replyMessage,
       parse_mode: 'Markdown'
@@ -2163,7 +2201,7 @@ app.listen(process.env.PORT || 3000, () => {
   console.log('Wallet:', wallet.address);
   console.log('🎁 Referidos: +' + REFERRAL_REWARD + ' JHOAL por referido válido');
   console.log('🛡️ hCaptcha DADOS: aleatorio entre ' + CAPTCHA_DICE_MIN_BETS + ' y ' + CAPTCHA_DICE_MAX_BETS + ' tiradas');
-  console.log('🛡️ hCaptcha HUERTO: en cada cosecha y compra');
+  console.log('📺 hCaptcha HUERTO: REMOVIDO (ahora usa anuncios In-App de Monetag)');
   console.log('🔒 Locks anti-doble-click: ACTIVADOS');
   console.log('⏳ Cooldown de compra de plantas: ' + BUY_COOLDOWN + 's');
   console.log('🚫 Venta de plantas: DESHABILITADA');
@@ -2177,6 +2215,7 @@ app.listen(process.env.PORT || 3000, () => {
   console.log('🧹 Limpieza automática de plantas: ACTIVADA');
   console.log('✅ VERIFICACIÓN DE DEPÓSITOS POR HASH: ACTIVA');
   console.log('⏰ Plazo máximo para verificar: ' + VERIFY_DEPOSIT_MAX_DAYS + ' días');
+  console.log('⏳ Expiración de plantas: se muestra en días/horas/minutos + fecha exacta local');
 
   cleanupOldPlants();
   cleanupExpiredPlants();
