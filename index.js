@@ -409,10 +409,10 @@ function requireAuth(req, res, next) {
 
 // ==== HUERTO ====
 const PLANT_LEVELS = {
-  basic:   { name: 'Básica',  emoji: '🌱', price: 10000, waterCost: 100,  fruitValue: 125 },
-  medium:  { name: 'Media',   emoji: '🌿', price: 20000, waterCost: 200,  fruitValue: 250 },
-  premium: { name: 'Premium', emoji: '🌳', price: 30000, waterCost: 300, fruitValue: 375 },
-  pro:     { name: 'Pro',     emoji: '🌴', price: 40000, waterCost: 400, fruitValue: 500 }
+  basic:   { name: 'Básica',  emoji: '🌱', price: 10000, waterCost: 70,  fruitValue: 125 },
+  medium:  { name: 'Media',   emoji: '🌿', price: 20000, waterCost: 140,  fruitValue: 250 },
+  premium: { name: 'Premium', emoji: '🌳', price: 30000, waterCost: 240, fruitValue: 375 },
+  pro:     { name: 'Pro',     emoji: '🌴', price: 40000, waterCost: 320, fruitValue: 500 }
 };
 const MAX_PLANTS = 12;
 const GROW_TIME_MIN = 25;
