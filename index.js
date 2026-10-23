@@ -461,7 +461,7 @@ async function findOrCreateUserByIdentity({ telegramId, googleId, email, name })
     google_id: googleId || null,
     email: email || null,
     display_name: name || null,
-    created_at: new Date().toISOString()
+    created_at: Math.floor(Date.now() / 1000)
   };
   const { data, error } = await supabase.from('users_balance').insert(insertData).select().maybeSingle();
   if (error) {
