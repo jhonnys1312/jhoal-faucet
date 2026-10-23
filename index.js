@@ -4,6 +4,8 @@ import { createClient } from '@supabase/supabase-js';
 import TelegramBot from 'node-telegram-bot-api';
 import cors from 'cors';
 import crypto from 'crypto';
+import jwt from 'jsonwebtoken';
+import { OAuth2Client } from 'google-auth-library';
 import 'dotenv/config';
 
 const app = express();
@@ -50,13 +52,20 @@ const SUPPORT_BOT_TOKEN = process.env.SUPPORT_BOT_TOKEN;
 const SUPPORT_CHAT_ID = process.env.SUPPORT_CHAT_ID;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_SECRET_KEY;
-const MINI_APP_URL = 'https://aged-math-48b9.jsac1234567890.workers.dev/';
+const MINI_APP_URL = process.env.MINI_APP_URL || 'https://aged-math-48b9.jsac1234567890.workers.dev/';
+const WEB_APP_URL = process.env.WEB_APP_URL || 'https://tudominio.com';
 const SUPPORT_USERNAME = 'JhoalSupportbot';
 const COOLDOWN = 30 * 60;
 const MIN_BET = 0.1;
 const MAX_BET = 1000;
 const WITHDRAW_COOLDOWN = 5 * 60;
 const VERIFY_DEPOSIT_MAX_DAYS = 7;
+
+// ==== AUTH CONFIG ====
+const JWT_SECRET = process.env.JWT_SECRET || 'cambiar-en-produccion-' + crypto.randomBytes(16).toString('hex');
+const JWT_EXPIRES_IN = '30d';
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
+const googleClient = GOOGLE_CLIENT_ID ? new OAuth2Client(GOOGLE_CLIENT_ID) : null;
 
 // ==== REFERIDOS ====
 const REFERRAL_REWARD = 1000;
@@ -373,7 +382,11 @@ async function notificarBendicion() {
 }
 scheduleBlessing();
 
-// ==== VALIDACIÓN INITDATA ====
+// ============================================================
+// ==== SISTEMA DE AUTENTICACIÓN UNIFICADO ====================
+// ============================================================
+
+// --- Validación de initData (Mini App) ---
 function validateInitData(initData) {
   if (!initData || !BOT_TOKEN) return null;
   try {
@@ -393,119 +406,275 @@ function validateInitData(initData) {
     const userJson = params.get('user');
     if (!userJson) return null;
     const userObj = JSON.parse(userJson);
-    return userObj.id ? String(userObj.id) : null;
+    return userObj.id ? { id: String(userObj.id), user: userObj } : null;
   } catch (e) { return null; }
 }
 
-function requireAuth(req, res, next) {
-  const initData = req.body.initData || req.headers['x-init-data'] || req.query.initData;
-  const verifiedUserId = validateInitData(initData);
-  if (!verifiedUserId) return res.status(401).json({ error: 'No autorizado: initData inválido o expirado' });
-  const claimedUserId = req.body.userId || req.params.userId;
-  if (claimedUserId && String(claimedUserId) !== String(verifiedUserId)) return res.status(401).json({ error: 'No autorizado: userId no coincide' });
-  req.userId = verifiedUserId;
-  next();
+// --- Validación del Login Widget de Telegram (web) ---
+function validateTelegramWidget(user) {
+  if (!user || !BOT_TOKEN) return null;
+  try {
+    const { hash, ...data } = user;
+    if (!hash) return null;
+    const dataCheckArr = Object.keys(data).sort().map(k => `${k}=${data[k]}`);
+    const dataCheckString = dataCheckArr.join('\n');
+    const secretKey = crypto.createHash('sha256').update(BOT_TOKEN).digest();
+    const calculatedHash = crypto.createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
+    if (calculatedHash !== hash) return null;
+    const authDate = parseInt(data.auth_date || '0');
+    if (Math.floor(Date.now() / 1000) - authDate > 86400) return null;
+    return data.id ? { id: String(data.id), user: data } : null;
+  } catch (e) { return null; }
 }
 
-// ==== HUERTO ====
-const PLANT_LEVELS = {
-  basic:   { name: 'Básica',  emoji: '🌱', price: 10000, waterCost: 70,  fruitValue: 125 },
-  medium:  { name: 'Media',   emoji: '🌿', price: 20000, waterCost: 140,  fruitValue: 250 },
-  premium: { name: 'Premium', emoji: '🌳', price: 30000, waterCost: 240, fruitValue: 375 },
-  pro:     { name: 'Pro',     emoji: '🌴', price: 40000, waterCost: 320, fruitValue: 500 }
-};
-const MAX_PLANTS = 12;
-const GROW_TIME_MIN = 25;
-const PERFECT_WINDOW = 35;
-const ROT_TIME = 60;
-const PLANT_LIFETIME_DAYS = 30;
-const PLANT_LIFETIME_SECONDS = PLANT_LIFETIME_DAYS * 24 * 60 * 60;
+// --- JWT helpers ---
+function signJWT(payload) {
+  return jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
+}
+function verifyJWT(token) {
+  try { return jwt.verify(token, JWT_SECRET); } catch (e) { return null; }
+}
 
-// 🔥 ACTUALIZADO: devuelve hoursLeft y timeLeftText además de daysLeft
-function getPlantStatus(plant) {
-  const now = Math.floor(Date.now() / 1000);
-  const level = PLANT_LEVELS[plant.level];
-  const createdAt = plant.created_at || now;
-  const ageSeconds = now - createdAt;
-  const lifetimeLeft = PLANT_LIFETIME_SECONDS - ageSeconds;
+// --- Crear/actualizar usuario por identidad externa ---
+async function findOrCreateUserByIdentity({ telegramId, googleId, email, name }) {
+  // Buscar por telegram_id
+  if (telegramId) {
+    const { data } = await supabase.from('users_balance').select('*').eq('user_id', String(telegramId)).maybeSingle();
+    if (data) return data;
+  }
+  // Buscar por google_id
+  if (googleId) {
+    const { data } = await supabase.from('users_balance').select('*').eq('google_id', googleId).maybeSingle();
+    if (data) return data;
+  }
+  // Buscar por email
+  if (email) {
+    const { data } = await supabase.from('users_balance').select('*').eq('email', email).maybeSingle();
+    if (data) return data;
+  }
+  // Crear nuevo
+  const userId = telegramId ? String(telegramId) : (googleId ? 'g_' + googleId : 'u_' + crypto.randomBytes(8).toString('hex'));
+  const insertData = {
+    user_id: userId,
+    balance: 0,
+    telegram_id: telegramId || null,
+    google_id: googleId || null,
+    email: email || null,
+    display_name: name || null,
+    created_at: Math.floor(Date.now() / 1000)
+  };
+  const { data, error } = await supabase.from('users_balance').insert(insertData).select().maybeSingle();
+  if (error) {
+    console.error('Error creando usuario:', error.message);
+    // Fallback: intentar obtener por user_id
+    const { data: fallback } = await supabase.from('users_balance').select('*').eq('user_id', userId).maybeSingle();
+    return fallback;
+  }
+  return data;
+}
 
-  // Cálculo de tiempo restante detallado
-  let daysLeft = 0, hoursLeft = 0, minutesLeftLifetime = 0, timeLeftText = '';
-  if (lifetimeLeft > 0) {
-    daysLeft = Math.floor(lifetimeLeft / 86400);
-    hoursLeft = Math.floor((lifetimeLeft % 86400) / 3600);
-    minutesLeftLifetime = Math.floor((lifetimeLeft % 3600) / 60);
-    if (daysLeft > 0) {
-      timeLeftText = daysLeft + 'd ' + hoursLeft + 'h';
-    } else if (hoursLeft > 0) {
-      timeLeftText = hoursLeft + 'h ' + minutesLeftLifetime + 'm';
-    } else {
-      timeLeftText = minutesLeftLifetime + 'm';
+// --- Middleware unificado ---
+async function requireAuth(req, res, next) {
+  try {
+    // 1. Intentar Mini App (initData)
+    const initData = req.body?.initData || req.headers['x-init-data'] || req.query?.initData;
+    if (initData) {
+      const verified = validateInitData(initData);
+      if (!verified) return res.status(401).json({ error: 'initData inválido o expirado' });
+      const user = await findOrCreateUserByIdentity({
+        telegramId: verified.id,
+        name: verified.user.first_name
+      });
+      if (!user) return res.status(500).json({ error: 'Error de usuario' });
+      req.userId = String(user.user_id);
+      req.authMethod = 'telegram_miniapp';
+      req.user = user;
+      return next();
     }
-  } else {
-    timeLeftText = '0m';
+
+    // 2. Intentar JWT (web)
+    const authHeader = req.headers['authorization'];
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const payload = verifyJWT(authHeader.slice(7));
+      if (!payload) return res.status(401).json({ error: 'JWT inválido o expirado' });
+      const { data: user } = await supabase.from('users_balance').select('*').eq('user_id', payload.uid).maybeSingle();
+      if (!user) return res.status(401).json({ error: 'Usuario no encontrado' });
+      req.userId = String(user.user_id);
+      req.authMethod = payload.method;
+      req.user = user;
+      return next();
+    }
+
+    return res.status(401).json({ error: 'No autorizado: falta initData o Bearer token' });
+  } catch (e) {
+    console.error('Error en requireAuth:', e);
+    return res.status(500).json({ error: 'Error de autenticación' });
   }
-
-  if (lifetimeLeft <= 0) return {
-    status: 'expired', value: 0, minutesLeft: 0, progress: 0, canRefund: false,
-    daysLeft: 0, hoursLeft: 0, timeLeftText: '0m',
-    expiresAt: createdAt + PLANT_LIFETIME_SECONDS
-  };
-
-  if (plant.status === 'dry' || !plant.last_watered) return {
-    status: 'dry', value: 0, minutesLeft: 0, progress: 0, canRefund: false,
-    daysLeft, hoursLeft, timeLeftText,
-    expiresAt: createdAt + PLANT_LIFETIME_SECONDS
-  };
-
-  const moonMult = parseFloat(plant.moon_multiplier || 1) || 1;
-  const effectiveGrowTime = GROW_TIME_MIN / moonMult;
-  const elapsed = (now - plant.last_watered) / 60;
-
-  if (elapsed < effectiveGrowTime) {
-    const progress = Math.floor((elapsed / effectiveGrowTime) * 100);
-    return {
-      status: 'growing', value: 0,
-      minutesLeft: Math.ceil(effectiveGrowTime - elapsed),
-      progress: Math.min(progress, 99), canRefund: false, moonBoost: moonMult > 1,
-      daysLeft, hoursLeft, timeLeftText,
-      expiresAt: createdAt + PLANT_LIFETIME_SECONDS
-    };
-  }
-
-  const elapsedSinceReady = elapsed - effectiveGrowTime;
-  const perfectDuration = PERFECT_WINDOW - GROW_TIME_MIN;
-
-  if (elapsedSinceReady <= perfectDuration) return {
-    status: 'ready', value: level.fruitValue,
-    minutesLeft: Math.ceil(perfectDuration - elapsedSinceReady),
-    progress: 100, canRefund: false, moonBoost: moonMult > 1,
-    daysLeft, hoursLeft, timeLeftText,
-    expiresAt: createdAt + PLANT_LIFETIME_SECONDS
-  };
-
-  const witheringTotal = ROT_TIME - PERFECT_WINDOW;
-  const witheringElapsed = elapsedSinceReady - perfectDuration;
-
-  if (witheringElapsed <= witheringTotal) {
-    const withering = witheringElapsed / witheringTotal;
-    const value = level.fruitValue * (1 - withering * 0.1);
-    return {
-      status: 'withering', value: Math.max(0, value),
-      minutesLeft: Math.ceil(witheringTotal - witheringElapsed),
-      progress: 100, canRefund: false, moonBoost: moonMult > 1,
-      daysLeft, hoursLeft, timeLeftText,
-      expiresAt: createdAt + PLANT_LIFETIME_SECONDS
-    };
-  }
-
-  return {
-    status: 'rotten', value: 0, minutesLeft: 0, progress: 0, canRefund: true,
-    moonBoost: moonMult > 1,
-    daysLeft, hoursLeft, timeLeftText,
-    expiresAt: createdAt + PLANT_LIFETIME_SECONDS
-  };
 }
+
+// --- Endpoints de autenticación ---
+
+// POST /auth/google  { credential }
+app.post('/auth/google', async (req, res) => {
+  try {
+    if (!googleClient) return res.status(500).json({ error: 'GOOGLE_CLIENT_ID no configurado' });
+    const { credential } = req.body;
+    if (!credential) return res.status(400).json({ error: 'Falta credential' });
+
+    const ticket = await googleClient.verifyIdToken({
+      idToken: credential,
+      audience: GOOGLE_CLIENT_ID
+    });
+    const payload = ticket.getPayload();
+    if (!payload || !payload.sub) return res.status(401).json({ error: 'Token de Google inválido' });
+
+    const user = await findOrCreateUserByIdentity({
+      googleId: payload.sub,
+      email: payload.email,
+      name: payload.name
+    });
+    if (!user) return res.status(500).json({ error: 'Error de usuario' });
+
+    const jwtToken = signJWT({ uid: user.user_id, method: 'google' });
+    res.json({
+      success: true,
+      token: jwtToken,
+      user: {
+        userId: user.user_id,
+        balance: parseFloat(user.balance || 0),
+        email: user.email,
+        hasTelegram: !!user.telegram_id
+      }
+    });
+  } catch (e) {
+    console.error('Error /auth/google:', e.message);
+    res.status(401).json({ error: 'Token de Google inválido: ' + e.message });
+  }
+});
+
+// POST /auth/telegram-widget  { ...user del widget }
+app.post('/auth/telegram-widget', async (req, res) => {
+  try {
+    const verified = validateTelegramWidget(req.body);
+    if (!verified) return res.status(401).json({ error: 'Hash de Telegram inválido' });
+
+    const user = await findOrCreateUserByIdentity({
+      telegramId: verified.id,
+      name: verified.user.first_name
+    });
+    if (!user) return res.status(500).json({ error: 'Error de usuario' });
+
+    const jwtToken = signJWT({ uid: user.user_id, method: 'telegram_widget' });
+    res.json({
+      success: true,
+      token: jwtToken,
+      user: {
+        userId: user.user_id,
+        balance: parseFloat(user.balance || 0),
+        hasTelegram: true,
+        hasGoogle: !!user.google_id
+      }
+    });
+  } catch (e) {
+    console.error('Error /auth/telegram-widget:', e.message);
+    res.status(401).json({ error: 'Error de login Telegram: ' + e.message });
+  }
+});
+
+// POST /auth/link-telegram  (usuario Google logueado vincula su Telegram)
+// body: { widgetData: {...} }  + header Authorization: Bearer <jwt>
+app.post('/auth/link-telegram', async (req, res) => {
+  try {
+    const authHeader = req.headers['authorization'];
+    if (!authHeader || !authHeader.startsWith('Bearer ')) return res.status(401).json({ error: 'Falta JWT' });
+    const payload = verifyJWT(authHeader.slice(7));
+    if (!payload) return res.status(401).json({ error: 'JWT inválido' });
+
+    const verified = validateTelegramWidget(req.body.widgetData || req.body);
+    if (!verified) return res.status(401).json({ error: 'Hash de Telegram inválido' });
+
+    // Verificar que ese telegram_id no esté ya en otra cuenta
+    const { data: existing } = await supabase.from('users_balance').select('user_id').eq('user_id', verified.id).maybeSingle();
+    if (existing && String(existing.user_id) !== String(payload.uid)) {
+      return res.status(409).json({ error: 'Ese Telegram ya está vinculado a otra cuenta. Iniciá sesión con Telegram en su lugar.' });
+    }
+
+    const { error } = await supabase.from('users_balance')
+      .update({ telegram_id: verified.id, chat_id: verified.id })
+      .eq('user_id', payload.uid);
+    if (error) return res.status(500).json({ error: error.message });
+
+    res.json({ success: true, message: '✅ Telegram vinculado correctamente' });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /auth/link-google  (usuario Telegram vincula Google)
+app.post('/auth/link-google', async (req, res) => {
+  try {
+    const authHeader = req.headers['authorization'];
+    if (!authHeader || !authHeader.startsWith('Bearer ')) return res.status(401).json({ error: 'Falta JWT' });
+    const payload = verifyJWT(authHeader.slice(7));
+    if (!payload) return res.status(401).json({ error: 'JWT inválido' });
+
+    if (!googleClient) return res.status(500).json({ error: 'GOOGLE_CLIENT_ID no configurado' });
+    const { credential } = req.body;
+    if (!credential) return res.status(400).json({ error: 'Falta credential' });
+
+    const ticket = await googleClient.verifyIdToken({ idToken: credential, audience: GOOGLE_CLIENT_ID });
+    const gPayload = ticket.getPayload();
+
+    // Verificar que ese google_id no esté ya en otra cuenta
+    const { data: existing } = await supabase.from('users_balance').select('user_id').eq('google_id', gPayload.sub).maybeSingle();
+    if (existing && String(existing.user_id) !== String(payload.uid)) {
+      return res.status(409).json({ error: 'Ese Google ya está vinculado a otra cuenta.' });
+    }
+
+    const { error } = await supabase.from('users_balance')
+      .update({ google_id: gPayload.sub, email: gPayload.email })
+      .eq('user_id', payload.uid);
+    if (error) return res.status(500).json({ error: error.message });
+
+    res.json({ success: true, message: '✅ Google vinculado correctamente', email: gPayload.email });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /auth/me
+app.get('/auth/me', requireAuth, async (req, res) => {
+  const u = req.user;
+  res.json({
+    success: true,
+    userId: u.user_id,
+    authMethod: req.authMethod,
+    balance: parseFloat(u.balance || 0),
+    walletBalance: parseFloat(u.wallet_balance || 0),
+    email: u.email || null,
+    telegramId: u.telegram_id || null,
+    googleId: u.google_id || null,
+    hasTelegram: !!u.telegram_id,
+    hasGoogle: !!u.google_id,
+    displayName: u.display_name || null
+  });
+});
+
+// GET /auth/config  (para el frontend, saber sitekeys)
+app.get('/auth/config', (req, res) => {
+  res.json({
+    success: true,
+    googleClientId: GOOGLE_CLIENT_ID || null,
+    telegramBotUsername: REFERRAL_BOT_USERNAME,
+    hcaptchaSiteKey: HCAPTCHA_SITE_KEY,
+    miniAppUrl: MINI_APP_URL,
+    webAppUrl: WEB_APP_URL
+  });
+});
+
+// ============================================================
+// ==== FIN SISTEMA DE AUTENTICACIÓN =========================
+// ============================================================
 
 // ==== HELPERS ====
 function timeAgo(timestamp) {
@@ -841,6 +1010,104 @@ function scheduleBurnAtMidnight() {
     await sendPendingBurns();
     scheduleBurnAtMidnight();
   }, msUntilMidnight);
+}
+
+// ==== HUERTO ====
+const PLANT_LEVELS = {
+  basic:   { name: 'Básica',  emoji: '🌱', price: 10000, waterCost: 70,  fruitValue: 125 },
+  medium:  { name: 'Media',   emoji: '🌿', price: 20000, waterCost: 140,  fruitValue: 250 },
+  premium: { name: 'Premium', emoji: '🌳', price: 30000, waterCost: 240, fruitValue: 375 },
+  pro:     { name: 'Pro',     emoji: '🌴', price: 40000, waterCost: 320, fruitValue: 500 }
+};
+const MAX_PLANTS = 12;
+const GROW_TIME_MIN = 25;
+const PERFECT_WINDOW = 35;
+const ROT_TIME = 60;
+const PLANT_LIFETIME_DAYS = 30;
+const PLANT_LIFETIME_SECONDS = PLANT_LIFETIME_DAYS * 24 * 60 * 60;
+
+function getPlantStatus(plant) {
+  const now = Math.floor(Date.now() / 1000);
+  const level = PLANT_LEVELS[plant.level];
+  const createdAt = plant.created_at || now;
+  const ageSeconds = now - createdAt;
+  const lifetimeLeft = PLANT_LIFETIME_SECONDS - ageSeconds;
+
+  let daysLeft = 0, hoursLeft = 0, minutesLeftLifetime = 0, timeLeftText = '';
+  if (lifetimeLeft > 0) {
+    daysLeft = Math.floor(lifetimeLeft / 86400);
+    hoursLeft = Math.floor((lifetimeLeft % 86400) / 3600);
+    minutesLeftLifetime = Math.floor((lifetimeLeft % 3600) / 60);
+    if (daysLeft > 0) {
+      timeLeftText = daysLeft + 'd ' + hoursLeft + 'h';
+    } else if (hoursLeft > 0) {
+      timeLeftText = hoursLeft + 'h ' + minutesLeftLifetime + 'm';
+    } else {
+      timeLeftText = minutesLeftLifetime + 'm';
+    }
+  } else {
+    timeLeftText = '0m';
+  }
+
+  if (lifetimeLeft <= 0) return {
+    status: 'expired', value: 0, minutesLeft: 0, progress: 0, canRefund: false,
+    daysLeft: 0, hoursLeft: 0, timeLeftText: '0m',
+    expiresAt: createdAt + PLANT_LIFETIME_SECONDS
+  };
+
+  if (plant.status === 'dry' || !plant.last_watered) return {
+    status: 'dry', value: 0, minutesLeft: 0, progress: 0, canRefund: false,
+    daysLeft, hoursLeft, timeLeftText,
+    expiresAt: createdAt + PLANT_LIFETIME_SECONDS
+  };
+
+  const moonMult = parseFloat(plant.moon_multiplier || 1) || 1;
+  const effectiveGrowTime = GROW_TIME_MIN / moonMult;
+  const elapsed = (now - plant.last_watered) / 60;
+
+  if (elapsed < effectiveGrowTime) {
+    const progress = Math.floor((elapsed / effectiveGrowTime) * 100);
+    return {
+      status: 'growing', value: 0,
+      minutesLeft: Math.ceil(effectiveGrowTime - elapsed),
+      progress: Math.min(progress, 99), canRefund: false, moonBoost: moonMult > 1,
+      daysLeft, hoursLeft, timeLeftText,
+      expiresAt: createdAt + PLANT_LIFETIME_SECONDS
+    };
+  }
+
+  const elapsedSinceReady = elapsed - effectiveGrowTime;
+  const perfectDuration = PERFECT_WINDOW - GROW_TIME_MIN;
+
+  if (elapsedSinceReady <= perfectDuration) return {
+    status: 'ready', value: level.fruitValue,
+    minutesLeft: Math.ceil(perfectDuration - elapsedSinceReady),
+    progress: 100, canRefund: false, moonBoost: moonMult > 1,
+    daysLeft, hoursLeft, timeLeftText,
+    expiresAt: createdAt + PLANT_LIFETIME_SECONDS
+  };
+
+  const witheringTotal = ROT_TIME - PERFECT_WINDOW;
+  const witheringElapsed = elapsedSinceReady - perfectDuration;
+
+  if (witheringElapsed <= witheringTotal) {
+    const withering = witheringElapsed / witheringTotal;
+    const value = level.fruitValue * (1 - withering * 0.1);
+    return {
+      status: 'withering', value: Math.max(0, value),
+      minutesLeft: Math.ceil(witheringTotal - witheringElapsed),
+      progress: 100, canRefund: false, moonBoost: moonMult > 1,
+      daysLeft, hoursLeft, timeLeftText,
+      expiresAt: createdAt + PLANT_LIFETIME_SECONDS
+    };
+  }
+
+  return {
+    status: 'rotten', value: 0, minutesLeft: 0, progress: 0, canRefund: true,
+    moonBoost: moonMult > 1,
+    daysLeft, hoursLeft, timeLeftText,
+    expiresAt: createdAt + PLANT_LIFETIME_SECONDS
+  };
 }
 
 // ==== ENDPOINTS ====
@@ -1304,7 +1571,6 @@ const SKILL_NAMES = {
   iman: { 1: 'Imán Básico', 2: 'Imán Media', 3: 'Imán Pro' }
 };
 
-// Obtener skills del jugador
 app.get('/my-skills/:userId', requireAuth, async (req, res) => {
   try {
     const userId = req.userId;
@@ -1326,7 +1592,6 @@ app.get('/my-skills/:userId', requireAuth, async (req, res) => {
   }
 });
 
-// Comprar skill
 app.post('/buy-skill', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { skillType, level } = req.body;
@@ -1506,7 +1771,6 @@ app.post('/refund-plant', requireAuth, async (req, res) => {
   else res.status(400).json({ error: result.error });
 });
 
-// 🔥 ACTUALIZADO: incluye hoursLeft y timeLeftText en la respuesta
 app.get('/my-plants/:userId', requireAuth, async (req, res) => {
   try {
     const userId = req.userId;
@@ -1599,7 +1863,7 @@ app.get('/huerto-warning', (req, res) => {
   });
 });
 
-app.get('/', (req, res) => res.json({ status: 'Horus Faucet + Dados + Huerto + Historial + Luna Llena + Bendición + AdsGram + Referidos + Predicciones + Minas + hCaptcha (solo dados) + Verificación de Depósitos por Hash' }));
+app.get('/', (req, res) => res.json({ status: 'Horus Faucet + Dados + Huerto + Historial + Luna Llena + Bendición + AdsGram + Referidos + Predicciones + Minas + hCaptcha (solo dados) + Verificación de Depósitos por Hash + Auth Google/Telegram' }));
 
 // ==== ENDPOINTS DE PREDICCIÓN ====
 app.get('/prediction/current', requireAuth, async (req, res) => {
@@ -1818,9 +2082,8 @@ app.get('/prediction/last-winners', async (req, res) => {
 
 // ==== MINAS DE HORUS ====
 
-const MINES_MAX_CASHOUT = 400; // máximo por partida (antifraude)
+const MINES_MAX_CASHOUT = 400;
 
-// Endpoint: Iniciar partida
 app.post('/mines/start', requireAuth, async (req, res) => {
   const userId = req.userId;
   try {
@@ -1831,7 +2094,6 @@ app.post('/mines/start', requireAuth, async (req, res) => {
   }
 });
 
-// Endpoint: Acreditar premio de partida
 app.post('/mines/cashout', requireAuth, async (req, res) => {
   const userId = req.userId;
   const { amount, type } = req.body;
@@ -1894,7 +2156,7 @@ if (BOT_TOKEN) {
       }
     }
   }).then(() => {
-    console.log('✅ Botón de menú (azul) actualizado a Cloudflare');
+    console.log('✅ Botón de menú (azul) actualizado');
   }).catch((err) => {
     console.log('❌ Error actualizando botón de menú:', err.message);
   });
@@ -2199,9 +2461,9 @@ if (SUPPORT_BOT_TOKEN && SUPPORT_CHAT_ID) {
 app.listen(process.env.PORT || 3000, () => {
   console.log('Horus Faucet corriendo en puerto', process.env.PORT || 3000);
   console.log('Wallet:', wallet.address);
+  console.log('🔐 Auth: Google + Telegram (Mini App + Widget) + JWT');
   console.log('🎁 Referidos: +' + REFERRAL_REWARD + ' JHOAL por referido válido');
   console.log('🛡️ hCaptcha DADOS: aleatorio entre ' + CAPTCHA_DICE_MIN_BETS + ' y ' + CAPTCHA_DICE_MAX_BETS + ' tiradas');
-  console.log('📺 hCaptcha HUERTO: REMOVIDO (ahora usa anuncios In-App de Monetag)');
   console.log('🔒 Locks anti-doble-click: ACTIVADOS');
   console.log('⏳ Cooldown de compra de plantas: ' + BUY_COOLDOWN + 's');
   console.log('🚫 Venta de plantas: DESHABILITADA');
@@ -2215,7 +2477,6 @@ app.listen(process.env.PORT || 3000, () => {
   console.log('🧹 Limpieza automática de plantas: ACTIVADA');
   console.log('✅ VERIFICACIÓN DE DEPÓSITOS POR HASH: ACTIVA');
   console.log('⏰ Plazo máximo para verificar: ' + VERIFY_DEPOSIT_MAX_DAYS + ' días');
-  console.log('⏳ Expiración de plantas: se muestra en días/horas/minutos + fecha exacta local');
 
   cleanupOldPlants();
   cleanupExpiredPlants();
