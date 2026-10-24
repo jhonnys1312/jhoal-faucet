@@ -579,6 +579,44 @@ app.post('/auth/google', async (req, res) => {
   }
 });
 // POST /auth/telegram-widget  { ...user del widget }
+// 1. Ruta para generar el código en la Web (requiere estar logueado con Google)
+app.post('/auth/generate-tg-code', requireAuth, async (req, res) => {
+  try {
+    // Genera un código aleatorio de 6 letras (ej: A1B2C3)
+    const code = crypto.randomBytes(3).toString('hex').toUpperCase();
+    
+    await supabase.from('users_balance').update({ link_code: code }).eq('user_id', req.userId);
+    
+    res.json({ success: true, code: code });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 2. Ruta para validar el código desde Telegram
+app.post('/auth/verify-tg-code', async (req, res) => {
+  try {
+    const { code, initData } = req.body;
+    
+    // Validar que viene de Telegram
+    const verified = validateInitData(initData, process.env.BOT_TOKEN);
+    if (!verified) return res.status(401).json({ error: 'Telegram inválido' });
+
+    // Buscar al usuario que tiene ese código
+    const { data: user } = await supabase.from('users_balance').select('*').eq('link_code', code).maybeSingle();
+    if (!user) return res.status(404).json({ error: 'Código incorrecto o expirado' });
+
+    // Unir la cuenta: Le ponemos el telegram_id al usuario de la web y borramos el código
+    await supabase.from('users_balance').update({ 
+      telegram_id: String(verified.id),
+      link_code: null 
+    }).eq('user_id', user.user_id);
+
+    res.json({ success: true, message: 'Cuenta vinculada' });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 app.post('/auth/telegram-widget', async (req, res) => {
   try {
     const verified = validateTelegramWidget(req.body);
