@@ -518,7 +518,9 @@ async function requireAuth(req, res, next) {
 app.post('/auth/google', async (req, res) => {
   try {
     if (!googleClient) return res.status(500).json({ error: 'GOOGLE_CLIENT_ID no configurado' });
-    const { credential } = req.body;
+    
+    // 1. Recibimos también el linkToTelegramId desde el frontend
+    const { credential, linkToTelegramId } = req.body;
     if (!credential) return res.status(400).json({ error: 'Falta credential' });
 
     const ticket = await googleClient.verifyIdToken({
@@ -528,11 +530,35 @@ app.post('/auth/google', async (req, res) => {
     const payload = ticket.getPayload();
     if (!payload || !payload.sub) return res.status(401).json({ error: 'Token de Google inválido' });
 
-    const user = await findOrCreateUserByIdentity({
-      googleId: payload.sub,
-      email: payload.email,
-      name: payload.name
-    });
+    let user;
+
+    // 2. SI VIENE DE TELEGRAM: Buscamos al usuario de Telegram y lo vinculamos
+    if (linkToTelegramId) {
+      // Buscamos al usuario en tu base de datos (asumiendo que usas SQL, ajústalo a tu DB)
+      const tgUser = await db.get('SELECT * FROM users WHERE telegram_id = ?', [linkToTelegramId]);
+      
+      if (!tgUser) {
+        return res.status(404).json({ error: 'Usuario de Telegram no encontrado' });
+      }
+
+      // Actualizamos ese usuario con los datos de Google
+      await db.run(
+        'UPDATE users SET google_id = ?, email = ? WHERE user_id = ?',
+        [payload.sub, payload.email, tgUser.user_id]
+      );
+
+      // Volvemos a buscar el usuario ya actualizado
+      user = await db.get('SELECT * FROM users WHERE user_id = ?', [tgUser.user_id]);
+    } 
+    // 3. SI ES UN LOGIN NORMAL EN LA WEB: Hacemos lo que ya hacías
+    else {
+      user = await findOrCreateUserByIdentity({
+        googleId: payload.sub,
+        email: payload.email,
+        name: payload.name
+      });
+    }
+
     if (!user) return res.status(500).json({ error: 'Error de usuario' });
 
     const jwtToken = signJWT({ uid: user.user_id, method: 'google' });
@@ -543,7 +569,8 @@ app.post('/auth/google', async (req, res) => {
         userId: user.user_id,
         balance: parseFloat(user.balance || 0),
         email: user.email,
-        hasTelegram: !!user.telegram_id
+        hasTelegram: !!user.telegram_id,
+        hasGoogle: true // Añadimos esto por si lo usas en el frontend
       }
     });
   } catch (e) {
@@ -551,7 +578,6 @@ app.post('/auth/google', async (req, res) => {
     res.status(401).json({ error: 'Token de Google inválido: ' + e.message });
   }
 });
-
 // POST /auth/telegram-widget  { ...user del widget }
 app.post('/auth/telegram-widget', async (req, res) => {
   try {
