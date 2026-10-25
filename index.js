@@ -391,25 +391,42 @@ function signJWT(payload) { return jwt.sign(payload, JWT_SECRET, { expiresIn: JW
 function verifyJWT(token) { try { return jwt.verify(token, JWT_SECRET); } catch (e) { return null; } }
 
 async function findOrCreateUserByIdentity({ telegramId, googleId, email, name }) {
+  // 1. BUSCAR POR telegram_id (Prioridad para cuentas vinculadas)
   if (telegramId) {
-    const { data } = await supabase.from('users_balance').select('*').eq('user_id', String(telegramId)).maybeSingle();
+    const { data } = await supabase.from('users_balance').select('*').eq('telegram_id', String(telegramId)).maybeSingle();
     if (data) return data;
+
+    // 2. Si no encuentra, buscar por user_id (Cuentas de Telegram viejas no vinculadas)
+    const { data: oldData } = await supabase.from('users_balance').select('*').eq('user_id', String(telegramId)).maybeSingle();
+    if (oldData) return oldData;
   }
+  
+  // 3. Buscar por google_id
   if (googleId) {
     const { data } = await supabase.from('users_balance').select('*').eq('google_id', googleId).maybeSingle();
     if (data) return data;
   }
+  
+  // 4. Buscar por email
   if (email) {
     const { data } = await supabase.from('users_balance').select('*').eq('email', email).maybeSingle();
     if (data) return data;
   }
+
+  // 5. Crear nuevo usuario si no existe
   const userId = telegramId ? String(telegramId) : (googleId ? 'g_' + googleId : 'u_' + crypto.randomBytes(8).toString('hex'));
   const insertData = {
-    user_id: userId, balance: 0, telegram_id: telegramId || null, google_id: googleId || null,
-    email: email || null, display_name: name || null, created_at: new Date().toISOString()
+    user_id: userId,
+    balance: 0,
+    telegram_id: telegramId || null,
+    google_id: googleId || null,
+    email: email || null,
+    display_name: name || null,
+    created_at: new Date().toISOString()
   };
   const { data, error } = await supabase.from('users_balance').insert(insertData).select().maybeSingle();
   if (error) {
+    console.error('Error creando usuario:', error.message);
     const { data: fallback } = await supabase.from('users_balance').select('*').eq('user_id', userId).maybeSingle();
     return fallback;
   }
@@ -483,15 +500,43 @@ app.post('/auth/generate-tg-code', requireAuth, async (req, res) => {
 app.post('/auth/verify-tg-code', async (req, res) => {
   try {
     const { code, initData } = req.body;
+    
     const verified = validateInitData(initData);
     if (!verified) return res.status(401).json({ error: 'Telegram inválido o expirado' });
 
-    const { data: user } = await supabase.from('users_balance').select('*').eq('link_code', code).maybeSingle();
-    if (!user) return res.status(404).json({ error: 'Código incorrecto o ya expiró' });
+    // 1. Buscamos al usuario de la WEB que generó el código
+    const { data: webUser } = await supabase.from('users_balance').select('*').eq('link_code', code).maybeSingle();
+    if (!webUser) return res.status(404).json({ error: 'Código incorrecto o ya expiró' });
 
-    await supabase.from('users_balance').update({ telegram_id: String(verified.id), chat_id: String(verified.id), link_code: null }).eq('user_id', user.user_id);
-    res.json({ success: true, message: 'Cuenta vinculada' });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+    // 2. Verificamos si ya existía una cuenta de Telegram con ese ID (para unir saldos)
+    const { data: oldTgUser } = await supabase.from('users_balance').select('*').eq('user_id', String(verified.id)).maybeSingle();
+
+    let finalBalance = parseFloat(webUser.balance || 0);
+    
+    // Si existía la cuenta de Telegram vieja, le sumamos su saldo a la nueva cuenta web
+    if (oldTgUser && oldTgUser.user_id !== webUser.user_id) {
+      finalBalance += parseFloat(oldTgUser.balance || 0);
+      // Le quitamos el telegram_id a la cuenta vieja para que no haya duplicados
+      await supabase.from('users_balance').update({ telegram_id: null, chat_id: null }).eq('user_id', oldTgUser.user_id);
+    }
+
+    // 3. Actualizamos la cuenta de la WEB con el Telegram ID y el saldo unificado
+    const { error: errUpdate } = await supabase
+      .from('users_balance')
+      .update({ 
+        telegram_id: String(verified.id),
+        chat_id: String(verified.id),
+        link_code: null,
+        balance: finalBalance
+      })
+      .eq('user_id', webUser.user_id);
+
+    if (errUpdate) return res.status(500).json({ error: 'Error al guardar en la base de datos' });
+
+    res.json({ success: true, message: '¡Cuenta vinculada con éxito!' });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.post('/auth/telegram-widget', async (req, res) => {
