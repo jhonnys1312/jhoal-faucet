@@ -519,7 +519,41 @@ app.post('/auth/google', async (req, res) => {
     res.status(401).json({ error: 'Token de Google inválido: ' + e.message });
   }
 });
+app.post('/auth/telegram-widget', async (req, res) => {
+  try {
+    const userData = req.body;
+    // 1. Validamos los datos que vienen del botón de Telegram en la web
+    const verified = validateTelegramWidget(userData);
+    if (!verified) {
+      return res.status(401).json({ error: 'Datos de Telegram inválidos o expirados' });
+    }
 
+    // 2. Buscamos o creamos al usuario en Supabase
+    const user = await findOrCreateUserByIdentity({
+      telegramId: verified.id,
+      name: verified.user.first_name
+    });
+
+    if (!user) return res.status(500).json({ error: 'Error al buscar el usuario' });
+
+    // 3. Le entregamos el Token (JWT) para que la web lo deje pasar
+    const jwtToken = signJWT({ uid: user.user_id, method: 'telegram_widget' });
+
+    res.json({
+      success: true,
+      token: jwtToken,
+      user: {
+        userId: user.user_id,
+        balance: parseFloat(user.balance || 0),
+        hasTelegram: true,
+        hasGoogle: !!user.google_id
+      }
+    });
+  } catch (e) {
+    console.error('Error /auth/telegram-widget:', e.message);
+    res.status(500).json({ error: 'Error interno del servidor' });
+  }
+});
 app.post('/auth/generate-tg-code', requireAuth, async (req, res) => {
   try {
     const code = crypto.randomBytes(3).toString('hex').toUpperCase();
@@ -528,59 +562,7 @@ app.post('/auth/generate-tg-code', requireAuth, async (req, res) => {
     res.json({ success: true, code: code });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
-app.post('/auth/verify-tg-code', async (req, res) => {
-  try {
-    const { code, initData } = req.body;
-    
-    // 1. Verificamos que venga de Telegram
-    const verified = validateInitData(initData);
-    if (!verified) {
-      return res.status(401).json({ error: 'Los datos de Telegram no son válidos o expiraron. Asegúrate de abrir la app desde el botón del bot.' });
-    }
 
-    // 2. Buscamos la cuenta que tiene ese código
-    const { data: webUser, error: errFind } = await supabase.from('users_balance').select('*').eq('link_code', code).maybeSingle();
-    if (!webUser) {
-      return res.status(404).json({ error: 'El código ingresado no existe o ya fue usado.' });
-    }
-
-    // 3. Verificamos si ya hay cuentas duplicadas (tu regla de bloqueo)
-    const { data: existingTg } = await supabase.from('users_balance').select('*').eq('telegram_id', String(verified.id)).maybeSingle();
-    if (existingTg && existingTg.user_id !== webUser.user_id) {
-      return res.status(400).json({ error: 'Esta cuenta de Telegram ya está vinculada a otro correo.' });
-    }
-
-    if (webUser.telegram_id && String(webUser.telegram_id) !== String(verified.id)) {
-      return res.status(400).json({ error: 'Este correo ya está vinculado a otro Telegram.' });
-    }
-
-    // 4. Vinculamos
-    let finalBalance = parseFloat(webUser.balance || 0);
-    if (existingTg && existingTg.user_id !== webUser.user_id) {
-        finalBalance += parseFloat(existingTg.balance || 0);
-        await supabase.from('users_balance').update({ telegram_id: null, chat_id: null }).eq('user_id', existingTg.user_id);
-    }
-
-    const { error: errUpdate } = await supabase
-      .from('users_balance')
-      .update({ 
-        telegram_id: String(verified.id),
-        chat_id: String(verified.id),
-        link_code: null,
-        balance: finalBalance
-      })
-      .eq('user_id', webUser.user_id);
-
-    if (errUpdate) {
-      return res.status(500).json({ error: 'Error de base de datos: ' + errUpdate.message });
-    }
-
-    res.json({ success: true, message: '¡Cuenta vinculada con éxito!' });
-  } catch (e) {
-    console.error('Error en verify-tg-code:', e);
-    res.status(500).json({ error: 'Error interno del servidor: ' + e.message });
-  }
-});
 app.post('/auth/verify-tg-code', async (req, res) => {
   try {
     const { code, initData } = req.body;
