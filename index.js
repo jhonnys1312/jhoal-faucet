@@ -581,31 +581,39 @@ app.post('/auth/verify-tg-code', async (req, res) => {
     res.status(500).json({ error: 'Error interno del servidor: ' + e.message });
   }
 });
-
-app.post('/auth/telegram-widget', async (req, res) => {
+app.post('/auth/verify-tg-code', async (req, res) => {
   try {
-    const verified = validateTelegramWidget(req.body);
-    if (!verified) return res.status(401).json({ error: 'Hash de Telegram inválido' });
-    const user = await findOrCreateUserByIdentity({ telegramId: verified.id, name: verified.user.first_name });
-    const jwtToken = signJWT({ uid: user.user_id, method: 'telegram_widget' });
-    res.json({ success: true, token: jwtToken, user: { userId: user.user_id, balance: parseFloat(user.balance || 0), hasTelegram: true, hasGoogle: !!user.google_id } });
-  } catch (e) { res.status(401).json({ error: 'Error: ' + e.message }); }
+    const { code, initData } = req.body;
+    const verified = validateInitData(initData);
+    if (!verified) return res.status(401).json({ error: 'Telegram inválido o expirado' });
+
+    // 1. Buscamos la cuenta que tiene el código generado en la web
+    const { data: webUser } = await supabase.from('users_balance').select('*').eq('link_code', code).maybeSingle();
+    if (!webUser) return res.status(404).json({ error: 'Código incorrecto o ya expiró' });
+
+    // 2. Si este Telegram ya existía en OTRA cuenta (la vieja), le quitamos el Telegram a la vieja
+    await supabase.from('users_balance')
+      .update({ telegram_id: null, chat_id: null })
+      .eq('telegram_id', String(verified.id))
+      .neq('user_id', webUser.user_id); 
+
+    // 3. Asignamos el Telegram a la cuenta nueva (la del código)
+    const { error: errUpdate } = await supabase
+      .from('users_balance')
+      .update({ 
+        telegram_id: String(verified.id),
+        chat_id: String(verified.id),
+        link_code: null
+      })
+      .eq('user_id', webUser.user_id);
+
+    if (errUpdate) return res.status(500).json({ error: 'Error al guardar en la base de datos' });
+
+    res.json({ success: true, message: '¡Cuenta vinculada con éxito!' });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
-
-app.post('/auth/link-telegram', async (req, res) => {
-  try {
-    const authHeader = req.headers['authorization'];
-    if (!authHeader || !authHeader.startsWith('Bearer ')) return res.status(401).json({ error: 'Falta JWT' });
-    const payload = verifyJWT(authHeader.slice(7));
-    if (!payload) return res.status(401).json({ error: 'JWT inválido' });
-    const verified = validateTelegramWidget(req.body.widgetData || req.body);
-    if (!verified) return res.status(401).json({ error: 'Hash de Telegram inválido' });
-
-    await supabase.from('users_balance').update({ telegram_id: verified.id, chat_id: verified.id }).eq('user_id', payload.uid);
-    res.json({ success: true, message: '✅ Telegram vinculado correctamente' });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
 app.post('/auth/link-google', async (req, res) => {
   try {
     const authHeader = req.headers['authorization'];
