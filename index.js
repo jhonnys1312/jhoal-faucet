@@ -361,9 +361,13 @@ function validateInitData(initData) {
     const dataCheckString = dataCheckArr.join('\n');
     const secretKey = crypto.createHmac('sha256', 'WebAppData').update(BOT_TOKEN).digest();
     const calculatedHash = crypto.createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
+    
     if (calculatedHash !== hash) return null;
-    const authDate = parseInt(params.get('auth_date') || '0');
-    if (Math.floor(Date.now() / 1000) - authDate > 86400) return null;
+    
+    // ⚠️ LÍNEA MODIFICADA: Eliminamos la validación estricta de 24 horas
+    // const authDate = parseInt(params.get('auth_date') || '0');
+    // if (Math.floor(Date.now() / 1000) - authDate > 86400) return null;
+    
     const userJson = params.get('user');
     if (!userJson) return null;
     const userObj = JSON.parse(userJson);
