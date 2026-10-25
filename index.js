@@ -462,6 +462,7 @@ async function requireAuth(req, res, next) {
 app.post('/auth/google', async (req, res) => {
   try {
     if (!googleClient) return res.status(500).json({ error: 'GOOGLE_CLIENT_ID no configurado' });
+    
     const { credential, linkToTelegramId } = req.body;
     if (!credential) return res.status(400).json({ error: 'Falta credential' });
 
@@ -470,22 +471,64 @@ app.post('/auth/google', async (req, res) => {
     if (!payload || !payload.sub) return res.status(401).json({ error: 'Token de Google inválido' });
 
     let user;
+
+    // SI VIENE DE TELEGRAM A VINCULAR GOOGLE
     if (linkToTelegramId) {
-      const { data: tgUser } = await supabase.from('users_balance').select('*').eq('user_id', String(linkToTelegramId)).maybeSingle();
-      if (!tgUser) return res.status(404).json({ error: 'Usuario de Telegram no encontrado' });
-      await supabase.from('users_balance').update({ google_id: payload.sub, email: payload.email }).eq('user_id', tgUser.user_id);
+      // 🛑 VALIDACIÓN 1: ¿Este Telegram ya está vinculado a otro Google?
+      const { data: tgUser } = await supabase.from('users_balance').select('*').eq('telegram_id', String(linkToTelegramId)).maybeSingle();
+      
+      if (!tgUser) {
+        return res.status(404).json({ error: 'Usuario de Telegram no encontrado' });
+      }
+
+      // 🛑 VALIDACIÓN 2: ¿Este correo de Google ya está en otra cuenta?
+      const { data: googleUser } = await supabase.from('users_balance').select('*').eq('email', payload.email).maybeSingle();
+      if (googleUser && googleUser.user_id !== tgUser.user_id) {
+        return res.status(400).json({ error: '❌ Este correo de Google ya está vinculado a otra cuenta de Telegram. Usa otro correo.' });
+      }
+
+      // Si pasa, vinculamos
+      await supabase.from('users_balance')
+        .update({ google_id: payload.sub, email: payload.email })
+        .eq('user_id', tgUser.user_id);
+
       user = tgUser;
-    } else {
-      user = await findOrCreateUserByIdentity({ googleId: payload.sub, email: payload.email, name: payload.name });
+    } 
+    // SI ES UN LOGIN NORMAL EN LA WEB
+    else {
+      // 🛑 VALIDACIÓN 3: Si intenta loguearse con un correo que ya está asociado a un Telegram distinto
+      const { data: googleUser } = await supabase.from('users_balance').select('*').eq('email', payload.email).maybeSingle();
+      if (googleUser && googleUser.telegram_id) {
+         // Si ya tiene un Telegram, significa que esta cuenta está "bloqueada" para este correo.
+         // Opcional: Podrías dejarle entrar, o darle error. Aquí le damos error por seguridad:
+         return res.status(400).json({ error: '❌ Esta cuenta de Google ya está enlazada a una cuenta de Telegram. Inicia sesión desde Telegram.' });
+      }
+
+      user = await findOrCreateUserByIdentity({
+        googleId: payload.sub,
+        email: payload.email,
+        name: payload.name
+      });
     }
+
     if (!user) return res.status(500).json({ error: 'Error de usuario' });
 
     const jwtToken = signJWT({ uid: user.user_id, method: 'google' });
     res.json({
-      success: true, token: jwtToken,
-      user: { userId: user.user_id, balance: parseFloat(user.balance || 0), email: user.email || payload.email, hasTelegram: !!user.telegram_id, hasGoogle: true }
+      success: true,
+      token: jwtToken,
+      user: {
+        userId: user.user_id,
+        balance: parseFloat(user.balance || 0),
+        email: user.email || payload.email,
+        hasTelegram: !!user.telegram_id,
+        hasGoogle: true
+      }
     });
-  } catch (e) { res.status(401).json({ error: 'Token de Google inválido: ' + e.message }); }
+  } catch (e) {
+    console.error('Error /auth/google:', e.message);
+    res.status(401).json({ error: 'Token de Google inválido: ' + e.message });
+  }
 });
 
 app.post('/auth/generate-tg-code', requireAuth, async (req, res) => {
@@ -496,7 +539,6 @@ app.post('/auth/generate-tg-code', requireAuth, async (req, res) => {
     res.json({ success: true, code: code });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
-
 app.post('/auth/verify-tg-code', async (req, res) => {
   try {
     const { code, initData } = req.body;
@@ -508,19 +550,23 @@ app.post('/auth/verify-tg-code', async (req, res) => {
     const { data: webUser } = await supabase.from('users_balance').select('*').eq('link_code', code).maybeSingle();
     if (!webUser) return res.status(404).json({ error: 'Código incorrecto o ya expiró' });
 
-    // 2. Verificamos si ya existía una cuenta de Telegram con ese ID (para unir saldos)
-    const { data: oldTgUser } = await supabase.from('users_balance').select('*').eq('user_id', String(verified.id)).maybeSingle();
-
-    let finalBalance = parseFloat(webUser.balance || 0);
-    
-    // Si existía la cuenta de Telegram vieja, le sumamos su saldo a la nueva cuenta web
-    if (oldTgUser && oldTgUser.user_id !== webUser.user_id) {
-      finalBalance += parseFloat(oldTgUser.balance || 0);
-      // Le quitamos el telegram_id a la cuenta vieja para que no haya duplicados
-      await supabase.from('users_balance').update({ telegram_id: null, chat_id: null }).eq('user_id', oldTgUser.user_id);
+    // 🛑 VALIDACIÓN 1: ¿Esta cuenta de Google ya tiene un Telegram vinculado diferente?
+    if (webUser.telegram_id && String(webUser.telegram_id) !== String(verified.id)) {
+      return res.status(400).json({ error: '❌ Este correo de Google ya está vinculado a otra cuenta de Telegram. Debes usar otra cuenta de Google.' });
     }
 
-    // 3. Actualizamos la cuenta de la WEB con el Telegram ID y el saldo unificado
+    // 🛑 VALIDACIÓN 2: ¿Este Telegram ya está vinculado a otra cuenta?
+    const { data: existingTg } = await supabase.from('users_balance').select('*').eq('telegram_id', String(verified.id)).maybeSingle();
+    if (existingTg && existingTg.user_id !== webUser.user_id) {
+      return res.status(400).json({ error: '❌ Esta cuenta de Telegram ya está vinculada a otro correo. No puedes vincularla a este nuevo correo.' });
+    }
+
+    // Si pasa las validaciones, vinculamos y unificamos saldo
+    let finalBalance = parseFloat(webUser.balance || 0);
+    if (existingTg && existingTg.user_id === webUser.user_id) {
+      finalBalance = parseFloat(existingTg.balance || 0); // Por si acaso
+    }
+
     const { error: errUpdate } = await supabase
       .from('users_balance')
       .update({ 
@@ -538,6 +584,7 @@ app.post('/auth/verify-tg-code', async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+
 
 app.post('/auth/telegram-widget', async (req, res) => {
   try {
