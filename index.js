@@ -472,38 +472,23 @@ app.post('/auth/google', async (req, res) => {
 
     let user;
 
-    // SI VIENE DE TELEGRAM A VINCULAR GOOGLE
+    // 1. SI VIENE DE TELEGRAM A VINCULAR GOOGLE
     if (linkToTelegramId) {
-      // 🛑 VALIDACIÓN 1: ¿Este Telegram ya está vinculado a otro Google?
       const { data: tgUser } = await supabase.from('users_balance').select('*').eq('telegram_id', String(linkToTelegramId)).maybeSingle();
-      
-      if (!tgUser) {
-        return res.status(404).json({ error: 'Usuario de Telegram no encontrado' });
-      }
+      if (!tgUser) return res.status(404).json({ error: 'Usuario de Telegram no encontrado' });
 
-      // 🛑 VALIDACIÓN 2: ¿Este correo de Google ya está en otra cuenta?
+      // Validar que ese correo no esté en otra cuenta
       const { data: googleUser } = await supabase.from('users_balance').select('*').eq('email', payload.email).maybeSingle();
       if (googleUser && googleUser.user_id !== tgUser.user_id) {
-        return res.status(400).json({ error: '❌ Este correo de Google ya está vinculado a otra cuenta de Telegram. Usa otro correo.' });
+        return res.status(400).json({ error: '❌ Este correo ya está vinculado a otra cuenta de Telegram. Usa otro correo.' });
       }
 
-      // Si pasa, vinculamos
-      await supabase.from('users_balance')
-        .update({ google_id: payload.sub, email: payload.email })
-        .eq('user_id', tgUser.user_id);
-
+      await supabase.from('users_balance').update({ google_id: payload.sub, email: payload.email }).eq('user_id', tgUser.user_id);
       user = tgUser;
     } 
-    // SI ES UN LOGIN NORMAL EN LA WEB
+    // 2. LOGIN NORMAL EN LA WEB (Aquí estaba el bloqueo)
     else {
-      // 🛑 VALIDACIÓN 3: Si intenta loguearse con un correo que ya está asociado a un Telegram distinto
-      const { data: googleUser } = await supabase.from('users_balance').select('*').eq('email', payload.email).maybeSingle();
-      if (googleUser && googleUser.telegram_id) {
-         // Si ya tiene un Telegram, significa que esta cuenta está "bloqueada" para este correo.
-         // Opcional: Podrías dejarle entrar, o darle error. Aquí le damos error por seguridad:
-         return res.status(400).json({ error: '❌ Esta cuenta de Google ya está enlazada a una cuenta de Telegram. Inicia sesión desde Telegram.' });
-      }
-
+      // Simplemente buscamos o creamos el usuario con su Google
       user = await findOrCreateUserByIdentity({
         googleId: payload.sub,
         email: payload.email,
