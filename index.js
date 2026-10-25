@@ -587,17 +587,16 @@ app.post('/auth/verify-tg-code', async (req, res) => {
     const verified = validateInitData(initData);
     if (!verified) return res.status(401).json({ error: 'Telegram inválido o expirado' });
 
-    // 1. Buscamos la cuenta que tiene el código generado en la web
+    // 1. Buscamos la cuenta de Google (Web) que tiene el código
     const { data: webUser } = await supabase.from('users_balance').select('*').eq('link_code', code).maybeSingle();
     if (!webUser) return res.status(404).json({ error: 'Código incorrecto o ya expiró' });
 
-    // 2. Si este Telegram ya existía en OTRA cuenta (la vieja), le quitamos el Telegram a la vieja
+    // 2. BORRAMOS ESTE TELEGRAM DE CUALQUIER OTRA CUENTA (Limpieza total)
     await supabase.from('users_balance')
       .update({ telegram_id: null, chat_id: null })
-      .eq('telegram_id', String(verified.id))
-      .neq('user_id', webUser.user_id); 
+      .eq('telegram_id', String(verified.id));
 
-    // 3. Asignamos el Telegram a la cuenta nueva (la del código)
+    // 3. Asignamos el Telegram a la cuenta nueva
     const { error: errUpdate } = await supabase
       .from('users_balance')
       .update({ 
@@ -607,7 +606,7 @@ app.post('/auth/verify-tg-code', async (req, res) => {
       })
       .eq('user_id', webUser.user_id);
 
-    if (errUpdate) return res.status(500).json({ error: 'Error al guardar en la base de datos' });
+    if (errUpdate) return res.status(500).json({ error: 'Error DB: ' + errUpdate.message });
 
     res.json({ success: true, message: '¡Cuenta vinculada con éxito!' });
   } catch (e) {
