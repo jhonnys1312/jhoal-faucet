@@ -89,7 +89,6 @@ function getDiceCaptchaThreshold(userId) {
   if (!userDiceCaptchaThresholds.has(userId)) {
     const t = Math.floor(Math.random() * (CAPTCHA_DICE_MAX_BETS - CAPTCHA_DICE_MIN_BETS + 1)) + CAPTCHA_DICE_MIN_BETS;
     userDiceCaptchaThresholds.set(userId, t);
-    console.log(`🎲 Nuevo umbral captcha DADOS para ${userId}: cada ${t} tiradas`);
   }
   return userDiceCaptchaThresholds.get(userId);
 }
@@ -110,10 +109,7 @@ setInterval(() => {
 }, 30000);
 
 async function verificarHCaptcha(token, remoteip) {
-  if (!HCAPTCHA_SECRET_KEY) {
-    console.warn('⚠️ HCAPTCHA_SECRET_KEY no configurada. Saltando verificación.');
-    return { success: true };
-  }
+  if (!HCAPTCHA_SECRET_KEY) return { success: true };
   try {
     const params = new URLSearchParams({
       secret: HCAPTCHA_SECRET_KEY,
@@ -127,10 +123,8 @@ async function verificarHCaptcha(token, remoteip) {
       body: params
     });
     const data = await res.json();
-    console.log('🛡️ hCaptcha verify:', data.success, data['error-codes'] || '');
     return data;
   } catch (e) {
-    console.error('Error verificando hCaptcha:', e);
     return { success: false, 'error-codes': ['internal-error'] };
   }
 }
@@ -148,7 +142,7 @@ const AD_COOLDOWN = 10 * 60;
 // ==== COOLDOWN DE COMPRA ====
 const BUY_COOLDOWN = 10;
 
-// ==== PREDICCIONES DE LOS DIOSES ====
+// ==== PREDICCIONES ====
 const PREDICTION_ROUND_DURATION = 5 * 60;
 const PREDICTION_WINDOW = 3 * 60;
 const PREDICTION_COOLDOWN = 2 * 60;
@@ -156,19 +150,16 @@ const PREDICTION_BLOCK_LAST_SECONDS = 30;
 const PREDICTION_BASE_POOL = 2.5;
 const PREDICTION_AD_REWARD = 5;
 const PREDICTION_RANGE = 20;
-const PREDICTION_AD_COOLDOWN = 0;
 const BURN_WALLET = '0x000000000000000000000000000000000000dEaD';
 
 // ==== CACHÉ DE PRECIOS ====
 let btcPriceCache = { price: 0, updatedAt: 0 };
 const BTC_CACHE_MS = 60 * 1000;
-
 let jhoalPriceCache = { price: 0, updatedAt: 0 };
 const JHOAL_CACHE_MS = 60 * 1000;
 
 const provider = new ethers.JsonRpcProvider(RPC_LIST[0]);
 const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
-
 const txProvider = new ethers.JsonRpcProvider('https://bsc-dataseed1.binance.org');
 const txWallet = new ethers.Wallet(PRIVATE_KEY, txProvider);
 
@@ -185,11 +176,9 @@ const PAIR_ABI = [
   'function getReserves() view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast)',
   'function token0() view returns (address)'
 ];
-
 const pair = new ethers.Contract(PAIR_ADDRESS, PAIR_ABI, provider);
 const btcPair = new ethers.Contract(BTC_PAIR_ADDRESS, PAIR_ABI, provider);
 
-// ==== PRECIO BTC ====
 async function getBTCPrice() {
   const now = Date.now();
   if (now - btcPriceCache.updatedAt < BTC_CACHE_MS && btcPriceCache.price > 0) return btcPriceCache.price;
@@ -198,26 +187,19 @@ async function getBTCPrice() {
     const token0 = await btcPair.token0();
     let btcReserve, usdtReserve;
     if (token0.toLowerCase() === BTCB_ADDRESS.toLowerCase()) {
-      btcReserve = reserves.reserve0;
-      usdtReserve = reserves.reserve1;
+      btcReserve = reserves.reserve0; usdtReserve = reserves.reserve1;
     } else {
-      btcReserve = reserves.reserve1;
-      usdtReserve = reserves.reserve0;
+      btcReserve = reserves.reserve1; usdtReserve = reserves.reserve0;
     }
     const btcAmount = parseFloat(ethers.formatUnits(btcReserve, 18));
     const usdtAmount = parseFloat(ethers.formatUnits(usdtReserve, 18));
     if (btcAmount <= 0) throw new Error('Reserva BTC = 0');
     const price = usdtAmount / btcAmount;
     btcPriceCache = { price, updatedAt: now };
-    console.log(`🪙 BTC: $${price.toFixed(2)}`);
     return price;
-  } catch (e) {
-    console.error('❌ Error BTC:', e.message);
-    return btcPriceCache.price || 0;
-  }
+  } catch (e) { return btcPriceCache.price || 0; }
 }
 
-// ==== PRECIO JHOAL ====
 async function getJhoalPrice() {
   const now = Date.now();
   if (now - jhoalPriceCache.updatedAt < JHOAL_CACHE_MS && jhoalPriceCache.price > 0) return jhoalPriceCache.price;
@@ -226,11 +208,9 @@ async function getJhoalPrice() {
     const token0 = await pair.token0();
     let jhoalReserve, usdtReserve;
     if (token0.toLowerCase() === TOKEN_ADDRESS.toLowerCase()) {
-      jhoalReserve = reserves.reserve0;
-      usdtReserve = reserves.reserve1;
+      jhoalReserve = reserves.reserve0; usdtReserve = reserves.reserve1;
     } else {
-      jhoalReserve = reserves.reserve1;
-      usdtReserve = reserves.reserve0;
+      jhoalReserve = reserves.reserve1; usdtReserve = reserves.reserve0;
     }
     const jhoalAmount = parseFloat(ethers.formatUnits(jhoalReserve, 18));
     const usdtAmount = parseFloat(ethers.formatUnits(usdtReserve, 18));
@@ -238,19 +218,13 @@ async function getJhoalPrice() {
     const price = usdtAmount / jhoalAmount;
     jhoalPriceCache = { price, updatedAt: now };
     return price;
-  } catch (e) {
-    console.error('❌ Error JHOAL:', e.message);
-    return jhoalPriceCache.price || 0;
-  }
+  } catch (e) { return jhoalPriceCache.price || 0; }
 }
-
 // ==== SUPABASE ====
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 // ==== ENCRIPTACIÓN ====
 const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY;
-if (!ENCRYPTION_KEY) console.warn('⚠️ ENCRYPTION_KEY no está configurada.');
-
 function encryptPrivateKey(pk) {
   if (!ENCRYPTION_KEY) throw new Error('ENCRYPTION_KEY no configurada');
   const iv = crypto.randomBytes(16);
@@ -260,7 +234,6 @@ function encryptPrivateKey(pk) {
   encrypted += cipher.final('hex');
   return iv.toString('hex') + ':' + encrypted;
 }
-
 function decryptPrivateKey(encrypted) {
   if (!ENCRYPTION_KEY) throw new Error('ENCRYPTION_KEY no configurada');
   const parts = encrypted.split(':');
@@ -276,7 +249,6 @@ function decryptPrivateKey(encrypted) {
 
 // ==== ESTADO LUNA LLENA ====
 const moonState = { active: false, startedAt: 0, endsAt: 0, nextEventAt: 0, eventsToday: 0, todayKey: '' };
-
 function todayKeyUTC() {
   const d = new Date();
   return d.getUTCFullYear() + '-' + String(d.getUTCMonth() + 1).padStart(2, '0') + '-' + String(d.getUTCDate()).padStart(2, '0');
@@ -305,7 +277,7 @@ function activateMoon() {
   moonState.active = true; moonState.startedAt = now;
   moonState.endsAt = now + MOON_DURATION_MIN * 60;
   moonState.eventsToday += 1;
-  console.log('🌕 LUNA LLENA ACTIVADA hasta', new Date(moonState.endsAt * 1000).toISOString());
+  console.log('🌕 LUNA LLENA ACTIVADA');
   notificarLunaLlena();
 }
 
@@ -316,10 +288,7 @@ async function notificarLunaLlena() {
     if (!usuarios || usuarios.length === 0) return;
     for (const u of usuarios) {
       try {
-        await bot.sendMessage(u.chat_id,
-          '🌕 *¡LUNA LLENA ACTIVA!*\n\nLas plantas crecen *90% más rápido* durante los próximos *10 minutos*.\n\n👉 Abre el Huerto y riega ahora para aprovechar.',
-          { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '🌱 Abrir Huerto', web_app: { url: MINI_APP_URL } }]] } }
-        );
+        await bot.sendMessage(u.chat_id, '🌕 *¡LUNA LLENA ACTIVA!*\n\nLas plantas crecen *90% más rápido*.\n\n👉 Abre el Huerto y riega ahora.', { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '🌱 Abrir Huerto', web_app: { url: MINI_APP_URL } }]] } });
       } catch (e) {}
     }
   } catch (e) {}
@@ -347,9 +316,7 @@ function scheduleBlessing() {
   if (blessingState.todayKey !== key) { blessingState.todayKey = key; blessingState.eventScheduledToday = false; blessingState.active = false; }
   if (!blessingState.eventScheduledToday) {
     blessingState.eventScheduledToday = true;
-    const randomHour = randInt(0, 23);
-    const randomMin = randInt(0, 59);
-    console.log(`👑 Bendición programada para hoy a las ${randomHour}:${randomMin}`);
+    const randomHour = randInt(0, 23); const randomMin = randInt(0, 59);
     const now = new Date(); const targetTime = new Date();
     targetTime.setUTCHours(randomHour, randomMin, 0, 0);
     let msUntilEvent = targetTime.getTime() - now.getTime();
@@ -360,7 +327,6 @@ function scheduleBlessing() {
 
 function activateBlessing() {
   blessingState.active = true; blessingState.startedAt = Date.now(); blessingState.endsAt = Date.now() + BLESSING_DURATION;
-  console.log('👑 ¡BENDICIÓN DEL FARAÓN ACTIVA! Fruto x2');
   notificarBendicion();
   setTimeout(() => { blessingState.active = false; scheduleBlessing(); }, BLESSING_DURATION);
 }
@@ -372,21 +338,16 @@ async function notificarBendicion() {
     if (!usuarios || usuarios.length === 0) return;
     for (const u of usuarios) {
       try {
-        await bot.sendMessage(u.chat_id,
-          '👑 *¡BENDICIÓN DEL FARAÓN ACTIVA!*\n\nTodos los que cosechen durante los próximos *30 minutos* obtendrán *Fruto x2*.\n\n👉 Abre el Huerto y cosecha ahora.',
-          { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '🌱 Abrir Huerto', web_app: { url: MINI_APP_URL } }]] } }
-        );
+        await bot.sendMessage(u.chat_id, '👑 *¡BENDICIÓN DEL FARAÓN ACTIVA!*\n\nFruto x2 en el Huerto por 30 minutos.\n\n👉 Abre el Huerto y cosecha.', { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '🌱 Abrir Huerto', web_app: { url: MINI_APP_URL } }]] } });
       } catch (e) {}
     }
   } catch (e) {}
 }
 scheduleBlessing();
-
 // ============================================================
 // ==== SISTEMA DE AUTENTICACIÓN UNIFICADO ====================
 // ============================================================
 
-// --- Validación de initData (Mini App) ---
 function validateInitData(initData) {
   if (!initData || !BOT_TOKEN) return null;
   try {
@@ -410,7 +371,6 @@ function validateInitData(initData) {
   } catch (e) { return null; }
 }
 
-// --- Validación del Login Widget de Telegram (web) ---
 function validateTelegramWidget(user) {
   if (!user || !BOT_TOKEN) return null;
   try {
@@ -427,319 +387,158 @@ function validateTelegramWidget(user) {
   } catch (e) { return null; }
 }
 
-// --- JWT helpers ---
-function signJWT(payload) {
-  return jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
-}
-function verifyJWT(token) {
-  try { return jwt.verify(token, JWT_SECRET); } catch (e) { return null; }
-}
+function signJWT(payload) { return jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN }); }
+function verifyJWT(token) { try { return jwt.verify(token, JWT_SECRET); } catch (e) { return null; } }
 
-// --- Crear/actualizar usuario por identidad externa ---
 async function findOrCreateUserByIdentity({ telegramId, googleId, email, name }) {
-  // Buscar por telegram_id
   if (telegramId) {
     const { data } = await supabase.from('users_balance').select('*').eq('user_id', String(telegramId)).maybeSingle();
     if (data) return data;
   }
-  // Buscar por google_id
   if (googleId) {
     const { data } = await supabase.from('users_balance').select('*').eq('google_id', googleId).maybeSingle();
     if (data) return data;
   }
-  // Buscar por email
   if (email) {
     const { data } = await supabase.from('users_balance').select('*').eq('email', email).maybeSingle();
     if (data) return data;
   }
-  // Crear nuevo
   const userId = telegramId ? String(telegramId) : (googleId ? 'g_' + googleId : 'u_' + crypto.randomBytes(8).toString('hex'));
   const insertData = {
-    user_id: userId,
-    balance: 0,
-    telegram_id: telegramId || null,
-    google_id: googleId || null,
-    email: email || null,
-    display_name: name || null,
-    created_at: new Date().toISOString()
+    user_id: userId, balance: 0, telegram_id: telegramId || null, google_id: googleId || null,
+    email: email || null, display_name: name || null, created_at: new Date().toISOString()
   };
   const { data, error } = await supabase.from('users_balance').insert(insertData).select().maybeSingle();
   if (error) {
-    console.error('Error creando usuario:', error.message);
-    // Fallback: intentar obtener por user_id
     const { data: fallback } = await supabase.from('users_balance').select('*').eq('user_id', userId).maybeSingle();
     return fallback;
   }
   return data;
 }
 
-// --- Middleware unificado ---
 async function requireAuth(req, res, next) {
   try {
-    // 1. Intentar Mini App (initData)
     const initData = req.body?.initData || req.headers['x-init-data'] || req.query?.initData;
     if (initData) {
       const verified = validateInitData(initData);
       if (!verified) return res.status(401).json({ error: 'initData inválido o expirado' });
-      const user = await findOrCreateUserByIdentity({
-        telegramId: verified.id,
-        name: verified.user.first_name
-      });
+      const user = await findOrCreateUserByIdentity({ telegramId: verified.id, name: verified.user.first_name });
       if (!user) return res.status(500).json({ error: 'Error de usuario' });
-      req.userId = String(user.user_id);
-      req.authMethod = 'telegram_miniapp';
-      req.user = user;
+      req.userId = String(user.user_id); req.authMethod = 'telegram_miniapp'; req.user = user;
       return next();
     }
-
-    // 2. Intentar JWT (web)
     const authHeader = req.headers['authorization'];
     if (authHeader && authHeader.startsWith('Bearer ')) {
       const payload = verifyJWT(authHeader.slice(7));
       if (!payload) return res.status(401).json({ error: 'JWT inválido o expirado' });
       const { data: user } = await supabase.from('users_balance').select('*').eq('user_id', payload.uid).maybeSingle();
       if (!user) return res.status(401).json({ error: 'Usuario no encontrado' });
-      req.userId = String(user.user_id);
-      req.authMethod = payload.method;
-      req.user = user;
+      req.userId = String(user.user_id); req.authMethod = payload.method; req.user = user;
       return next();
     }
-
     return res.status(401).json({ error: 'No autorizado: falta initData o Bearer token' });
-  } catch (e) {
-    console.error('Error en requireAuth:', e);
-    return res.status(500).json({ error: 'Error de autenticación' });
-  }
+  } catch (e) { return res.status(500).json({ error: 'Error de autenticación' }); }
 }
 
 // --- Endpoints de autenticación ---
 
-// POST /auth/google  { credential }
 app.post('/auth/google', async (req, res) => {
   try {
     if (!googleClient) return res.status(500).json({ error: 'GOOGLE_CLIENT_ID no configurado' });
-    
-    // 1. Recibimos también el linkToTelegramId desde el frontend
     const { credential, linkToTelegramId } = req.body;
     if (!credential) return res.status(400).json({ error: 'Falta credential' });
 
-    const ticket = await googleClient.verifyIdToken({
-      idToken: credential,
-      audience: GOOGLE_CLIENT_ID
-    });
+    const ticket = await googleClient.verifyIdToken({ idToken: credential, audience: GOOGLE_CLIENT_ID });
     const payload = ticket.getPayload();
     if (!payload || !payload.sub) return res.status(401).json({ error: 'Token de Google inválido' });
 
     let user;
-
-    // 2. SI VIENE DE TELEGRAM: Buscamos al usuario de Telegram y lo vinculamos
     if (linkToTelegramId) {
-      // Buscamos al usuario en tu base de datos (asumiendo que usas SQL, ajústalo a tu DB)
-      const tgUser = await db.get('SELECT * FROM users WHERE telegram_id = ?', [linkToTelegramId]);
-      
-      if (!tgUser) {
-        return res.status(404).json({ error: 'Usuario de Telegram no encontrado' });
-      }
-
-      // Actualizamos ese usuario con los datos de Google
-      await db.run(
-        'UPDATE users SET google_id = ?, email = ? WHERE user_id = ?',
-        [payload.sub, payload.email, tgUser.user_id]
-      );
-
-      // Volvemos a buscar el usuario ya actualizado
-      user = await db.get('SELECT * FROM users WHERE user_id = ?', [tgUser.user_id]);
-    } 
-    // 3. SI ES UN LOGIN NORMAL EN LA WEB: Hacemos lo que ya hacías
-    else {
-      user = await findOrCreateUserByIdentity({
-        googleId: payload.sub,
-        email: payload.email,
-        name: payload.name
-      });
+      const { data: tgUser } = await supabase.from('users_balance').select('*').eq('user_id', String(linkToTelegramId)).maybeSingle();
+      if (!tgUser) return res.status(404).json({ error: 'Usuario de Telegram no encontrado' });
+      await supabase.from('users_balance').update({ google_id: payload.sub, email: payload.email }).eq('user_id', tgUser.user_id);
+      user = tgUser;
+    } else {
+      user = await findOrCreateUserByIdentity({ googleId: payload.sub, email: payload.email, name: payload.name });
     }
-
     if (!user) return res.status(500).json({ error: 'Error de usuario' });
 
     const jwtToken = signJWT({ uid: user.user_id, method: 'google' });
     res.json({
-      success: true,
-      token: jwtToken,
-      user: {
-        userId: user.user_id,
-        balance: parseFloat(user.balance || 0),
-        email: user.email,
-        hasTelegram: !!user.telegram_id,
-        hasGoogle: true // Añadimos esto por si lo usas en el frontend
-      }
+      success: true, token: jwtToken,
+      user: { userId: user.user_id, balance: parseFloat(user.balance || 0), email: user.email || payload.email, hasTelegram: !!user.telegram_id, hasGoogle: true }
     });
-  } catch (e) {
-    console.error('Error /auth/google:', e.message);
-    res.status(401).json({ error: 'Token de Google inválido: ' + e.message });
-  }
-});
-// POST /auth/telegram-widget  { ...user del widget }
-// 1. Ruta para generar el código en la Web (requiere estar logueado con Google)
-app.post('/auth/generate-tg-code', requireAuth, async (req, res) => {
-  try {
-    // Genera un código aleatorio de 6 letras (ej: A1B2C3)
-    const code = crypto.randomBytes(3).toString('hex').toUpperCase();
-    
-    await supabase.from('users_balance').update({ link_code: code }).eq('user_id', req.userId);
-    
-    res.json({ success: true, code: code });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
+  } catch (e) { res.status(401).json({ error: 'Token de Google inválido: ' + e.message }); }
 });
 
-// 2. Ruta para validar el código desde Telegram
+app.post('/auth/generate-tg-code', requireAuth, async (req, res) => {
+  try {
+    const code = crypto.randomBytes(3).toString('hex').toUpperCase();
+    const { error } = await supabase.from('users_balance').update({ link_code: code }).eq('user_id', req.userId);
+    if (error) return res.status(500).json({ error: 'Error al guardar en DB' });
+    res.json({ success: true, code: code });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.post('/auth/verify-tg-code', async (req, res) => {
   try {
     const { code, initData } = req.body;
-    
-    // Validar que viene de Telegram
-    const verified = validateInitData(initData, process.env.BOT_TOKEN);
-    if (!verified) return res.status(401).json({ error: 'Telegram inválido' });
+    const verified = validateInitData(initData);
+    if (!verified) return res.status(401).json({ error: 'Telegram inválido o expirado' });
 
-    // Buscar al usuario que tiene ese código
     const { data: user } = await supabase.from('users_balance').select('*').eq('link_code', code).maybeSingle();
-    if (!user) return res.status(404).json({ error: 'Código incorrecto o expirado' });
+    if (!user) return res.status(404).json({ error: 'Código incorrecto o ya expiró' });
 
-    // Unir la cuenta: Le ponemos el telegram_id al usuario de la web y borramos el código
-    await supabase.from('users_balance').update({ 
-      telegram_id: String(verified.id),
-      link_code: null 
-    }).eq('user_id', user.user_id);
-
+    await supabase.from('users_balance').update({ telegram_id: String(verified.id), chat_id: String(verified.id), link_code: null }).eq('user_id', user.user_id);
     res.json({ success: true, message: 'Cuenta vinculada' });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
+
 app.post('/auth/telegram-widget', async (req, res) => {
   try {
     const verified = validateTelegramWidget(req.body);
     if (!verified) return res.status(401).json({ error: 'Hash de Telegram inválido' });
-
-    const user = await findOrCreateUserByIdentity({
-      telegramId: verified.id,
-      name: verified.user.first_name
-    });
-    if (!user) return res.status(500).json({ error: 'Error de usuario' });
-
+    const user = await findOrCreateUserByIdentity({ telegramId: verified.id, name: verified.user.first_name });
     const jwtToken = signJWT({ uid: user.user_id, method: 'telegram_widget' });
-    res.json({
-      success: true,
-      token: jwtToken,
-      user: {
-        userId: user.user_id,
-        balance: parseFloat(user.balance || 0),
-        hasTelegram: true,
-        hasGoogle: !!user.google_id
-      }
-    });
-  } catch (e) {
-    console.error('Error /auth/telegram-widget:', e.message);
-    res.status(401).json({ error: 'Error de login Telegram: ' + e.message });
-  }
+    res.json({ success: true, token: jwtToken, user: { userId: user.user_id, balance: parseFloat(user.balance || 0), hasTelegram: true, hasGoogle: !!user.google_id } });
+  } catch (e) { res.status(401).json({ error: 'Error: ' + e.message }); }
 });
 
-// POST /auth/link-telegram  (usuario Google logueado vincula su Telegram)
-// body: { widgetData: {...} }  + header Authorization: Bearer <jwt>
 app.post('/auth/link-telegram', async (req, res) => {
   try {
     const authHeader = req.headers['authorization'];
     if (!authHeader || !authHeader.startsWith('Bearer ')) return res.status(401).json({ error: 'Falta JWT' });
     const payload = verifyJWT(authHeader.slice(7));
     if (!payload) return res.status(401).json({ error: 'JWT inválido' });
-
     const verified = validateTelegramWidget(req.body.widgetData || req.body);
     if (!verified) return res.status(401).json({ error: 'Hash de Telegram inválido' });
 
-    // Verificar que ese telegram_id no esté ya en otra cuenta
-    const { data: existing } = await supabase.from('users_balance').select('user_id').eq('user_id', verified.id).maybeSingle();
-    if (existing && String(existing.user_id) !== String(payload.uid)) {
-      return res.status(409).json({ error: 'Ese Telegram ya está vinculado a otra cuenta. Iniciá sesión con Telegram en su lugar.' });
-    }
-
-    const { error } = await supabase.from('users_balance')
-      .update({ telegram_id: verified.id, chat_id: verified.id })
-      .eq('user_id', payload.uid);
-    if (error) return res.status(500).json({ error: error.message });
-
+    await supabase.from('users_balance').update({ telegram_id: verified.id, chat_id: verified.id }).eq('user_id', payload.uid);
     res.json({ success: true, message: '✅ Telegram vinculado correctamente' });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// POST /auth/link-google  (usuario Telegram vincula Google)
 app.post('/auth/link-google', async (req, res) => {
   try {
     const authHeader = req.headers['authorization'];
     if (!authHeader || !authHeader.startsWith('Bearer ')) return res.status(401).json({ error: 'Falta JWT' });
     const payload = verifyJWT(authHeader.slice(7));
     if (!payload) return res.status(401).json({ error: 'JWT inválido' });
-
-    if (!googleClient) return res.status(500).json({ error: 'GOOGLE_CLIENT_ID no configurado' });
-    const { credential } = req.body;
-    if (!credential) return res.status(400).json({ error: 'Falta credential' });
-
-    const ticket = await googleClient.verifyIdToken({ idToken: credential, audience: GOOGLE_CLIENT_ID });
+    const ticket = await googleClient.verifyIdToken({ idToken: req.body.credential, audience: GOOGLE_CLIENT_ID });
     const gPayload = ticket.getPayload();
-
-    // Verificar que ese google_id no esté ya en otra cuenta
-    const { data: existing } = await supabase.from('users_balance').select('user_id').eq('google_id', gPayload.sub).maybeSingle();
-    if (existing && String(existing.user_id) !== String(payload.uid)) {
-      return res.status(409).json({ error: 'Ese Google ya está vinculado a otra cuenta.' });
-    }
-
-    const { error } = await supabase.from('users_balance')
-      .update({ google_id: gPayload.sub, email: gPayload.email })
-      .eq('user_id', payload.uid);
-    if (error) return res.status(500).json({ error: error.message });
-
+    await supabase.from('users_balance').update({ google_id: gPayload.sub, email: gPayload.email }).eq('user_id', payload.uid);
     res.json({ success: true, message: '✅ Google vinculado correctamente', email: gPayload.email });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// GET /auth/me
 app.get('/auth/me', requireAuth, async (req, res) => {
   const u = req.user;
-  res.json({
-    success: true,
-    userId: u.user_id,
-    authMethod: req.authMethod,
-    balance: parseFloat(u.balance || 0),
-    walletBalance: parseFloat(u.wallet_balance || 0),
-    email: u.email || null,
-    telegramId: u.telegram_id || null,
-    googleId: u.google_id || null,
-    hasTelegram: !!u.telegram_id,
-    hasGoogle: !!u.google_id,
-    displayName: u.display_name || null
-  });
+  res.json({ success: true, userId: u.user_id, authMethod: req.authMethod, balance: parseFloat(u.balance || 0), walletBalance: parseFloat(u.wallet_balance || 0), email: u.email || null, telegramId: u.telegram_id || null, googleId: u.google_id || null, hasTelegram: !!u.telegram_id, hasGoogle: !!u.google_id, displayName: u.display_name || null });
 });
 
-// GET /auth/config  (para el frontend, saber sitekeys)
 app.get('/auth/config', (req, res) => {
-  res.json({
-    success: true,
-    googleClientId: GOOGLE_CLIENT_ID || null,
-    telegramBotUsername: REFERRAL_BOT_USERNAME,
-    hcaptchaSiteKey: HCAPTCHA_SITE_KEY,
-    miniAppUrl: MINI_APP_URL,
-    webAppUrl: WEB_APP_URL
-  });
+  res.json({ success: true, googleClientId: GOOGLE_CLIENT_ID || null, telegramBotUsername: REFERRAL_BOT_USERNAME, hcaptchaSiteKey: HCAPTCHA_SITE_KEY, miniAppUrl: MINI_APP_URL, webAppUrl: WEB_APP_URL });
 });
-
-// ============================================================
-// ==== FIN SISTEMA DE AUTENTICACIÓN =========================
-// ============================================================
-
 // ==== HELPERS ====
 function timeAgo(timestamp) {
   const seconds = Math.floor(Date.now() / 1000) - timestamp;
@@ -748,7 +547,6 @@ function timeAgo(timestamp) {
   if (seconds < 86400) return 'hace ' + Math.floor(seconds / 3600) + 'h';
   return 'hace ' + Math.floor(seconds / 86400) + 'd';
 }
-
 function spinRoulette() {
   const random = Math.random() * 100;
   if (random < 46) return 0;
@@ -759,29 +557,16 @@ function spinRoulette() {
   else if (random < 99) return 8;
   else return 10;
 }
-
-async function getUser(userId) {
-  const { data } = await supabase.from('users_balance').select('*').eq('user_id', userId).maybeSingle();
-  return data;
-}
-
+async function getUser(userId) { const { data } = await supabase.from('users_balance').select('*').eq('user_id', userId).maybeSingle(); return data; }
 async function ensureUser(userId) {
   const user = await getUser(userId);
-  if (!user) {
-    await supabase.from('users_balance').insert({ user_id: userId, balance: 0 });
-    return await getUser(userId);
-  }
+  if (!user) { await supabase.from('users_balance').insert({ user_id: userId, balance: 0 }); return await getUser(userId); }
   return user;
 }
-
 async function addHistory(userId, type, amount, description, metadata, txHash) {
   try {
-    await supabase.from('history').insert({
-      user_id: userId, type, amount, description,
-      metadata: metadata || null, tx_hash: txHash || null,
-      created_at: Math.floor(Date.now() / 1000)
-    });
-  } catch (e) { console.error('Error history:', e); }
+    await supabase.from('history').insert({ user_id: userId, type, amount, description, metadata: metadata || null, tx_hash: txHash || null, created_at: Math.floor(Date.now() / 1000) });
+  } catch (e) {}
 }
 
 async function refundPlant(userId, plantId) {
@@ -793,15 +578,10 @@ async function refundPlant(userId, plantId) {
     const level = PLANT_LEVELS[plant.level];
     const refundAmount = level.waterCost * 0.9;
     const user = await ensureUser(userId);
-    const newBalance = parseFloat(user.balance) + refundAmount;
-    await supabase.from('users_balance').update({ balance: newBalance }).eq('user_id', userId);
-    await supabase.from('history').insert({
-      user_id: userId, type: 'plant_refund', amount: refundAmount,
-      description: 'Reembolso 90% del riego (' + level.name + ')',
-      metadata: String(plantId), tx_hash: null, created_at: Math.floor(Date.now() / 1000)
-    });
+    await supabase.from('users_balance').update({ balance: parseFloat(user.balance) + refundAmount }).eq('user_id', userId);
+    await supabase.from('history').insert({ user_id: userId, type: 'plant_refund', amount: refundAmount, description: 'Reembolso 90% (' + level.name + ')', metadata: String(plantId), created_at: Math.floor(Date.now() / 1000) });
     await supabase.from('plants').update({ status: 'dry', last_watered: null, moon_multiplier: 1 }).eq('id', plantId).eq('user_id', userId);
-    return { success: true, amount: refundAmount, message: '¡Recibiste ' + refundAmount.toFixed(2) + ' JHOAL de reembolso (90% del riego)!' };
+    return { success: true, amount: refundAmount, message: '¡Recibiste ' + refundAmount.toFixed(2) + ' JHOAL!' };
   } catch (e) { return { success: false, error: e.message }; }
 }
 
@@ -811,20 +591,13 @@ async function cleanupExpiredPlants() {
     const limiteExpiracion = now - PLANT_LIFETIME_SECONDS;
     const { data: expiradas } = await supabase.from('plants').select('id, user_id, level, created_at').lt('created_at', limiteExpiracion);
     if (!expiradas || expiradas.length === 0) return;
-    console.log(`🧹 ${expiradas.length} plantas expiradas detectadas`);
     for (const p of expiradas) {
       const level = PLANT_LEVELS[p.level];
-      const nombreNivel = level ? level.name : p.level;
-      await supabase.from('history').insert({
-        user_id: p.user_id, type: 'plant_expired', amount: 0,
-        description: '💀 Tu planta ' + nombreNivel + ' ha expirado (30 días). ¡Ya puedes sembrar otra planta en su lugar! 🌱',
-        metadata: String(p.id), tx_hash: null, created_at: now
-      });
+      await supabase.from('history').insert({ user_id: p.user_id, type: 'plant_expired', amount: 0, description: '💀 Tu planta ' + (level ? level.name : p.level) + ' ha expirado.', metadata: String(p.id), created_at: now });
     }
     const ids = expiradas.map(p => p.id);
     await supabase.from('plants').delete().in('id', ids);
-    console.log(`🧹 ${expiradas.length} plantas eliminadas`);
-  } catch (e) { console.error('Error cleanupExpiredPlants:', e); }
+  } catch (e) {}
 }
 
 async function cleanupOldPlants() {
@@ -832,39 +605,24 @@ async function cleanupOldPlants() {
     const now = Math.floor(Date.now() / 1000);
     const { data: sinFecha } = await supabase.from('plants').select('id').is('created_at', null);
     if (sinFecha && sinFecha.length > 0) {
-      const ids = sinFecha.map(p => p.id);
-      await supabase.from('plants').update({ created_at: now }).in('id', ids);
-      console.log('✅ Fechas asignadas a', sinFecha.length, 'plantas viejas');
+      await supabase.from('plants').update({ created_at: now }).in('id', sinFecha.map(p => p.id));
     }
-  } catch (e) { console.error('Error cleanupOldPlants:', e); }
+  } catch (e) {}
 }
 
-// ==== REFERIDOS HELPERS ====
 async function otorgarRecompensaReferido(referrerId, referredId) {
   try {
     const { data: yaExiste } = await supabase.from('referrals').select('id').eq('referred_id', referredId).maybeSingle();
-    if (yaExiste) return { success: false, error: 'Ya se pagó este referido' };
+    if (yaExiste) return { success: false };
     const referredUser = await ensureUser(referredId);
-    if (!referredUser.total_claimed || parseFloat(referredUser.total_claimed) < 1) return { success: false, error: 'El referido aún no reclama el faucet' };
-    const { error: insErr } = await supabase.from('referrals').insert({
-      referrer_id: referrerId, referred_id: referredId, reward: REFERRAL_REWARD, created_at: Math.floor(Date.now() / 1000)
-    });
-    if (insErr) return { success: false, error: insErr.message };
+    if (!referredUser.total_claimed || parseFloat(referredUser.total_claimed) < 1) return { success: false };
+    await supabase.from('referrals').insert({ referrer_id: referrerId, referred_id: referredId, reward: REFERRAL_REWARD, created_at: Math.floor(Date.now() / 1000) });
     const referrer = await ensureUser(referrerId);
-    const nuevoBalance = parseFloat(referrer.balance || 0) + REFERRAL_REWARD;
-    await supabase.from('users_balance').update({ balance: nuevoBalance }).eq('user_id', referrerId);
-    await addHistory(referrerId, 'referral_reward', REFERRAL_REWARD, '🎁 Recompensa por referido (' + referredId + ')', null, null);
-    console.log(`🎁 Referido pagado: ${referrerId} +${REFERRAL_REWARD} JHOAL por ${referredId}`);
-    if (bot && referrer.chat_id) {
-      try {
-        await bot.sendMessage(referrer.chat_id,
-          `🎁 *¡NUEVO REFERIDO!*\n\nGanaste *${REFERRAL_REWARD} JHOAL* por invitar a un nuevo guerrero.\n\n💰 Total acreditado en tu saldo.`,
-          { parse_mode: 'Markdown' }
-        );
-      } catch (e) {}
-    }
+    await supabase.from('users_balance').update({ balance: parseFloat(referrer.balance || 0) + REFERRAL_REWARD }).eq('user_id', referrerId);
+    await addHistory(referrerId, 'referral_reward', REFERRAL_REWARD, '🎁 Recompensa por referido', null, null);
+    if (bot && referrer.chat_id) { try { await bot.sendMessage(referrer.chat_id, `🎁 *¡NUEVO REFERIDO!*\n\nGanaste *${REFERRAL_REWARD} JHOAL*`, { parse_mode: 'Markdown' }); } catch (e) {} }
     return { success: true };
-  } catch (e) { return { success: false, error: e.message }; }
+  } catch (e) { return { success: false }; }
 }
 
 async function intentarPagarReferido(userId) {
@@ -873,64 +631,31 @@ async function intentarPagarReferido(userId) {
     if (!pendiente) return;
     const result = await otorgarRecompensaReferido(pendiente.referrer_id, userId);
     if (result.success) await supabase.from('referrals_pending').delete().eq('referred_id', userId);
-  } catch (e) { console.error('Error intentarPagarReferido:', e); }
+  } catch (e) {}
 }
 
-// ==== SISTEMA DE RONDAS DE PREDICCIÓN ====
+// ==== PREDICCIONES ====
 let predictionLoopRunning = false;
-
-function getPredictionRoundNumber() {
-  return Math.floor(Date.now() / 1000 / PREDICTION_ROUND_DURATION);
-}
-
-function getSecondsUntilNextRound() {
-  const now = Math.floor(Date.now() / 1000);
-  const nextRoundStart = (getPredictionRoundNumber() + 1) * PREDICTION_ROUND_DURATION;
-  return Math.max(0, nextRoundStart - now);
-}
+function getPredictionRoundNumber() { return Math.floor(Date.now() / 1000 / PREDICTION_ROUND_DURATION); }
+function getSecondsUntilNextRound() { const now = Math.floor(Date.now() / 1000); return Math.max(0, ((getPredictionRoundNumber() + 1) * PREDICTION_ROUND_DURATION) - now); }
 
 async function ensurePredictionRound() {
   const roundNumber = getPredictionRoundNumber();
   try {
     const { data: existing } = await supabase.from('prediction_rounds').select('*').eq('round_number', roundNumber).maybeSingle();
     if (existing) return existing;
-
     const price = await getBTCPrice();
-    if (!price || price <= 0) {
-      console.warn('⚠️ ensurePredictionRound: no se pudo obtener precio BTC');
-      return null;
-    }
-
+    if (!price || price <= 0) return null;
     const now = Math.floor(Date.now() / 1000);
     const startedAt = roundNumber * PREDICTION_ROUND_DURATION;
     const closesAt = startedAt + PREDICTION_WINDOW;
-
     const { data: lastRound } = await supabase.from('prediction_rounds').select('accumulated_pool').eq('status', 'resolved').order('round_number', { ascending: false }).limit(1).maybeSingle();
-
-    let accumulated = 0;
-    if (lastRound && lastRound.accumulated_pool > 0) accumulated = parseFloat(lastRound.accumulated_pool);
-
+    let accumulated = (lastRound && lastRound.accumulated_pool > 0) ? parseFloat(lastRound.accumulated_pool) : 0;
     const totalPool = PREDICTION_BASE_POOL + accumulated;
-
-    const { data: newRound, error } = await supabase.from('prediction_rounds').insert({
-      round_number: roundNumber, start_price: price,
-      base_pool: PREDICTION_BASE_POOL, accumulated_pool: accumulated,
-      ads_pool: 0, total_pool: totalPool, status: 'open',
-      started_at: startedAt, closes_at: closesAt, created_at: now
-    }).select().maybeSingle();
-
-    if (error) {
-      console.error('❌ Error creando ronda:', error.message);
-      const { data: fallback } = await supabase.from('prediction_rounds').select('*').eq('round_number', roundNumber).maybeSingle();
-      return fallback;
-    }
-
-    console.log(`🔮 Ronda #${roundNumber} | Pool: ${totalPool} JHOAL | BTC: $${price.toLocaleString()}`);
+    const { data: newRound } = await supabase.from('prediction_rounds').insert({ round_number: roundNumber, start_price: price, base_pool: PREDICTION_BASE_POOL, accumulated_pool: accumulated, ads_pool: 0, total_pool: totalPool, status: 'open', started_at: startedAt, closes_at: closesAt, created_at: now }).select().maybeSingle();
+    if (!newRound) { const { data: fallback } = await supabase.from('prediction_rounds').select('*').eq('round_number', roundNumber).maybeSingle(); return fallback; }
     return newRound;
-  } catch (e) {
-    console.error('❌ Error ensurePredictionRound:', e.message);
-    return null;
-  }
+  } catch (e) { return null; }
 }
 
 async function resolvePredictionRounds() {
@@ -938,110 +663,53 @@ async function resolvePredictionRounds() {
     const now = Math.floor(Date.now() / 1000);
     const { data: pending } = await supabase.from('prediction_rounds').select('*').eq('status', 'open').lt('closes_at', now - 5);
     if (!pending || pending.length === 0) return;
-
     for (const round of pending) {
       const lockKey = `resolve_round_${round.id}`;
       if (!acquireLock(lockKey)) continue;
-
       try {
         const endPrice = await getBTCPrice();
         if (!endPrice || endPrice <= 0) { releaseLock(lockKey); continue; }
-
         const result = endPrice > round.start_price ? 'up' : (endPrice < round.start_price ? 'down' : 'tie');
         const { data: preds } = await supabase.from('predictions').select('*').eq('round_id', round.id);
-        const allPreds = preds || [];
-
-        const processedPreds = allPreds.map(p => {
-          const predicted = parseFloat(p.predicted_price);
-          const distance = Math.abs(endPrice - predicted);
-          let percentPremium = 0;
-          let isWinner = false;
-          if (distance <= PREDICTION_RANGE) {
-            percentPremium = 100 - (distance / PREDICTION_RANGE) * 100;
-            isWinner = true;
-          }
-          return { ...p, distance, percentPremium, isWinner };
+        const processedPreds = (preds || []).map(p => {
+          const distance = Math.abs(endPrice - parseFloat(p.predicted_price));
+          let percentPremium = distance <= PREDICTION_RANGE ? 100 - (distance / PREDICTION_RANGE) * 100 : 0;
+          return { ...p, distance, percentPremium, isWinner: distance <= PREDICTION_RANGE };
         });
-
         const winners = processedPreds.filter(p => p.isWinner);
-        const winnersCount = winners.length;
-        const totalPool = parseFloat(round.total_pool);
-        let distributed = 0;
-        let burned = 0;
-        let accumulatedNext = 0;
-
-        if (winnersCount > 0) {
+        let distributed = 0, burned = 0, accumulatedNext = 0;
+        if (winners.length > 0) {
           const sumPercents = winners.reduce((s, w) => s + w.percentPremium, 0);
           for (const w of winners) {
-            const share = (w.percentPremium / sumPercents) * totalPool;
-            const payout = Math.floor(share * 100) / 100;
+            const payout = Math.floor(((w.percentPremium / sumPercents) * parseFloat(round.total_pool)) * 100) / 100;
             const user = await ensureUser(w.user_id);
-            const newBalance = parseFloat(user.balance) + payout;
-            const newWon = parseFloat(user.total_prediction_won || 0) + payout;
-            await supabase.from('users_balance').update({ balance: newBalance, total_prediction_won: newWon }).eq('user_id', w.user_id);
+            await supabase.from('users_balance').update({ balance: parseFloat(user.balance) + payout, total_prediction_won: parseFloat(user.total_prediction_won || 0) + payout }).eq('user_id', w.user_id);
             await supabase.from('predictions').update({ distance: w.distance, percent_premium: w.percentPremium, won: true, payout }).eq('id', w.id);
-            await addHistory(w.user_id, 'prediction_win', payout, `🔮 Ganaste en Predicciones Ronda #${round.round_number} (dist $${w.distance.toFixed(2)}, ${w.percentPremium.toFixed(1)}%)`, null, null);
+            await addHistory(w.user_id, 'prediction_win', payout, `🔮 Ganaste Ronda #${round.round_number}`, null, null);
             distributed += payout;
-            if (bot && user.chat_id) {
-              try {
-                await bot.sendMessage(user.chat_id,
-                  `🔮 *¡GANASTE EN LOS DIOSES!*\n\n📊 Ronda #${round.round_number}\n📍 Precio final: $${endPrice.toLocaleString()}\n🎯 Tu predicción: $${w.predicted_price}\n📏 Distancia: $${w.distance.toFixed(2)}\n💰 Ganaste: *${payout.toFixed(2)} JHOAL*`,
-                  { parse_mode: 'Markdown' }
-                );
-              } catch (e) {}
-            }
           }
-          const losers = processedPreds.filter(p => !p.isWinner);
-          for (const l of losers) {
-            await supabase.from('predictions').update({ distance: l.distance, percent_premium: 0, won: false, payout: 0 }).eq('id', l.id);
-          }
-          console.log(`✅ Ronda #${round.round_number} | Ganadores: ${winnersCount} | Repartido: ${distributed.toFixed(2)}`);
+          for (const l of processedPreds.filter(p => !p.isWinner)) await supabase.from('predictions').update({ distance: l.distance, percent_premium: 0, won: false, payout: 0 }).eq('id', l.id);
         } else {
-          const burnAmount = Math.floor(totalPool * 0.001 * 100) / 100;
-          const accumulateAmount = totalPool - burnAmount;
-          burned = burnAmount;
-          accumulatedNext = accumulateAmount;
-          if (burnAmount > 0) {
-            await supabase.from('burn_wallet').insert({ amount: burnAmount, source: 'prediction_loss', created_at: now });
-          }
-          for (const p of processedPreds) {
-            await supabase.from('predictions').update({ distance: p.distance, percent_premium: 0, won: false, payout: 0 }).eq('id', p.id);
-          }
-          console.log(`💀 Ronda #${round.round_number} | Nadie ganó | Quemado: ${burnAmount} | Acumulado: ${accumulateAmount}`);
+          burned = Math.floor(parseFloat(round.total_pool) * 0.001 * 100) / 100;
+          accumulatedNext = parseFloat(round.total_pool) - burned;
+          if (burned > 0) await supabase.from('burn_wallet').insert({ amount: burned, source: 'prediction_loss', created_at: now });
+          for (const p of processedPreds) await supabase.from('predictions').update({ distance: p.distance, percent_premium: 0, won: false, payout: 0 }).eq('id', p.id);
         }
-
-        await supabase.from('prediction_rounds').update({
-          end_price: endPrice, result: result, distributed: distributed,
-          burned: burned, accumulated_pool: accumulatedNext,
-          winners_count: winnersCount, status: 'resolved', resolved_at: now
-        }).eq('id', round.id).eq('status', 'open');
-
-      } catch (e) {
-        console.error(`❌ Error resolviendo ronda #${round.round_number}:`, e.message);
-      } finally {
-        releaseLock(lockKey);
-      }
+        await supabase.from('prediction_rounds').update({ end_price: endPrice, result: result, distributed: distributed, burned: burned, accumulated_pool: accumulatedNext, winners_count: winners.length, status: 'resolved', resolved_at: now }).eq('id', round.id).eq('status', 'open');
+      } catch (e) {} finally { releaseLock(lockKey); }
     }
-  } catch (e) {
-    console.error('❌ Error resolvePredictionRounds:', e.message);
-  }
+  } catch (e) {}
 }
 
 async function predictionLoop() {
   if (predictionLoopRunning) return;
   predictionLoopRunning = true;
-  try {
-    await ensurePredictionRound();
-    await resolvePredictionRounds();
-  } catch (e) {
-    console.error('❌ Error predictionLoop:', e.message);
-  }
+  try { await ensurePredictionRound(); await resolvePredictionRounds(); } catch (e) {}
   predictionLoopRunning = false;
 }
 
-// ==== ENVÍO DE QUEMA ON-CHAIN ====
+// ==== ENVÍO DE QUEMA ====
 let burnSendRunning = false;
-
 async function sendPendingBurns() {
   if (burnSendRunning) return;
   burnSendRunning = true;
@@ -1050,32 +718,19 @@ async function sendPendingBurns() {
     if (!pending || pending.length === 0) { burnSendRunning = false; return; }
     const totalBurn = pending.reduce((s, b) => s + parseFloat(b.amount), 0);
     if (totalBurn <= 0) { burnSendRunning = false; return; }
-    console.log(`🔥 Enviando ${totalBurn.toFixed(2)} JHOAL a quema...`);
-    const amountWei = ethers.parseUnits(totalBurn.toFixed(18), 18);
-    const tx = await txToken.transfer(BURN_WALLET, amountWei);
+    const tx = await txToken.transfer(BURN_WALLET, ethers.parseUnits(totalBurn.toFixed(18), 18));
     await tx.wait();
     const now = Math.floor(Date.now() / 1000);
-    for (const b of pending) {
-      await supabase.from('burn_wallet').update({ sent_at: now, tx_hash: tx.hash }).eq('id', b.id);
-    }
-    await addHistory('SYSTEM', 'burn', -totalBurn, `🔥 Quema enviada a ${BURN_WALLET.slice(0, 8)}...`, null, tx.hash);
-    console.log(`🔥 Quema enviada: ${totalBurn.toFixed(2)} JHOAL | TX: ${tx.hash}`);
-  } catch (e) {
-    console.error('Error en sendPendingBurns:', e.message);
-  }
+    for (const b of pending) await supabase.from('burn_wallet').update({ sent_at: now, tx_hash: tx.hash }).eq('id', b.id);
+    await addHistory('SYSTEM', 'burn', -totalBurn, `🔥 Quema enviada`, null, tx.hash);
+  } catch (e) {}
   burnSendRunning = false;
 }
-
 function scheduleBurnAtMidnight() {
   const now = new Date();
   const nextMidnightUTC = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 0, 0, 0));
-  const msUntilMidnight = nextMidnightUTC.getTime() - now.getTime();
-  setTimeout(async () => {
-    await sendPendingBurns();
-    scheduleBurnAtMidnight();
-  }, msUntilMidnight);
+  setTimeout(async () => { await sendPendingBurns(); scheduleBurnAtMidnight(); }, nextMidnightUTC.getTime() - now.getTime());
 }
-
 // ==== HUERTO ====
 const PLANT_LEVELS = {
   basic:   { name: 'Básica',  emoji: '🌱', price: 10000, waterCost: 70,  fruitValue: 125 },
@@ -1094,1033 +749,427 @@ function getPlantStatus(plant) {
   const now = Math.floor(Date.now() / 1000);
   const level = PLANT_LEVELS[plant.level];
   const createdAt = plant.created_at || now;
-  const ageSeconds = now - createdAt;
-  const lifetimeLeft = PLANT_LIFETIME_SECONDS - ageSeconds;
-
+  const lifetimeLeft = PLANT_LIFETIME_SECONDS - (now - createdAt);
   let daysLeft = 0, hoursLeft = 0, minutesLeftLifetime = 0, timeLeftText = '';
   if (lifetimeLeft > 0) {
     daysLeft = Math.floor(lifetimeLeft / 86400);
     hoursLeft = Math.floor((lifetimeLeft % 86400) / 3600);
     minutesLeftLifetime = Math.floor((lifetimeLeft % 3600) / 60);
-    if (daysLeft > 0) {
-      timeLeftText = daysLeft + 'd ' + hoursLeft + 'h';
-    } else if (hoursLeft > 0) {
-      timeLeftText = hoursLeft + 'h ' + minutesLeftLifetime + 'm';
-    } else {
-      timeLeftText = minutesLeftLifetime + 'm';
-    }
-  } else {
-    timeLeftText = '0m';
-  }
+    timeLeftText = daysLeft > 0 ? daysLeft + 'd ' + hoursLeft + 'h' : (hoursLeft > 0 ? hoursLeft + 'h ' + minutesLeftLifetime + 'm' : minutesLeftLifetime + 'm');
+  } else timeLeftText = '0m';
 
-  if (lifetimeLeft <= 0) return {
-    status: 'expired', value: 0, minutesLeft: 0, progress: 0, canRefund: false,
-    daysLeft: 0, hoursLeft: 0, timeLeftText: '0m',
-    expiresAt: createdAt + PLANT_LIFETIME_SECONDS
-  };
-
-  if (plant.status === 'dry' || !plant.last_watered) return {
-    status: 'dry', value: 0, minutesLeft: 0, progress: 0, canRefund: false,
-    daysLeft, hoursLeft, timeLeftText,
-    expiresAt: createdAt + PLANT_LIFETIME_SECONDS
-  };
+  if (lifetimeLeft <= 0) return { status: 'expired', value: 0, minutesLeft: 0, progress: 0, canRefund: false, daysLeft: 0, hoursLeft: 0, timeLeftText: '0m', expiresAt: createdAt + PLANT_LIFETIME_SECONDS };
+  if (plant.status === 'dry' || !plant.last_watered) return { status: 'dry', value: 0, minutesLeft: 0, progress: 0, canRefund: false, daysLeft, hoursLeft, timeLeftText, expiresAt: createdAt + PLANT_LIFETIME_SECONDS };
 
   const moonMult = parseFloat(plant.moon_multiplier || 1) || 1;
   const effectiveGrowTime = GROW_TIME_MIN / moonMult;
   const elapsed = (now - plant.last_watered) / 60;
 
-  if (elapsed < effectiveGrowTime) {
-    const progress = Math.floor((elapsed / effectiveGrowTime) * 100);
-    return {
-      status: 'growing', value: 0,
-      minutesLeft: Math.ceil(effectiveGrowTime - elapsed),
-      progress: Math.min(progress, 99), canRefund: false, moonBoost: moonMult > 1,
-      daysLeft, hoursLeft, timeLeftText,
-      expiresAt: createdAt + PLANT_LIFETIME_SECONDS
-    };
-  }
+  if (elapsed < effectiveGrowTime) return { status: 'growing', value: 0, minutesLeft: Math.ceil(effectiveGrowTime - elapsed), progress: Math.min(Math.floor((elapsed / effectiveGrowTime) * 100), 99), canRefund: false, moonBoost: moonMult > 1, daysLeft, hoursLeft, timeLeftText, expiresAt: createdAt + PLANT_LIFETIME_SECONDS };
 
   const elapsedSinceReady = elapsed - effectiveGrowTime;
   const perfectDuration = PERFECT_WINDOW - GROW_TIME_MIN;
-
-  if (elapsedSinceReady <= perfectDuration) return {
-    status: 'ready', value: level.fruitValue,
-    minutesLeft: Math.ceil(perfectDuration - elapsedSinceReady),
-    progress: 100, canRefund: false, moonBoost: moonMult > 1,
-    daysLeft, hoursLeft, timeLeftText,
-    expiresAt: createdAt + PLANT_LIFETIME_SECONDS
-  };
+  if (elapsedSinceReady <= perfectDuration) return { status: 'ready', value: level.fruitValue, minutesLeft: Math.ceil(perfectDuration - elapsedSinceReady), progress: 100, canRefund: false, moonBoost: moonMult > 1, daysLeft, hoursLeft, timeLeftText, expiresAt: createdAt + PLANT_LIFETIME_SECONDS };
 
   const witheringTotal = ROT_TIME - PERFECT_WINDOW;
   const witheringElapsed = elapsedSinceReady - perfectDuration;
+  if (witheringElapsed <= witheringTotal) return { status: 'withering', value: Math.max(0, level.fruitValue * (1 - (witheringElapsed / witheringTotal) * 0.1)), minutesLeft: Math.ceil(witheringTotal - witheringElapsed), progress: 100, canRefund: false, moonBoost: moonMult > 1, daysLeft, hoursLeft, timeLeftText, expiresAt: createdAt + PLANT_LIFETIME_SECONDS };
 
-  if (witheringElapsed <= witheringTotal) {
-    const withering = witheringElapsed / witheringTotal;
-    const value = level.fruitValue * (1 - withering * 0.1);
-    return {
-      status: 'withering', value: Math.max(0, value),
-      minutesLeft: Math.ceil(witheringTotal - witheringElapsed),
-      progress: 100, canRefund: false, moonBoost: moonMult > 1,
-      daysLeft, hoursLeft, timeLeftText,
-      expiresAt: createdAt + PLANT_LIFETIME_SECONDS
-    };
-  }
-
-  return {
-    status: 'rotten', value: 0, minutesLeft: 0, progress: 0, canRefund: true,
-    moonBoost: moonMult > 1,
-    daysLeft, hoursLeft, timeLeftText,
-    expiresAt: createdAt + PLANT_LIFETIME_SECONDS
-  };
+  return { status: 'rotten', value: 0, minutesLeft: 0, progress: 0, canRefund: true, moonBoost: moonMult > 1, daysLeft, hoursLeft, timeLeftText, expiresAt: createdAt + PLANT_LIFETIME_SECONDS };
 }
 
 // ==== ENDPOINTS ====
-app.get('/moon-status', (req, res) => {
-  const now = Math.floor(Date.now() / 1000);
-  res.json({ success: true, active: moonState.active, startedAt: moonState.startedAt, endsAt: moonState.endsAt, secondsLeft: moonState.active ? Math.max(0, moonState.endsAt - now) : 0, multiplier: MOON_GROWTH_MULTIPLIER, durationMinutes: MOON_DURATION_MIN, eventsToday: moonState.eventsToday });
-});
-
-app.get('/blessing-status', (req, res) => {
-  const now = Date.now();
-  res.json({ success: true, active: blessingState.active, startedAt: blessingState.startedAt, endsAt: blessingState.endsAt, secondsLeft: blessingState.active ? Math.max(0, Math.floor((blessingState.endsAt - now) / 1000)) : 0, multiplier: BLESSING_FRUIT_MULTIPLIER });
-});
-
-app.get('/captcha/status/:userId', requireAuth, async (req, res) => {
-  try {
-    const userId = req.userId;
-    const count = userDiceBetCounters.get(userId) || 0;
-    const threshold = getDiceCaptchaThreshold(userId);
-    const verifiedAt = userVerifiedCaptcha.get(userId);
-    const isVerified = verifiedAt && (Date.now() - verifiedAt) < CAPTCHA_VERIFICATION_TTL;
-    res.json({ success: true, betsSinceCaptcha: count, nextCaptchaAt: threshold, isVerified, requiresCaptcha: count >= threshold && !isVerified });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
+app.get('/moon-status', (req, res) => { const now = Math.floor(Date.now() / 1000); res.json({ success: true, active: moonState.active, startedAt: moonState.startedAt, endsAt: moonState.endsAt, secondsLeft: moonState.active ? Math.max(0, moonState.endsAt - now) : 0, multiplier: MOON_GROWTH_MULTIPLIER, durationMinutes: MOON_DURATION_MIN, eventsToday: moonState.eventsToday }); });
+app.get('/blessing-status', (req, res) => { const now = Date.now(); res.json({ success: true, active: blessingState.active, startedAt: blessingState.startedAt, endsAt: blessingState.endsAt, secondsLeft: blessingState.active ? Math.max(0, Math.floor((blessingState.endsAt - now) / 1000)) : 0, multiplier: BLESSING_FRUIT_MULTIPLIER }); });
 
 app.post('/register-referral', requireAuth, async (req, res) => {
-  const userId = req.userId;
-  const { referrerId } = req.body;
-  if (!referrerId || String(referrerId) === String(userId)) return res.json({ success: true, message: 'Sin referido válido' });
+  const userId = req.userId; const { referrerId } = req.body;
+  if (!referrerId || String(referrerId) === String(userId)) return res.json({ success: true });
   try {
     const { data: yaPagado } = await supabase.from('referrals').select('id').eq('referred_id', userId).maybeSingle();
-    if (yaPagado) return res.json({ success: true, message: 'Ya referido' });
+    if (yaPagado) return res.json({ success: true });
     const { data: yaPendiente } = await supabase.from('referrals_pending').select('id').eq('referred_id', userId).maybeSingle();
-    if (yaPendiente) return res.json({ success: true, message: 'Ya pendiente' });
+    if (yaPendiente) return res.json({ success: true });
     await supabase.from('referrals_pending').insert({ referrer_id: String(referrerId), referred_id: String(userId), created_at: Math.floor(Date.now() / 1000) });
-    console.log(`🔗 Referido pendiente: ${referrerId} ← ${userId}`);
-    res.json({ success: true, message: 'Referido registrado, se paga al primer reclamo' });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-app.get('/my-referrals/:userId', requireAuth, async (req, res) => {
-  const userId = req.userId;
-  try {
-    const { data: referidos } = await supabase.from('referrals').select('referred_id, reward, created_at').eq('referrer_id', userId).order('created_at', { ascending: false });
-    const total = (referidos || []).reduce((s, r) => s + parseFloat(r.reward || 0), 0);
-    res.json({ success: true, link: 'https://t.me/' + REFERRAL_BOT_USERNAME + '?start=ref_' + userId, count: (referidos || []).length, totalEarned: total, rewardPerReferral: REFERRAL_REWARD, referrals: referidos || [] });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-app.post('/register-user', requireAuth, async (req, res) => {
-  const userId = req.userId;
-  const { chatId } = req.body;
-  if (!chatId) return res.json({ success: true, message: 'Sin chatId' });
-  try {
-    await ensureUser(userId);
-    await supabase.from('users_balance').update({ chat_id: chatId }).eq('user_id', userId);
     res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.post('/my-deposit-wallet', requireAuth, async (req, res) => {
-  const userId = req.userId;
+app.get('/my-referrals/:userId', requireAuth, async (req, res) => {
   try {
-    const user = await ensureUser(userId);
+    const { data: referidos } = await supabase.from('referrals').select('referred_id, reward, created_at').eq('referrer_id', req.userId).order('created_at', { ascending: false });
+    const total = (referidos || []).reduce((s, r) => s + parseFloat(r.reward || 0), 0);
+    res.json({ success: true, link: 'https://t.me/' + REFERRAL_BOT_USERNAME + '?start=ref_' + req.userId, count: (referidos || []).length, totalEarned: total, rewardPerReferral: REFERRAL_REWARD, referrals: referidos || [] });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/register-user', requireAuth, async (req, res) => {
+  if (!req.body.chatId) return res.json({ success: true });
+  try { await ensureUser(req.userId); await supabase.from('users_balance').update({ chat_id: req.body.chatId }).eq('user_id', req.userId); res.json({ success: true }); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/my-deposit-wallet', requireAuth, async (req, res) => {
+  try {
+    const user = await ensureUser(req.userId);
     if (user.deposit_address) return res.json({ success: true, address: user.deposit_address, walletBalance: parseFloat(user.wallet_balance || 0) });
     const newWallet = ethers.Wallet.createRandom();
-    const encryptedKey = encryptPrivateKey(newWallet.privateKey);
-    await supabase.from('users_balance').update({
-      deposit_address: newWallet.address, deposit_private_key: encryptedKey, wallet_balance: 0
-    }).eq('user_id', userId);
+    await supabase.from('users_balance').update({ deposit_address: newWallet.address, deposit_private_key: encryptPrivateKey(newWallet.privateKey), wallet_balance: 0 }).eq('user_id', req.userId);
     res.json({ success: true, address: newWallet.address, walletBalance: 0 });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ==== VERIFICAR DEPÓSITO POR HASH ====
 app.post('/verify-deposit', requireAuth, async (req, res) => {
-  const userId = req.userId;
   const { txHash } = req.body;
-
-  if (!txHash || typeof txHash !== 'string' || !txHash.startsWith('0x') || txHash.length !== 66) {
-    return res.status(400).json({ error: 'Hash de transacción inválido' });
-  }
-
-  const lockKey = `verify_${userId}_${txHash}`;
-  if (!acquireLock(lockKey)) {
-    return res.status(429).json({ error: '⏳ Verificación en proceso. Esperá.' });
-  }
-
+  if (!txHash || !txHash.startsWith('0x') || txHash.length !== 66) return res.status(400).json({ error: 'Hash inválido' });
+  const lockKey = `verify_${req.userId}_${txHash}`;
+  if (!acquireLock(lockKey)) return res.status(429).json({ error: '⏳ Verificación en proceso. Esperá.' });
   try {
-    const user = await ensureUser(userId);
-    if (!user.deposit_address) {
-      releaseLock(lockKey);
-      return res.status(400).json({ error: 'No tienes wallet de depósito asignada' });
-    }
-
-    const { data: existing } = await supabase.from('deposits').select('tx_hash, amount').eq('tx_hash', txHash).maybeSingle();
-    if (existing) {
-      releaseLock(lockKey);
-      return res.status(400).json({ 
-        error: `❌ Esta transacción ya fue acreditada anteriormente (${parseFloat(existing.amount).toFixed(2)} JHOAL)` 
-      });
-    }
+    const user = await ensureUser(req.userId);
+    if (!user.deposit_address) { releaseLock(lockKey); return res.status(400).json({ error: 'No tienes wallet' }); }
+    const { data: existing } = await supabase.from('deposits').select('tx_hash').eq('tx_hash', txHash).maybeSingle();
+    if (existing) { releaseLock(lockKey); return res.status(400).json({ error: '❌ Transacción ya acreditada' }); }
 
     const p = await getProvider();
-    const tx = await p.getTransaction(txHash);
-    const receipt = await p.getTransactionReceipt(txHash);
-
-    if (!tx || !receipt) {
-      releaseLock(lockKey);
-      return res.status(400).json({ error: '❌ Transacción no encontrada en la blockchain' });
-    }
-
-    if (receipt.status !== 1) {
-      releaseLock(lockKey);
-      return res.status(400).json({ error: '❌ La transacción falló en la blockchain' });
-    }
-
-    if (!tx.to || tx.to.toLowerCase() !== TOKEN_ADDRESS.toLowerCase()) {
-      releaseLock(lockKey);
-      return res.status(400).json({ error: '❌ La transacción no es del token JHOAL' });
-    }
-
-    const iface = new ethers.Interface([
-      'function transfer(address to, uint256 amount) returns (bool)'
-    ]);
-    let decoded;
-    try {
-      decoded = iface.parseTransaction({ data: tx.data });
-    } catch (e) {
-      releaseLock(lockKey);
-      return res.status(400).json({ error: '❌ No se pudo decodificar la transacción' });
-    }
-
-    if (!decoded || decoded.name !== 'transfer') {
-      releaseLock(lockKey);
-      return res.status(400).json({ error: '❌ La transacción no es una transferencia válida' });
-    }
-
-    const toAddress = decoded.args.to.toLowerCase();
-    const amount = parseFloat(ethers.formatUnits(decoded.args.amount, 18));
-
-    if (toAddress !== user.deposit_address.toLowerCase()) {
-      releaseLock(lockKey);
-      return res.status(400).json({ 
-        error: `❌ Esta transacción no fue enviada a tu wallet de depósito.\n\nTu wallet: ${user.deposit_address}\nDestino de la TX: ${decoded.args.to}` 
-      });
-    }
-
-    if (amount <= 0) {
-      releaseLock(lockKey);
-      return res.status(400).json({ error: '❌ Monto inválido (0 o negativo)' });
-    }
-
-    const block = await p.getBlock(receipt.blockNumber);
-    const txTimestamp = block.timestamp;
-    const now = Math.floor(Date.now() / 1000);
-    const daysOld = (now - txTimestamp) / 86400;
+    const tx = await p.getTransaction(txHash); const receipt = await p.getTransactionReceipt(txHash);
+    if (!tx || !receipt || receipt.status !== 1) { releaseLock(lockKey); return res.status(400).json({ error: '❌ TX no encontrada o fallida' }); }
+    if (!tx.to || tx.to.toLowerCase() !== TOKEN_ADDRESS.toLowerCase()) { releaseLock(lockKey); return res.status(400).json({ error: '❌ No es del token JHOAL' }); }
     
-    if (daysOld > VERIFY_DEPOSIT_MAX_DAYS) {
-      releaseLock(lockKey);
-      return res.status(400).json({ 
-        error: `⏰ Esta transacción es muy antigua (${Math.floor(daysOld)} días). El plazo máximo es ${VERIFY_DEPOSIT_MAX_DAYS} días. Contactá a @${SUPPORT_USERNAME}` 
-      });
-    }
+    const iface = new ethers.Interface(['function transfer(address to, uint256 amount) returns (bool)']);
+    let decoded; try { decoded = iface.parseTransaction({ data: tx.data }); } catch (e) { releaseLock(lockKey); return res.status(400).json({ error: '❌ Error decodificando' }); }
+    
+    if (decoded.args.to.toLowerCase() !== user.deposit_address.toLowerCase()) { releaseLock(lockKey); return res.status(400).json({ error: '❌ Destino incorrecto' }); }
+    const amount = parseFloat(ethers.formatUnits(decoded.args.amount, 18));
+    if (amount <= 0) { releaseLock(lockKey); return res.status(400).json({ error: '❌ Monto inválido' }); }
 
-    await supabase.from('deposits').insert({
-      user_id: userId,
-      wallet: tx.from,
-      amount: amount,
-      tx_hash: txHash,
-      created_at: Math.floor(Date.now() / 1000),
-      verified_by: 'MANUAL'
-    });
-
+    await supabase.from('deposits').insert({ user_id: req.userId, wallet: tx.from, amount: amount, tx_hash: txHash, created_at: Math.floor(Date.now() / 1000), verified_by: 'MANUAL' });
     const newWalletBalance = parseFloat(user.wallet_balance || 0) + amount;
-    await supabase.from('users_balance')
-      .update({ wallet_balance: newWalletBalance })
-      .eq('user_id', userId);
-
-    await addHistory(userId, 'deposit', amount, '💵 Depósito verificado por hash', null, txHash);
-
+    await supabase.from('users_balance').update({ wallet_balance: newWalletBalance }).eq('user_id', req.userId);
+    await addHistory(req.userId, 'deposit', amount, '💵 Depósito verificado', null, txHash);
     releaseLock(lockKey);
-    console.log(`✅ Depósito verificado: ${userId} +${amount} JHOAL | TX: ${txHash}`);
-
-    res.json({
-      success: true,
-      amount: amount,
-      newWalletBalance: newWalletBalance,
-      txHash: txHash,
-      explorer: `https://bscscan.com/tx/${txHash}`,
-      message: `✅ ¡Depósito de ${amount.toFixed(2)} JHOAL acreditado!`
-    });
-
-  } catch (e) {
-    releaseLock(lockKey);
-    console.error('❌ Error verificando depósito:', e.message);
-    res.status(500).json({ error: 'Error: ' + e.message });
-  }
-});
-
-// ==== SINCRONIZAR WALLET ====
-app.post('/sync-wallet', requireAuth, async (req, res) => {
-  const userId = req.userId;
-  const lockKey = `sync_${userId}`;
-  if (!acquireLock(lockKey)) return res.status(429).json({ error: '⏳ Sincronización en proceso. Esperá.' });
-
-  try {
-    const user = await ensureUser(userId);
-    if (!user.deposit_address) {
-      releaseLock(lockKey);
-      return res.status(400).json({ error: 'No tienes wallet de depósito asignada' });
-    }
-
-    const p = await getProvider();
-    const realBalanceWei = await token.balanceOf(user.deposit_address);
-    const realBalance = parseFloat(ethers.formatUnits(realBalanceWei, 18));
-    const savedBalance = parseFloat(user.wallet_balance || 0);
-
-    const diff = realBalance - savedBalance;
-
-    releaseLock(lockKey);
-
-    if (diff <= 0) {
-      return res.json({
-        success: true,
-        synced: false,
-        message: '✅ Tu wallet está sincronizada. No hay depósitos pendientes.',
-        realBalance: realBalance,
-        savedBalance: savedBalance
-      });
-    }
-
-    return res.json({
-      success: true,
-      synced: true,
-      difference: diff,
-      message: `⚠️ Se detectaron ${diff.toFixed(2)} JHOAL en tu wallet que no están acreditados. Contactá a @${SUPPORT_USERNAME} con este mensaje para que te los acrediten.`,
-      realBalance: realBalance,
-      savedBalance: savedBalance
-    });
-
-  } catch (e) {
-    releaseLock(lockKey);
-    console.error('❌ Error en sync-wallet:', e.message);
-    res.status(500).json({ error: 'Error: ' + e.message });
-  }
+    res.json({ success: true, amount, newWalletBalance, txHash, explorer: `https://bscscan.com/tx/${txHash}` });
+  } catch (e) { releaseLock(lockKey); res.status(500).json({ error: e.message }); }
 });
 
 app.post('/move-to-game', requireAuth, async (req, res) => {
-  const userId = req.userId;
   const { amount } = req.body;
   if (!amount || amount <= 0) return res.status(400).json({ error: 'Cantidad inválida' });
-  const lockKey = `move_${userId}`;
-  if (!acquireLock(lockKey)) return res.status(429).json({ error: '⏳ Movimiento en proceso. Esperá.' });
+  const lockKey = `move_${req.userId}`;
+  if (!acquireLock(lockKey)) return res.status(429).json({ error: '⏳ Movimiento en proceso' });
   try {
-    const user = await ensureUser(userId);
-    if (!user.deposit_address || !user.deposit_private_key) { releaseLock(lockKey); return res.status(400).json({ error: 'No tienes wallet personal' }); }
+    const user = await ensureUser(req.userId);
     if (parseFloat(user.wallet_balance || 0) < amount) { releaseLock(lockKey); return res.status(400).json({ error: 'Saldo insuficiente en wallet' }); }
-    const realBalanceWei = await token.balanceOf(user.deposit_address);
-    const realBalance = parseFloat(ethers.formatUnits(realBalanceWei, 18));
-    if (realBalance < amount) { releaseLock(lockKey); return res.status(400).json({ error: 'La wallet no tiene fondos suficientes' }); }
-    
-    const bnbNeeded = ethers.parseEther('0.000002');
-    const bnbBalance = await txProvider.getBalance(user.deposit_address);
-    if (bnbBalance < bnbNeeded) { 
-      const bnbTx = await txWallet.sendTransaction({ to: user.deposit_address, value: bnbNeeded }); 
-      await bnbTx.wait(); 
-    }
-    
-    const pk = decryptPrivateKey(user.deposit_private_key);
-    const userSigner = new ethers.Wallet(pk, txProvider);
-    const userToken = new ethers.Contract(TOKEN_ADDRESS, ABI, userSigner);
-    const amountWei = ethers.parseUnits(amount.toString(), 18);
-    const tx = await userToken.transfer(wallet.address, amountWei);
+    const realBalance = parseFloat(ethers.formatUnits(await token.balanceOf(user.deposit_address), 18));
+    if (realBalance < amount) { releaseLock(lockKey); return res.status(400).json({ error: 'La wallet no tiene fondos' }); }
+    if (await txProvider.getBalance(user.deposit_address) < ethers.parseEther('0.000002')) { const bnbTx = await txWallet.sendTransaction({ to: user.deposit_address, value: ethers.parseEther('0.000002') }); await bnbTx.wait(); }
+    const userSigner = new ethers.Wallet(decryptPrivateKey(user.deposit_private_key), txProvider);
+    const tx = await new ethers.Contract(TOKEN_ADDRESS, ABI, userSigner).transfer(wallet.address, ethers.parseUnits(amount.toString(), 18));
     await tx.wait();
-    const newWalletBalance = parseFloat(user.wallet_balance) - amount;
-    const newGameBalance = parseFloat(user.balance) + amount;
-    await supabase.from('users_balance').update({ wallet_balance: newWalletBalance, balance: newGameBalance }).eq('user_id', userId);
-    await addHistory(userId, 'deposit_game', amount, '🎮 Movido al saldo del juego', null, tx.hash);
+    await supabase.from('users_balance').update({ wallet_balance: parseFloat(user.wallet_balance) - amount, balance: parseFloat(user.balance) + amount }).eq('user_id', req.userId);
+    await addHistory(req.userId, 'deposit_game', amount, '🎮 Movido al juego', null, tx.hash);
     releaseLock(lockKey);
-    res.json({ success: true, txHash: tx.hash, newWalletBalance, newGameBalance, explorer: 'https://bscscan.com/tx/' + tx.hash });
+    res.json({ success: true, txHash: tx.hash, newWalletBalance: parseFloat(user.wallet_balance) - amount, newGameBalance: parseFloat(user.balance) + amount, explorer: 'https://bscscan.com/tx/' + tx.hash });
   } catch (e) { releaseLock(lockKey); res.status(500).json({ error: e.message }); }
 });
 
 app.post('/claim', requireAuth, async (req, res) => {
-  const userId = req.userId;
   try {
-    const user = await ensureUser(userId);
-    const now = Math.floor(Date.now() / 1000);
-    if (user.last_claim && now - user.last_claim < COOLDOWN) {
-      const restante = COOLDOWN - (now - user.last_claim);
-      return res.status(429).json({ error: 'Espera ' + Math.floor(restante / 60) + 'm ' + (restante % 60) + 's antes de reclamar otra vez' });
-    }
-    const newBalance = parseFloat(user.balance) + 1;
-    const newClaimed = parseFloat(user.total_claimed || 0) + 1;
-    await supabase.from('users_balance').update({ balance: newBalance, total_claimed: newClaimed, last_claim: now }).eq('user_id', userId);
-    await addHistory(userId, 'faucet', 1, 'Reclamo del faucet', null, null);
-    intentarPagarReferido(userId);
-    res.json({ success: true, amount: 1, message: '¡1 JHOAL añadido a tu saldo!' });
-  } catch (error) { res.status(500).json({ error: 'Error: ' + error.message }); }
+    const user = await ensureUser(req.userId); const now = Math.floor(Date.now() / 1000);
+    if (user.last_claim && now - user.last_claim < COOLDOWN) return res.status(429).json({ error: 'Espera ' + Math.floor((COOLDOWN - (now - user.last_claim)) / 60) + 'm' });
+    await supabase.from('users_balance').update({ balance: parseFloat(user.balance) + 1, total_claimed: parseFloat(user.total_claimed || 0) + 1, last_claim: now }).eq('user_id', req.userId);
+    await addHistory(req.userId, 'faucet', 1, 'Reclamo del faucet', null, null);
+    intentarPagarReferido(req.userId);
+    res.json({ success: true, amount: 1 });
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.post('/claim-ad-reward-manual', requireAuth, async (req, res) => {
-  const userId = req.userId;
   try {
-    const user = await ensureUser(userId);
-    const now = Math.floor(Date.now() / 1000);
-    const lastAdReward = user.last_ad_reward || 0;
-    if (now - lastAdReward < AD_COOLDOWN) {
-      const restante = AD_COOLDOWN - (now - lastAdReward);
-      return res.status(429).json({ error: 'Espera ' + Math.ceil(restante / 60) + ' min para ver otro anuncio' });
-    }
-    const newBalance = parseFloat(user.balance) + AD_REWARD_AMOUNT;
-    await supabase.from('users_balance').update({ balance: newBalance, last_ad_reward: now }).eq('user_id', userId);
-    await addHistory(userId, 'ad_reward', AD_REWARD_AMOUNT, '📺 Recompensa por ver anuncio', null, null);
-    res.json({ success: true, amount: AD_REWARD_AMOUNT, newBalance });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-app.get('/claim-ad-reward', requireAuth, async (req, res) => {
-  try {
-    const userId = req.userId;
-    const user = await ensureUser(userId);
-    const now = Math.floor(Date.now() / 1000);
-    const lastAdReward = user.last_ad_reward || 0;
-    if (now - lastAdReward < AD_COOLDOWN) return res.json({ success: true, message: 'Cooldown activo' });
-    const newBalance = parseFloat(user.balance) + AD_REWARD_AMOUNT;
-    await supabase.from('users_balance').update({ balance: newBalance, last_ad_reward: now }).eq('user_id', userId);
-    await addHistory(userId, 'ad_reward', AD_REWARD_AMOUNT, '📺 Recompensa por ver anuncio (AdsGram)', null, null);
-    res.json({ success: true, amount: AD_REWARD_AMOUNT, newBalance });
+    const user = await ensureUser(req.userId); const now = Math.floor(Date.now() / 1000);
+    if (now - (user.last_ad_reward || 0) < AD_COOLDOWN) return res.status(429).json({ error: 'Espera ' + Math.ceil((AD_COOLDOWN - (now - user.last_ad_reward)) / 60) + ' min' });
+    await supabase.from('users_balance').update({ balance: parseFloat(user.balance) + AD_REWARD_AMOUNT, last_ad_reward: now }).eq('user_id', req.userId);
+    await addHistory(req.userId, 'ad_reward', AD_REWARD_AMOUNT, '📺 Recompensa por ver anuncio', null, null);
+    res.json({ success: true, amount: AD_REWARD_AMOUNT, newBalance: parseFloat(user.balance) + AD_REWARD_AMOUNT });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get('/balance-game/:userId', requireAuth, async (req, res) => {
   try {
     const user = await getUser(req.userId);
-    if (!user) return res.json({ success: true, balance: 0, wallet_balance: 0, total_claimed: 0, total_won: 0, total_lost: 0, last_claim: 0, last_ad_reward: 0 });
+    if (!user) return res.json({ success: true, balance: 0 });
     res.json({ success: true, balance: parseFloat(user.balance), wallet_balance: parseFloat(user.wallet_balance || 0), total_claimed: parseFloat(user.total_claimed || 0), total_won: parseFloat(user.total_won || 0), total_lost: parseFloat(user.total_lost || 0), last_claim: user.last_claim || 0, last_ad_reward: user.last_ad_reward || 0 });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ==== BET (DADOS) — SIGUE USANDO hCaptcha ====
 app.post('/bet', requireAuth, async (req, res) => {
-  const userId = req.userId;
   const { amount, hcaptchaToken } = req.body;
-  if (!amount) return res.status(400).json({ error: 'Faltan datos' });
-  if (amount < MIN_BET || amount > MAX_BET) return res.status(400).json({ error: 'Apuesta inválida (' + MIN_BET + '-' + MAX_BET + ')' });
-  const lockKey = `bet_${userId}`;
-  if (!acquireLock(lockKey)) return res.status(429).json({ error: '⏳ Apuesta en proceso. Esperá.' });
-  const currentCount = userDiceBetCounters.get(userId) || 0;
-  const threshold = getDiceCaptchaThreshold(userId);
-  const verifiedAt = userVerifiedCaptcha.get(userId);
+  if (!amount || amount < MIN_BET || amount > MAX_BET) return res.status(400).json({ error: 'Apuesta inválida' });
+  const lockKey = `bet_${req.userId}`;
+  if (!acquireLock(lockKey)) return res.status(429).json({ error: '⏳ Apuesta en proceso' });
+  const currentCount = userDiceBetCounters.get(req.userId) || 0;
+  const verifiedAt = userVerifiedCaptcha.get(req.userId);
   const isVerified = verifiedAt && (Date.now() - verifiedAt) < CAPTCHA_VERIFICATION_TTL;
-  const needsCaptcha = currentCount >= threshold && !isVerified;
-  if (needsCaptcha) {
-    if (!hcaptchaToken) { releaseLock(lockKey); return res.status(403).json({ error: 'HCAPTCHA_REQUIRED', message: 'Necesitás verificar que sos humano para seguir tirando.', sitekey: HCAPTCHA_SITE_KEY }); }
+  if (currentCount >= getDiceCaptchaThreshold(req.userId) && !isVerified) {
+    if (!hcaptchaToken) { releaseLock(lockKey); return res.status(403).json({ error: 'HCAPTCHA_REQUIRED' }); }
     const verifyResult = await verificarHCaptcha(hcaptchaToken, req.ip);
-    if (!verifyResult.success) { releaseLock(lockKey); return res.status(403).json({ error: 'HCAPTCHA_FAILED', message: 'Verificación fallida. Intentá de nuevo.', sitekey: HCAPTCHA_SITE_KEY }); }
-    userVerifiedCaptcha.set(userId, Date.now());
-    userDiceBetCounters.set(userId, 0);
-    userDiceCaptchaThresholds.delete(userId);
-    console.log(`✅ hCaptcha verificado (DADOS) para ${userId}`);
-  } else {
-    userDiceBetCounters.set(userId, currentCount + 1);
-  }
+    if (!verifyResult.success) { releaseLock(lockKey); return res.status(403).json({ error: 'HCAPTCHA_FAILED' }); }
+    userVerifiedCaptcha.set(req.userId, Date.now()); userDiceBetCounters.set(req.userId, 0); userDiceCaptchaThresholds.delete(req.userId);
+  } else userDiceBetCounters.set(req.userId, currentCount + 1);
+  
   try {
-    const user = await ensureUser(userId);
+    const user = await ensureUser(req.userId);
     if (parseFloat(user.balance) < amount) { releaseLock(lockKey); return res.status(400).json({ error: 'Saldo insuficiente' }); }
-    const multiplier = spinRoulette();
-    const payout = amount * multiplier;
-    const profit = payout - amount;
-    const now = Math.floor(Date.now() / 1000);
+    const multiplier = spinRoulette(); const payout = amount * multiplier; const profit = payout - amount; const now = Math.floor(Date.now() / 1000);
     let newBalance, newWon, newLost;
-    if (multiplier === 0) {
-      newBalance = parseFloat(user.balance) - amount;
-      newWon = parseFloat(user.total_won || 0);
-      newLost = parseFloat(user.total_lost || 0) + amount;
-    } else {
-      newBalance = parseFloat(user.balance) - amount + payout;
-      newWon = parseFloat(user.total_won || 0) + profit;
-      newLost = parseFloat(user.total_lost || 0);
-    }
-    await supabase.from('users_balance').update({ balance: newBalance, total_won: newWon, total_lost: newLost }).eq('user_id', userId);
-    await supabase.from('bets').insert({ user_id: userId, amount, multiplier, payout, result: multiplier === 0 ? 'lose' : 'win', created_at: now });
-    if (multiplier === 0) await addHistory(userId, 'dice_lose', -amount, 'Perdiste en los dados (x0)', null, null);
-    else await addHistory(userId, 'dice_win', profit, 'Ganaste x' + multiplier + ' en los dados', null, null);
+    if (multiplier === 0) { newBalance = parseFloat(user.balance) - amount; newWon = parseFloat(user.total_won || 0); newLost = parseFloat(user.total_lost || 0) + amount; }
+    else { newBalance = parseFloat(user.balance) - amount + payout; newWon = parseFloat(user.total_won || 0) + profit; newLost = parseFloat(user.total_lost || 0); }
+    await supabase.from('users_balance').update({ balance: newBalance, total_won: newWon, total_lost: newLost }).eq('user_id', req.userId);
+    await supabase.from('bets').insert({ user_id: req.userId, amount, multiplier, payout, result: multiplier === 0 ? 'lose' : 'win', created_at: now });
+    if (multiplier === 0) await addHistory(req.userId, 'dice_lose', -amount, 'Perdiste en los dados (x0)', null, null);
+    else await addHistory(req.userId, 'dice_win', profit, 'Ganaste x' + multiplier, null, null);
     releaseLock(lockKey);
     res.json({ success: true, multiplier, payout, profit, newBalance });
-  } catch (error) { releaseLock(lockKey); res.status(500).json({ error: 'Error: ' + error.message }); }
+  } catch (error) { releaseLock(lockKey); res.status(500).json({ error: error.message }); }
 });
 
 app.get('/bet-history/:userId', requireAuth, async (req, res) => {
-  try {
-    const { data } = await supabase.from('bets').select('*').eq('user_id', req.userId).order('created_at', { ascending: false }).limit(10);
-    res.json({ success: true, bets: data || [] });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  try { const { data } = await supabase.from('bets').select('*').eq('user_id', req.userId).order('created_at', { ascending: false }).limit(10); res.json({ success: true, bets: data || [] }); } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ==== WITHDRAW ====
 app.post('/withdraw', requireAuth, async (req, res) => {
-  const userId = req.userId;
   const { wallet: userWallet, amount } = req.body;
-  if (!userWallet || !amount) return res.status(400).json({ error: 'Faltan datos' });
-  if (!ethers.isAddress(userWallet)) return res.status(400).json({ error: 'Wallet inválida' });
-  if (amount <= 0) return res.status(400).json({ error: 'Cantidad inválida' });
-  const lockKey = `withdraw_${userId}`;
-  if (!acquireLock(lockKey)) return res.status(429).json({ error: '⏳ Ya hay un retiro en proceso. Esperá.' });
+  if (!userWallet || !amount || amount <= 0 || !ethers.isAddress(userWallet)) return res.status(400).json({ error: 'Datos inválidos' });
+  const lockKey = `withdraw_${req.userId}`;
+  if (!acquireLock(lockKey)) return res.status(429).json({ error: '⏳ Retiro en proceso' });
   try {
-    const { data: recent } = await supabase.from('withdrawals').select('created_at').eq('user_id', userId).order('created_at', { ascending: false }).limit(1).maybeSingle();
-    if (recent) {
-      const diff = Math.floor(Date.now() / 1000) - recent.created_at;
-      if (diff < WITHDRAW_COOLDOWN) { releaseLock(lockKey); return res.status(429).json({ error: '⏳ Esperá ' + (WITHDRAW_COOLDOWN - diff) + 's entre retiros' }); }
-    }
-    const user = await ensureUser(userId);
+    const { data: recent } = await supabase.from('withdrawals').select('created_at').eq('user_id', req.userId).order('created_at', { ascending: false }).limit(1).maybeSingle();
+    if (recent && Math.floor(Date.now() / 1000) - recent.created_at < WITHDRAW_COOLDOWN) { releaseLock(lockKey); return res.status(429).json({ error: '⏳ Espera entre retiros' }); }
+    const user = await ensureUser(req.userId);
     if (parseFloat(user.balance) < amount) { releaseLock(lockKey); return res.status(400).json({ error: 'Saldo insuficiente' }); }
-    const previousBalance = parseFloat(user.balance);
-    const previousWithdrawn = parseFloat(user.total_withdrawn || 0);
-    const newBalance = previousBalance - amount;
-    const newWithdrawn = previousWithdrawn + amount;
-    const { data: updated, error: updErr } = await supabase.from('users_balance').update({ balance: newBalance, total_withdrawn: newWithdrawn }).eq('user_id', userId).gte('balance', amount).select();
-    if (updErr || !updated || updated.length === 0) { releaseLock(lockKey); return res.status(400).json({ error: 'Saldo insuficiente o retiro duplicado' }); }
+    
+    const { error: updErr } = await supabase.from('users_balance').update({ balance: parseFloat(user.balance) - amount, total_withdrawn: parseFloat(user.total_withdrawn || 0) + amount }).eq('user_id', req.userId).gte('balance', amount);
+    if (updErr) { releaseLock(lockKey); return res.status(400).json({ error: 'Error de saldo o retiro duplicado' }); }
+    
     let tx;
-    try {
-      const amountWei = ethers.parseUnits(amount.toString(), 18);
-      tx = await txToken.transfer(userWallet, amountWei);
-      await tx.wait();
-    } catch (txErr) {
-      console.error('❌ TX falló, revirtiendo débito:', txErr.message);
-      await supabase.from('users_balance').update({ balance: previousBalance, total_withdrawn: previousWithdrawn }).eq('user_id', userId);
-      releaseLock(lockKey);
-      return res.status(500).json({ error: 'Error enviando TX: ' + txErr.message });
-    }
-    await supabase.from('withdrawals').insert({ user_id: userId, wallet: userWallet, amount, tx_hash: tx.hash, created_at: Math.floor(Date.now() / 1000) });
-    await addHistory(userId, 'withdraw', -amount, 'Retiro a wallet', null, tx.hash);
+    try { tx = await txToken.transfer(userWallet, ethers.parseUnits(amount.toString(), 18)); await tx.wait(); }
+    catch (txErr) { await supabase.from('users_balance').update({ balance: parseFloat(user.balance), total_withdrawn: parseFloat(user.total_withdrawn || 0) }).eq('user_id', req.userId); releaseLock(lockKey); return res.status(500).json({ error: 'Error TX: ' + txErr.message }); }
+    
+    await supabase.from('withdrawals').insert({ user_id: req.userId, wallet: userWallet, amount, tx_hash: tx.hash, created_at: Math.floor(Date.now() / 1000) });
+    await addHistory(req.userId, 'withdraw', -amount, 'Retiro a wallet', null, tx.hash);
     releaseLock(lockKey);
     res.json({ success: true, txHash: tx.hash, explorer: 'https://bscscan.com/tx/' + tx.hash, amount });
-  } catch (error) { releaseLock(lockKey); res.status(500).json({ error: 'Error: ' + error.message }); }
-});
-
-app.get('/withdrawals/pending/:userId', requireAuth, async (req, res) => {
-  try {
-    const userId = req.userId;
-    const fiveMinAgo = Math.floor(Date.now() / 1000) - 300;
-    const { data } = await supabase.from('withdrawals').select('id, amount, tx_hash, created_at').eq('user_id', userId).gte('created_at', fiveMinAgo).order('created_at', { ascending: false }).limit(1);
-    res.json({ success: true, hasPending: !!(data && data.length > 0), last: (data && data[0]) || null });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (error) { releaseLock(lockKey); res.status(500).json({ error: error.message }); }
 });
 
 app.get('/deposit-info', (req, res) => res.json({ success: true, depositWallet: wallet.address, tokenAddress: TOKEN_ADDRESS, minDeposit: 1 }));
-
-// ==== SKILLS DE LA CULEBRITA ====
-
-const SKILL_PRICES = {
-  1: 20000, // básica
-  2: 40000, // media
-  3: 60000  // pro
-};
-
-const SKILL_NAMES = {
-  ataque: { 1: 'Ataque Básico', 2: 'Ataque Media', 3: 'Ataque Pro' },
-  defensa: { 1: 'Defensa Básica', 2: 'Defensa Media', 3: 'Defensa Pro' },
-  iman: { 1: 'Imán Básico', 2: 'Imán Media', 3: 'Imán Pro' }
-};
+// ==== SKILLS ====
+const SKILL_PRICES = { 1: 20000, 2: 40000, 3: 60000 };
+const SKILL_NAMES = { ataque: { 1: 'Ataque Básico', 2: 'Ataque Media', 3: 'Ataque Pro' }, defensa: { 1: 'Defensa Básica', 2: 'Defensa Media', 3: 'Defensa Pro' }, iman: { 1: 'Imán Básico', 2: 'Imán Media', 3: 'Imán Pro' } };
 
 app.get('/my-skills/:userId', requireAuth, async (req, res) => {
   try {
-    const userId = req.userId;
-    const { data, error } = await supabase
-      .from('user_skills')
-      .select('*')
-      .eq('user_id', userId)
-      .maybeSingle();
-    if (error) throw error;
-    if (!data) {
-      return res.json({
-        success: true,
-        skills: { ataque_level: 0, defensa_level: 0, iman_level: 0 }
-      });
-    }
-    res.json({ success: true, skills: data });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
+    const { data } = await supabase.from('user_skills').select('*').eq('user_id', req.userId).maybeSingle();
+    res.json({ success: true, skills: data || { ataque_level: 0, defensa_level: 0, iman_level: 0 } });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post('/buy-skill', requireAuth, async (req, res) => {
-  const userId = req.userId;
   const { skillType, level } = req.body;
-
-  if (!['ataque', 'defensa', 'iman'].includes(skillType)) {
-    return res.status(400).json({ error: 'Tipo de skill inválido' });
-  }
-  if (![1, 2, 3].includes(level)) {
-    return res.status(400).json({ error: 'Nivel inválido' });
-  }
-
-  const price = SKILL_PRICES[level];
-  const lockKey = `buy_skill_${userId}`;
-  if (!acquireLock(lockKey)) return res.status(429).json({ error: '⏳ Compra en proceso. Esperá.' });
-
+  if (!['ataque', 'defensa', 'iman'].includes(skillType) || ![1, 2, 3].includes(level)) return res.status(400).json({ error: 'Datos inválidos' });
+  const price = SKILL_PRICES[level]; const lockKey = `buy_skill_${req.userId}`;
+  if (!acquireLock(lockKey)) return res.status(429).json({ error: '⏳ Compra en proceso' });
   try {
-    const user = await ensureUser(userId);
-    const balance = parseFloat(user.balance || 0);
-
-    if (balance < price) {
-      releaseLock(lockKey);
-      return res.status(400).json({ error: `Saldo insuficiente. Necesitás ${price.toLocaleString()} JHOAL` });
-    }
-
-    const { data: existing } = await supabase
-      .from('user_skills')
-      .select('*')
-      .eq('user_id', userId)
-      .maybeSingle();
-
-    const currentLevel = existing ? (existing[`${skillType}_level`] || 0) : 0;
-
-    if (level <= currentLevel) {
-      releaseLock(lockKey);
-      return res.status(400).json({ error: 'Ya tenés esta skill o una mejor' });
-    }
-
-    const newBalance = balance - price;
-    await supabase.from('users_balance').update({ balance: newBalance }).eq('user_id', userId);
-
-    if (existing) {
-      await supabase.from('user_skills')
-        .update({ [`${skillType}_level`]: level, updated_at: Math.floor(Date.now() / 1000) })
-        .eq('user_id', userId);
-    } else {
-      const insertData = {
-        user_id: userId,
-        ataque_level: skillType === 'ataque' ? level : 0,
-        defensa_level: skillType === 'defensa' ? level : 0,
-        iman_level: skillType === 'iman' ? level : 0,
-        updated_at: Math.floor(Date.now() / 1000)
-      };
-      await supabase.from('user_skills').insert(insertData);
-    }
-
-    await addHistory(userId, 'skill_purchase', -price, `🛒 Compra: ${SKILL_NAMES[skillType][level]}`, null, null);
-
+    const user = await ensureUser(req.userId);
+    if (parseFloat(user.balance || 0) < price) { releaseLock(lockKey); return res.status(400).json({ error: `Saldo insuficiente (${price} JHOAL)` }); }
+    const { data: existing } = await supabase.from('user_skills').select('*').eq('user_id', req.userId).maybeSingle();
+    if (level <= (existing ? (existing[`${skillType}_level`] || 0) : 0)) { releaseLock(lockKey); return res.status(400).json({ error: 'Ya tienes esta skill' }); }
+    
+    await supabase.from('users_balance').update({ balance: parseFloat(user.balance) - price }).eq('user_id', req.userId);
+    
+    if (existing) await supabase.from('user_skills').update({ [`${skillType}_level`]: level, updated_at: Math.floor(Date.now() / 1000) }).eq('user_id', req.userId);
+    else await supabase.from('user_skills').insert({ user_id: req.userId, ataque_level: skillType === 'ataque' ? level : 0, defensa_level: skillType === 'defensa' ? level : 0, iman_level: skillType === 'iman' ? level : 0, updated_at: Math.floor(Date.now() / 1000) });
+    
+    await addHistory(req.userId, 'skill_purchase', -price, `🛒 Compra: ${SKILL_NAMES[skillType][level]}`, null, null);
     releaseLock(lockKey);
-    console.log(`🛒 Skill comprada: ${userId} → ${SKILL_NAMES[skillType][level]} (-${price} JHOAL)`);
-
-    res.json({
-      success: true,
-      message: `✅ ¡${SKILL_NAMES[skillType][level]} comprada!`,
-      newBalance,
-      skill: { type: skillType, level }
-    });
-  } catch (e) {
-    releaseLock(lockKey);
-    console.error('Error en /buy-skill:', e.message);
-    res.status(500).json({ error: e.message });
-  }
+    res.json({ success: true, message: `✅ ¡${SKILL_NAMES[skillType][level]} comprada!`, newBalance: parseFloat(user.balance) - price });
+  } catch (e) { releaseLock(lockKey); res.status(500).json({ error: e.message }); }
 });
 
-// ==== BUY PLANT (SIN hCaptcha) ====
+// ==== PLANTAS ====
 app.post('/buy-plant', requireAuth, async (req, res) => {
-  const userId = req.userId;
-  const { level } = req.body;
-  if (!level || !PLANT_LEVELS[level]) return res.status(400).json({ error: 'Nivel inválido' });
-  const lockKey = `buy_${userId}`;
-  if (!acquireLock(lockKey)) return res.status(429).json({ error: '⏳ Compra en proceso. Esperá.' });
+  const { level } = req.body; if (!PLANT_LEVELS[level]) return res.status(400).json({ error: 'Nivel inválido' });
+  const lockKey = `buy_${req.userId}`;
+  if (!acquireLock(lockKey)) return res.status(429).json({ error: '⏳ Compra en proceso' });
   try {
-    const user = await ensureUser(userId);
-    const nowSec = Math.floor(Date.now() / 1000);
-    if (user.plant_buy_cooldown_until && user.plant_buy_cooldown_until > nowSec) {
-      const remaining = user.plant_buy_cooldown_until - nowSec;
-      releaseLock(lockKey);
-      return res.status(429).json({ error: '⏳ Esperá ' + remaining + 's para comprar otra planta.', cooldownRemaining: remaining });
-    }
-    const { count } = await supabase.from('plants').select('*', { count: 'exact', head: true }).eq('user_id', userId);
-    if (count >= MAX_PLANTS) { releaseLock(lockKey); return res.status(400).json({ error: 'Máximo ' + MAX_PLANTS + ' plantas por usuario' }); }
-    const plantInfo = PLANT_LEVELS[level];
-    if (parseFloat(user.balance) < plantInfo.price) { releaseLock(lockKey); return res.status(400).json({ error: 'Saldo insuficiente. Necesitás ' + plantInfo.price + ' JHOAL' }); }
-    const now = Math.floor(Date.now() / 1000);
-    const newBalance = parseFloat(user.balance) - plantInfo.price;
-    await supabase.from('users_balance').update({ balance: newBalance }).eq('user_id', userId);
-    await supabase.from('plants').insert({ user_id: userId, level, status: 'dry', created_at: now, moon_multiplier: 1 });
-    await addHistory(userId, 'plant_buy', -plantInfo.price, 'Compraste planta ' + plantInfo.name, null, null);
-    const buyCooldownUntil = nowSec + BUY_COOLDOWN;
-    await supabase.from('users_balance').update({ plant_buy_cooldown_until: buyCooldownUntil }).eq('user_id', userId);
+    const user = await ensureUser(req.userId); const nowSec = Math.floor(Date.now() / 1000);
+    if (user.plant_buy_cooldown_until && user.plant_buy_cooldown_until > nowSec) { releaseLock(lockKey); return res.status(429).json({ error: '⏳ Esperá para comprar', cooldownRemaining: user.plant_buy_cooldown_until - nowSec }); }
+    const { count } = await supabase.from('plants').select('*', { count: 'exact', head: true }).eq('user_id', req.userId);
+    if (count >= MAX_PLANTS) { releaseLock(lockKey); return res.status(400).json({ error: 'Máximo ' + MAX_PLANTS + ' plantas' }); }
+    if (parseFloat(user.balance) < PLANT_LEVELS[level].price) { releaseLock(lockKey); return res.status(400).json({ error: 'Saldo insuficiente' }); }
+    
+    await supabase.from('users_balance').update({ balance: parseFloat(user.balance) - PLANT_LEVELS[level].price, plant_buy_cooldown_until: nowSec + BUY_COOLDOWN }).eq('user_id', req.userId);
+    await supabase.from('plants').insert({ user_id: req.userId, level, status: 'dry', created_at: nowSec, moon_multiplier: 1 });
+    await addHistory(req.userId, 'plant_buy', -PLANT_LEVELS[level].price, 'Compraste planta ' + PLANT_LEVELS[level].name, null, null);
     releaseLock(lockKey);
-    res.json({ success: true, message: '¡Compraste una planta ' + plantInfo.name + '!', expiresInDays: PLANT_LIFETIME_DAYS, cooldownSeconds: BUY_COOLDOWN });
-  } catch (error) { releaseLock(lockKey); res.status(500).json({ error: 'Error: ' + error.message }); }
+    res.json({ success: true, message: '¡Compraste una planta!', cooldownSeconds: BUY_COOLDOWN });
+  } catch (error) { releaseLock(lockKey); res.status(500).json({ error: error.message }); }
 });
 
-// ==== WATER PLANT ====
 app.post('/water-plant', requireAuth, async (req, res) => {
-  const userId = req.userId;
-  const { plantId } = req.body;
-  if (!plantId) return res.status(400).json({ error: 'Faltan datos' });
+  const { plantId } = req.body; if (!plantId) return res.status(400).json({ error: 'Faltan datos' });
   const lockKey = `water_${plantId}`;
-  if (!acquireLock(lockKey)) return res.status(429).json({ error: '⏳ Ya estás regando. Esperá.' });
+  if (!acquireLock(lockKey)) return res.status(429).json({ error: '⏳ Regando...' });
   try {
-    const { data: plant } = await supabase.from('plants').select('*').eq('id', plantId).eq('user_id', userId).maybeSingle();
-    if (!plant) { releaseLock(lockKey); return res.status(400).json({ error: 'Planta no encontrada' }); }
+    const { data: plant } = await supabase.from('plants').select('*').eq('id', plantId).eq('user_id', req.userId).maybeSingle();
+    if (!plant) { releaseLock(lockKey); return res.status(400).json({ error: 'No encontrada' }); }
     const status = getPlantStatus(plant);
-    if (status.status === 'expired') { releaseLock(lockKey); return res.status(400).json({ error: '🌱 Esta planta ya cumplió su ciclo. Plantá una nueva semilla.' }); }
-    if (status.status !== 'dry' && status.status !== 'rotten') { releaseLock(lockKey); return res.status(400).json({ error: 'La planta todavía tiene fruto o está creciendo' }); }
-    const user = await ensureUser(userId);
-    const level = PLANT_LEVELS[plant.level];
-    if (parseFloat(user.balance) < level.waterCost) { releaseLock(lockKey); return res.status(400).json({ error: 'Saldo insuficiente. Necesitás ' + level.waterCost + ' JHOAL' }); }
-    const now = Math.floor(Date.now() / 1000);
-    const newBalance = parseFloat(user.balance) - level.waterCost;
-    const moonMult = moonState.active ? MOON_GROWTH_MULTIPLIER : 1;
-    const effectiveGrowTime = Math.round((GROW_TIME_MIN / moonMult) * 10) / 10;
-    await supabase.from('users_balance').update({ balance: newBalance }).eq('user_id', userId);
-    await supabase.from('plants').update({ last_watered: now, status: 'growing', moon_multiplier: moonMult }).eq('id', plantId).eq('user_id', userId);
-    const moonMsg = moonMult > 1 ? ' 🌕 ¡Luna Llena activa!' : '';
-    await addHistory(userId, 'plant_water', -level.waterCost, 'Regaste ' + level.name + (moonMult > 1 ? ' (Luna Llena 🌕)' : ''), null, null);
+    if (status.status !== 'dry' && status.status !== 'rotten') { releaseLock(lockKey); return res.status(400).json({ error: 'No necesita agua' }); }
+    const user = await ensureUser(req.userId); const level = PLANT_LEVELS[plant.level];
+    if (parseFloat(user.balance) < level.waterCost) { releaseLock(lockKey); return res.status(400).json({ error: 'Saldo insuficiente' }); }
+    
+    const now = Math.floor(Date.now() / 1000); const moonMult = moonState.active ? MOON_GROWTH_MULTIPLIER : 1;
+    await supabase.from('users_balance').update({ balance: parseFloat(user.balance) - level.waterCost }).eq('user_id', req.userId);
+    await supabase.from('plants').update({ last_watered: now, status: 'growing', moon_multiplier: moonMult }).eq('id', plantId);
+    await addHistory(req.userId, 'plant_water', -level.waterCost, 'Regaste ' + level.name, null, null);
     releaseLock(lockKey);
-    res.json({ success: true, message: '¡Regaste tu planta! Lista en ' + effectiveGrowTime + ' minutos.' + moonMsg, moonActive: moonMult > 1, growTimeMinutes: effectiveGrowTime });
-  } catch (error) { releaseLock(lockKey); res.status(500).json({ error: 'Error: ' + error.message }); }
+    res.json({ success: true, message: '¡Regaste tu planta! Lista en ' + (GROW_TIME_MIN / moonMult) + ' min.', growTimeMinutes: GROW_TIME_MIN / moonMult });
+  } catch (error) { releaseLock(lockKey); res.status(500).json({ error: error.message }); }
 });
 
-// ==== HARVEST (SIN hCaptcha) ====
 app.post('/harvest', requireAuth, async (req, res) => {
-  const userId = req.userId;
-  const { plantId } = req.body;
-  if (!plantId) return res.status(400).json({ error: 'Faltan datos' });
+  const { plantId } = req.body; if (!plantId) return res.status(400).json({ error: 'Faltan datos' });
   const lockKey = `harvest_${plantId}`;
-  if (!acquireLock(lockKey)) return res.status(429).json({ error: '⏳ Ya estás cosechando. Esperá un momento.' });
+  if (!acquireLock(lockKey)) return res.status(429).json({ error: '⏳ Cosechando...' });
   try {
-    const { data: plant } = await supabase.from('plants').select('*').eq('id', plantId).eq('user_id', userId).maybeSingle();
-    if (!plant) { releaseLock(lockKey); return res.status(400).json({ error: 'Planta no encontrada' }); }
+    const { data: plant } = await supabase.from('plants').select('*').eq('id', plantId).eq('user_id', req.userId).maybeSingle();
+    if (!plant) { releaseLock(lockKey); return res.status(400).json({ error: 'No encontrada' }); }
     const status = getPlantStatus(plant);
-    if (status.status === 'expired') { releaseLock(lockKey); return res.status(400).json({ error: '🌱 Esta planta ya cumplió su ciclo.' }); }
-    if (status.status !== 'ready' && status.status !== 'withering') { releaseLock(lockKey); return res.status(400).json({ error: 'Todavía no podés cosechar esta planta' }); }
-    let value = status.value;
-    if (value <= 0) { releaseLock(lockKey); return res.status(400).json({ error: 'El fruto está podrido' }); }
-    let multiplicadorBendicion = 1;
-    if (blessingState.active) { multiplicadorBendicion = BLESSING_FRUIT_MULTIPLIER; value = value * multiplicadorBendicion; }
-    const user = await ensureUser(userId);
-    const newBalance = parseFloat(user.balance) + value;
-    const newWon = parseFloat(user.total_won || 0) + value;
-    await supabase.from('users_balance').update({ balance: newBalance, total_won: newWon }).eq('user_id', userId);
-    await supabase.from('plants').update({ status: 'dry', last_watered: null, moon_multiplier: 1 }).eq('id', plantId).eq('user_id', userId);
-    const level = PLANT_LEVELS[plant.level];
-    const msg = multiplicadorBendicion > 1 ? ' 👑 ¡Bendición del Faraón x2 aplicada!' : '';
-    await addHistory(userId, 'plant_harvest', value, 'Cosechaste ' + level.name + msg, null, null);
+    if (status.status !== 'ready' && status.status !== 'withering') { releaseLock(lockKey); return res.status(400).json({ error: 'No lista o ya podrida' }); }
+    let value = status.value; if (blessingState.active) value *= BLESSING_FRUIT_MULTIPLIER;
+    const user = await ensureUser(req.userId);
+    
+    await supabase.from('users_balance').update({ balance: parseFloat(user.balance) + value, total_won: parseFloat(user.total_won || 0) + value }).eq('user_id', req.userId);
+    await supabase.from('plants').update({ status: 'dry', last_watered: null, moon_multiplier: 1 }).eq('id', plantId);
+    await addHistory(req.userId, 'plant_harvest', value, 'Cosechaste ' + PLANT_LEVELS[plant.level].name, null, null);
     releaseLock(lockKey);
-    res.json({ success: true, value, message: '¡Cosechaste ' + value.toFixed(2) + ' JHOAL!' + msg });
-  } catch (error) { releaseLock(lockKey); res.status(500).json({ error: 'Error: ' + error.message }); }
-});
-
-app.post('/sell-plant', requireAuth, async (req, res) => {
-  return res.status(400).json({ error: '🚫 La venta de plantas está deshabilitada. Las plantas duran 30 días y luego expiran automáticamente.' });
+    res.json({ success: true, value, message: '¡Cosechaste ' + value.toFixed(2) + ' JHOAL!' });
+  } catch (error) { releaseLock(lockKey); res.status(500).json({ error: error.message }); }
 });
 
 app.post('/refund-plant', requireAuth, async (req, res) => {
-  const userId = req.userId;
-  const { plantId } = req.body;
-  if (!plantId) return res.status(400).json({ error: 'Faltan datos' });
-  const lockKey = `refund_${plantId}`;
-  if (!acquireLock(lockKey)) return res.status(429).json({ error: '⏳ Reembolso en proceso. Esperá.' });
-  const result = await refundPlant(userId, plantId);
-  releaseLock(lockKey);
-  if (result.success) res.json({ success: true, amount: result.amount, message: result.message });
-  else res.status(400).json({ error: result.error });
+  const { plantId } = req.body; if (!plantId) return res.status(400).json({ error: 'Faltan datos' });
+  const lockKey = `refund_${plantId}`; if (!acquireLock(lockKey)) return res.status(429).json({ error: '⏳ Esperá' });
+  const result = await refundPlant(req.userId, plantId); releaseLock(lockKey);
+  if (result.success) res.json({ success: true, amount: result.amount, message: result.message }); else res.status(400).json({ error: result.error });
 });
 
 app.get('/my-plants/:userId', requireAuth, async (req, res) => {
   try {
-    const userId = req.userId;
-    const user = await ensureUser(userId);
-    const { data: plants } = await supabase.from('plants').select('*').eq('user_id', userId).order('created_at', { ascending: true });
-    const plantsWithStatus = (plants || []).map(function(p) {
-      const status = getPlantStatus(p);
-      const level = PLANT_LEVELS[p.level];
-      return {
-        id: p.id, level: p.level, levelName: level.name, emoji: level.emoji,
-        status: status.status, value: status.value,
-        minutesLeft: status.minutesLeft || 0, progress: status.progress || 0,
-        waterCost: level.waterCost, fruitValue: level.fruitValue,
-        originalPrice: level.price, canSell: false, lastWatered: p.last_watered,
-        canRefund: status.canRefund || false,
-        refundAmount: status.canRefund ? (level.waterCost * 0.9) : 0,
-        moonBoost: status.moonBoost || false,
-        daysLeft: status.daysLeft || 0,
-        hoursLeft: status.hoursLeft || 0,
-        timeLeftText: status.timeLeftText || '',
-        expiresAt: status.expiresAt || null
-      };
-    });
-    const nowSec = Math.floor(Date.now() / 1000);
-    const buyCooldownRemaining = (user.plant_buy_cooldown_until && user.plant_buy_cooldown_until > nowSec) ? user.plant_buy_cooldown_until - nowSec : 0;
+    const user = await ensureUser(req.userId);
+    const { data: plants } = await supabase.from('plants').select('*').eq('user_id', req.userId).order('created_at', { ascending: true });
     res.json({
-      success: true, plants: plantsWithStatus, count: plantsWithStatus.length,
-      maxPlants: MAX_PLANTS, plantLevels: PLANT_LEVELS, lifetimeDays: PLANT_LIFETIME_DAYS,
+      success: true,
+      plants: (plants || []).map(p => {
+        const status = getPlantStatus(p); const level = PLANT_LEVELS[p.level];
+        return { id: p.id, level: p.level, levelName: level.name, emoji: level.emoji, status: status.status, value: status.value, minutesLeft: status.minutesLeft || 0, progress: status.progress || 0, waterCost: level.waterCost, fruitValue: level.fruitValue, canRefund: status.canRefund, refundAmount: status.canRefund ? (level.waterCost * 0.9) : 0, moonBoost: status.moonBoost, daysLeft: status.daysLeft, hoursLeft: status.hoursLeft, timeLeftText: status.timeLeftText, expiresAt: status.expiresAt };
+      }),
+      count: (plants || []).length, maxPlants: MAX_PLANTS,
       moon: { active: moonState.active, endsAt: moonState.endsAt, multiplier: MOON_GROWTH_MULTIPLIER },
       blessing: { active: blessingState.active, endsAt: blessingState.endsAt, multiplier: BLESSING_FRUIT_MULTIPLIER },
-      plantBuyCooldownRemaining: buyCooldownRemaining
+      plantBuyCooldownRemaining: (user.plant_buy_cooldown_until && user.plant_buy_cooldown_until > Math.floor(Date.now() / 1000)) ? user.plant_buy_cooldown_until - Math.floor(Date.now() / 1000) : 0
     });
-  } catch (error) { res.status(500).json({ error: 'Error: ' + error.message }); }
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.get('/history/:userId', requireAuth, async (req, res) => {
   try {
-    const userId = req.userId;
-    const limit = parseInt(req.query.limit) || 50;
-    const type = req.query.type;
-    let query = supabase.from('history').select('*').eq('user_id', userId).order('created_at', { ascending: false }).limit(limit);
+    const limit = parseInt(req.query.limit) || 50; const type = req.query.type;
+    let query = supabase.from('history').select('*').eq('user_id', req.userId).order('created_at', { ascending: false }).limit(limit);
     if (type && type !== 'all') query = query.eq('type', type);
     const { data: history } = await query;
-    const { data: allHistory } = await supabase.from('history').select('type, amount').eq('user_id', userId);
+    const { data: allHistory } = await supabase.from('history').select('type, amount').eq('user_id', req.userId);
     let summary = { faucet: 0, dice: 0, deposit: 0, withdraw: 0, garden: 0, referral: 0, prediction: 0, total: 0 };
-    (allHistory || []).forEach(function(h) {
+    (allHistory || []).forEach(h => {
       const amount = parseFloat(h.amount) || 0;
       if (h.type === 'faucet') summary.faucet += amount;
-      else if (h.type === 'dice_win' || h.type === 'dice_lose') summary.dice += amount;
-      else if (h.type === 'deposit' || h.type === 'deposit_game') summary.deposit += amount;
+      else if (h.type.startsWith('dice_')) summary.dice += amount;
+      else if (h.type.startsWith('deposit')) summary.deposit += amount;
       else if (h.type === 'withdraw') summary.withdraw += amount;
       else if (h.type === 'referral_reward') summary.referral += amount;
-      else if (h.type && h.type.startsWith('prediction_')) summary.prediction += amount;
-      else if (h.type && h.type.startsWith('plant_')) summary.garden += amount;
+      else if (h.type.startsWith('prediction_')) summary.prediction += amount;
+      else if (h.type.startsWith('plant_')) summary.garden += amount;
       summary.total += amount;
     });
-    res.json({ success: true, history: history || [], summary: summary });
-  } catch (error) { res.status(500).json({ error: 'Error: ' + error.message }); }
+    res.json({ success: true, history: history || [], summary });
+  } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-app.get('/price', async (req, res) => {
-  try {
-    const price = await getJhoalPrice();
-    if (price <= 0) return res.status(500).json({ error: 'No se pudo obtener el precio' });
-    res.json({ success: true, priceUsd: price });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
+app.get('/price', async (req, res) => { const p = await getJhoalPrice(); res.json({ success: p > 0, priceUsd: p }); });
+app.get('/btc-price', async (req, res) => { const p = await getBTCPrice(); res.json({ success: p > 0, price: p }); });
 
-app.get('/btc-price', async (req, res) => {
-  try {
-    const price = await getBTCPrice();
-    if (price <= 0) return res.status(500).json({ error: 'No se pudo obtener el precio BTC' });
-    res.json({ success: true, price, source: 'pancakeswap' });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-app.get('/balance', async (req, res) => {
-  try {
-    const balance = await token.balanceOf(wallet.address);
-    const bnb = await provider.getBalance(wallet.address);
-    res.json({ wallet: wallet.address, jhoal: ethers.formatUnits(balance, 18) + ' JHOAL', bnb: ethers.formatEther(bnb) + ' BNB' });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-app.get('/huerto-warning', (req, res) => {
-  res.json({
-    success: true, title: '⚠️ AVISO IMPORTANTE – HUERTO DE HORUS ⚠️',
-    message: '🌱 El que no cosecha, PIERDE.\nLas plantas duran solo 30 días y luego expiran automáticamente.\nSi no las RIEGAS y cosechás a tiempo, el fruto se pudre.\n💰 Podés reclamar el 90% del riego si se pudre.\n🚫 La venta de plantas está deshabilitada.\n👀 Estate atento a tus plantas.',
-    lifetimeDays: PLANT_LIFETIME_DAYS, refundPercent: 90, sellEnabled: false
-  });
-});
-
-app.get('/', (req, res) => res.json({ status: 'Horus Faucet + Dados + Huerto + Historial + Luna Llena + Bendición + AdsGram + Referidos + Predicciones + Minas + hCaptcha (solo dados) + Verificación de Depósitos por Hash + Auth Google/Telegram' }));
-
-// ==== ENDPOINTS DE PREDICCIÓN ====
+// ==== PREDICCIONES ====
 app.get('/prediction/current', requireAuth, async (req, res) => {
   try {
-    const userId = req.userId;
-    const round = await ensurePredictionRound();
-    const now = Math.floor(Date.now() / 1000);
-
-    if (!round) {
-      return res.json({
-        success: true, waitingNextRound: true, secondsUntilNextRound: getSecondsUntilNextRound(),
-        message: '⏳ Esperando la próxima ronda', round: null, userPrediction: null,
-        adValid: false, adCooldownRemaining: 0, totalBurned: 0
-      });
+    const round = await ensurePredictionRound(); const now = Math.floor(Date.now() / 1000);
+    if (!round || (round.status === 'open' && now >= round.closes_at)) {
+      return res.json({ success: true, waitingNextRound: true, secondsUntilNextRound: getSecondsUntilNextRound(), round: round ? { id: round.id, number: round.round_number, startPrice: parseFloat(round.start_price), currentPrice: await getBTCPrice(), totalPool: parseFloat(round.total_pool), range: PREDICTION_RANGE, canPredict: false } : null });
     }
-
-    if (round.status === 'open' && now >= round.closes_at) {
-      return res.json({
-        success: true, waitingNextRound: true, secondsUntilNextRound: getSecondsUntilNextRound(),
-        message: '⏳ Esperando la próxima ronda',
-        round: {
-          id: round.id, number: round.round_number, startPrice: parseFloat(round.start_price),
-          currentPrice: await getBTCPrice(), priceSource: 'pancakeswap', secondsLeft: 0,
-          totalPool: parseFloat(round.total_pool), basePool: parseFloat(round.base_pool),
-          accumulatedPool: parseFloat(round.accumulated_pool), adsPool: parseFloat(round.ads_pool),
-          range: PREDICTION_RANGE, status: 'closing', totalPredictions: 0, canPredict: false
-        },
-        userPrediction: null, adValid: false, adCooldownRemaining: 0, totalBurned: 0
-      });
-    }
-
-    const { data: userPred } = await supabase.from('predictions').select('*').eq('round_id', round.id).eq('user_id', userId).maybeSingle();
-    const user = await ensureUser(userId);
-    const lastAd = user.last_prediction_ad || 0;
-    const adRecent = lastAd > 0 && (now - lastAd) <= (PREDICTION_ROUND_DURATION / 2);
-    const adThisRound = lastAd >= round.started_at;
-    const adValid = adThisRound || adRecent;
-    const adCooldownRemaining = 0;
-
+    const { data: userPred } = await supabase.from('predictions').select('*').eq('round_id', round.id).eq('user_id', req.userId).maybeSingle();
+    const user = await ensureUser(req.userId);
+    const adValid = (user.last_prediction_ad >= round.started_at) || ((now - (user.last_prediction_ad || 0)) <= (PREDICTION_ROUND_DURATION / 2));
     const { count: totalPreds } = await supabase.from('predictions').select('*', { count: 'exact', head: true }).eq('round_id', round.id);
-const { data: totalBurnedData } = await supabase.rpc('get_total_burned');
-const totalBurned = parseFloat(totalBurnedData || 0);
+    const { data: burnedData } = await supabase.from('burn_wallet').select('amount');
+    const totalBurned = (burnedData || []).reduce((s, b) => s + parseFloat(b.amount), 0);
 
     res.json({
-      success: true, waitingNextRound: false, secondsUntilNextRound: 0,
-      round: {
-        id: round.id, number: round.round_number, startPrice: parseFloat(round.start_price),
-        currentPrice: await getBTCPrice(), priceSource: 'pancakeswap',
-        secondsLeft: Math.max(0, round.closes_at - now),
-        totalPool: parseFloat(round.total_pool), basePool: parseFloat(round.base_pool),
-        accumulatedPool: parseFloat(round.accumulated_pool), adsPool: parseFloat(round.ads_pool),
-        range: PREDICTION_RANGE, status: round.status, totalPredictions: totalPreds || 0,
-        canPredict: now < (round.closes_at - PREDICTION_BLOCK_LAST_SECONDS)
-      },
+      success: true, waitingNextRound: false,
+      round: { id: round.id, number: round.round_number, startPrice: parseFloat(round.start_price), currentPrice: await getBTCPrice(), secondsLeft: Math.max(0, round.closes_at - now), totalPool: parseFloat(round.total_pool), accumulatedPool: parseFloat(round.accumulated_pool), range: PREDICTION_RANGE, status: round.status, canPredict: now < (round.closes_at - PREDICTION_BLOCK_LAST_SECONDS) },
       userPrediction: userPred ? { predictedPrice: parseFloat(userPred.predicted_price), won: userPred.won, payout: parseFloat(userPred.payout || 0) } : null,
-      adValid, adCooldownRemaining, totalBurned: Math.floor(totalBurned)
+      adValid, totalBurned: Math.floor(totalBurned)
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post('/prediction/watch-ad', requireAuth, async (req, res) => {
-  const userId = req.userId;
-  const lockKey = `pred_ad_${userId}`;
-  if (!acquireLock(lockKey)) return res.status(429).json({ error: '⏳ Esperá un momento' });
-  
+  const lockKey = `pred_ad_${req.userId}`; if (!acquireLock(lockKey)) return res.status(429).json({ error: '⏳ Esperá' });
   try {
-    const user = await ensureUser(userId);
-    const now = Math.floor(Date.now() / 1000);
+    const now = Math.floor(Date.now() / 1000); const round = await ensurePredictionRound();
+    if (!round || round.status !== 'open') { releaseLock(lockKey); return res.status(400).json({ error: 'No hay ronda activa' }); }
     
-    const blockedUntil = parseInt(user.prediction_blocked_until || 0);
-    if (blockedUntil > now) {
-      releaseLock(lockKey);
-      const remaining = blockedUntil - now;
-      const horas = Math.floor(remaining / 3600);
-      const minutos = Math.floor((remaining % 3600) / 60);
-      return res.status(429).json({ 
-        error: `🚨 ACTIVIDAD SOSPECHOSA DETECTADA. Tu cuenta está suspendida temporalmente. Debes esperar ${horas}h ${minutos}m para la verificación. Si crees que es un error, contacta a @Jhoalsupportbot.` 
-      });
-    }
-    
-    const unaHoraAtras = now - 3600;
-    const { count, error: countErr } = await supabase
-      .from('history')
-      .select('*', { count: 'exact', head: true })
-      .eq('user_id', userId)
-      .eq('type', 'prediction_ad')
-      .gte('created_at', unaHoraAtras);
-    
-    if (countErr) {
-      releaseLock(lockKey);
-      return res.status(500).json({ error: 'Error interno' });
-    }
-    
-    if (count >= 16) {
-      const bloqueadoHasta = now + 86400;
-      await supabase.from('users_balance')
-        .update({ prediction_blocked_until: bloqueadoHasta })
-        .eq('user_id', userId);
-      
-      releaseLock(lockKey);
-      console.log(`🚫 BLOQUEO POR ABUSO: Usuario ${userId} | Rondas última hora: ${count}`);
-      return res.status(429).json({ 
-        error: `🚨 ACTIVIDAD SOSPECHOSA DETECTADA. Tu cuenta ha sido suspendida por seguridad. Nuestro sistema verificará tu actividad en las próximas 24 horas. Si crees que es un error, contacta a @Jhoalsupportbot.` 
-      });
-    }
-    
-    if (user.last_prediction_ad && now - user.last_prediction_ad < 3) {
-      releaseLock(lockKey);
-      return res.status(429).json({ error: '⏳ Esperá ' + (3 - (now - user.last_prediction_ad)) + 's' });
-    }
-    
-    const round = await ensurePredictionRound();
-    if (!round || round.status !== 'open') { 
-      releaseLock(lockKey); 
-      return res.status(400).json({ error: 'No hay ronda activa. Esperá la próxima.' }); 
-    }
-    
-    const newAdsPool = parseFloat(round.ads_pool || 0) + PREDICTION_AD_REWARD;
-    const newTotalPool = parseFloat(round.total_pool || 0) + PREDICTION_AD_REWARD;
-    
-    await supabase.from('prediction_rounds').update({ 
-      ads_pool: newAdsPool, 
-      total_pool: newTotalPool 
-    }).eq('id', round.id);
-    
-    await supabase.from('users_balance').update({ 
-      last_prediction_ad: now 
-    }).eq('user_id', userId);
-    
-    await addHistory(userId, 'prediction_ad', 0, 
-      '📺 Anuncio visto para predicción (+5 a la pool)', 
-      null, null);
-    
+    await supabase.from('prediction_rounds').update({ ads_pool: parseFloat(round.ads_pool || 0) + PREDICTION_AD_REWARD, total_pool: parseFloat(round.total_pool || 0) + PREDICTION_AD_REWARD }).eq('id', round.id);
+    await supabase.from('users_balance').update({ last_prediction_ad: now }).eq('user_id', req.userId);
+    await addHistory(req.userId, 'prediction_ad', 0, '📺 Anuncio visto (+5 pool)', null, null);
     releaseLock(lockKey);
-    res.json({ 
-      success: true, 
-      message: `✅ +5 JHOAL a la pool. Pool actual: ${newTotalPool}`, 
-      newPool: newTotalPool, 
-      validFor: 0 
-    });
-    
-  } catch (e) { 
-    releaseLock(lockKey); 
-    res.status(500).json({ error: e.message }); 
-  }
+    res.json({ success: true, message: '✅ +5 a la pool' });
+  } catch (e) { releaseLock(lockKey); res.status(500).json({ error: e.message }); }
 });
 
 app.post('/prediction/bet', requireAuth, async (req, res) => {
-  const userId = req.userId;
-  const { predictedPrice } = req.body;
-  if (!predictedPrice || isNaN(predictedPrice) || predictedPrice <= 0) return res.status(400).json({ error: 'Precio inválido' });
-  const lockKey = `prediction_${userId}`;
-  if (!acquireLock(lockKey)) return res.status(429).json({ error: '⏳ Esperá un momento' });
+  const { predictedPrice } = req.body; if (!predictedPrice || predictedPrice <= 0) return res.status(400).json({ error: 'Precio inválido' });
+  const lockKey = `pred_${req.userId}`; if (!acquireLock(lockKey)) return res.status(429).json({ error: '⏳ Esperá' });
   try {
-    const user = await ensureUser(userId);
-    const now = Math.floor(Date.now() / 1000);
-    const roundNumber = Math.floor(now / PREDICTION_ROUND_DURATION);
-    const { data: round } = await supabase.from('prediction_rounds').select('*').eq('round_number', roundNumber).maybeSingle();
-    if (!round || round.status !== 'open') { releaseLock(lockKey); return res.status(400).json({ error: 'No hay ronda activa. Esperá la próxima.' }); }
-    const adRecent = user.last_prediction_ad && (now - user.last_prediction_ad) <= (PREDICTION_ROUND_DURATION / 2);
-    const adThisRound = user.last_prediction_ad && user.last_prediction_ad >= round.started_at;
-    if (!adRecent && !adThisRound) { releaseLock(lockKey); return res.status(403).json({ error: 'AD_REQUIRED', message: '📺 Mirá un anuncio para predecir' }); }
-    if (now >= round.closes_at) { releaseLock(lockKey); return res.status(400).json({ error: 'La ronda ya cerró' }); }
-    if (now >= round.closes_at - PREDICTION_BLOCK_LAST_SECONDS) { releaseLock(lockKey); return res.status(400).json({ error: '⏰ Últimos segundos. Esperá la próxima ronda.' }); }
-    const startPrice = parseFloat(round.start_price);
-    const minPrice = startPrice * 0.8;
-    const maxPrice = startPrice * 1.2;
-    if (predictedPrice < minPrice || predictedPrice > maxPrice) {
-      releaseLock(lockKey);
-      return res.status(400).json({ error: `El precio debe estar entre $${minPrice.toFixed(2)} y $${maxPrice.toFixed(2)}` });
-    }
-    const { data: existing } = await supabase.from('predictions').select('id').eq('round_id', round.id).eq('user_id', userId).maybeSingle();
-    if (existing) { releaseLock(lockKey); return res.status(400).json({ error: 'Ya hiciste tu predicción para esta ronda' }); }
-    await supabase.from('predictions').insert({ round_id: round.id, user_id: userId, predicted_price: predictedPrice, created_at: now });
-    await addHistory(userId, 'prediction_bet', 0, `🔮 Predijiste $${predictedPrice} para Ronda #${round.round_number}`, null, null);
+    const user = await ensureUser(req.userId); const now = Math.floor(Date.now() / 1000);
+    const { data: round } = await supabase.from('prediction_rounds').select('*').eq('round_number', Math.floor(now / PREDICTION_ROUND_DURATION)).maybeSingle();
+    if (!round || round.status !== 'open' || now >= round.closes_at - PREDICTION_BLOCK_LAST_SECONDS) { releaseLock(lockKey); return res.status(400).json({ error: 'Ronda cerrada' }); }
+    if (!(user.last_prediction_ad >= round.started_at) && !((now - (user.last_prediction_ad || 0)) <= (PREDICTION_ROUND_DURATION / 2))) { releaseLock(lockKey); return res.status(403).json({ error: 'AD_REQUIRED' }); }
+    
+    const { data: existing } = await supabase.from('predictions').select('id').eq('round_id', round.id).eq('user_id', req.userId).maybeSingle();
+    if (existing) { releaseLock(lockKey); return res.status(400).json({ error: 'Ya predijiste' }); }
+    
+    await supabase.from('predictions').insert({ round_id: round.id, user_id: req.userId, predicted_price: predictedPrice, created_at: now });
+    await addHistory(req.userId, 'prediction_bet', 0, `🔮 Predijiste $${predictedPrice} Ronda #${round.round_number}`, null, null);
     releaseLock(lockKey);
-    res.json({ success: true, message: `¡Predicción registrada! $${predictedPrice}`, predictedPrice });
+    res.json({ success: true, message: `Predicción registrada: $${predictedPrice}` });
   } catch (e) { releaseLock(lockKey); res.status(500).json({ error: e.message }); }
 });
 
 app.get('/prediction/history/:userId', requireAuth, async (req, res) => {
   try {
-    const userId = req.userId;
-    const { data: preds, error } = await supabase.from('predictions').select('*').eq('user_id', String(userId)).order('created_at', { ascending: false }).limit(20);
-    if (error) { console.error('Error historial predicciones:', error.message); return res.json({ success: true, predictions: [] }); }
+    const { data: preds } = await supabase.from('predictions').select('*').eq('user_id', req.userId).order('created_at', { ascending: false }).limit(20);
     if (!preds || preds.length === 0) return res.json({ success: true, predictions: [] });
-    const roundNumbers = [...new Set(preds.map(p => p.round_id))];
-    const { data: rounds } = await supabase.from('prediction_rounds').select('id, round_number, result, end_price, start_price, status').in('round_number', roundNumbers);
-    const roundsMap = {};
-    (rounds || []).forEach(r => { roundsMap[String(r.round_number)] = r; });
-    const predictions = preds.map(p => ({ ...p, prediction_rounds: roundsMap[String(p.round_id)] || null }));
-    res.json({ success: true, predictions });
-  } catch (e) { console.error('Error /prediction/history:', e); res.json({ success: true, predictions: [] }); }
+    const { data: rounds } = await supabase.from('prediction_rounds').select('*').in('round_number', [...new Set(preds.map(p => p.round_id))]);
+    const roundsMap = {}; (rounds || []).forEach(r => { roundsMap[r.round_number] = r; });
+    res.json({ success: true, predictions: preds.map(p => ({ ...p, prediction_rounds: roundsMap[p.round_id] || null })) });
+  } catch (e) { res.json({ success: true, predictions: [] }); }
 });
 
 app.get('/prediction/last-winners', async (req, res) => {
@@ -2128,427 +1177,48 @@ app.get('/prediction/last-winners', async (req, res) => {
     const { data: lastRound } = await supabase.from('prediction_rounds').select('*').eq('status', 'resolved').order('round_number', { ascending: false }).limit(1).maybeSingle();
     if (!lastRound) return res.json({ success: true, winners: [], round: null });
     const { data: preds } = await supabase.from('predictions').select('user_id, predicted_price, distance, percent_premium, payout').eq('round_id', lastRound.id).eq('won', true).order('payout', { ascending: false }).limit(10);
-    res.json({
-      success: true,
-      round: {
-        number: lastRound.round_number, startPrice: parseFloat(lastRound.start_price),
-        endPrice: parseFloat(lastRound.end_price), result: lastRound.result,
-        totalPool: parseFloat(lastRound.total_pool), distributed: parseFloat(lastRound.distributed || 0)
-      },
-      winners: (preds || []).map(p => ({
-        userId: p.user_id, predictedPrice: parseFloat(p.predicted_price),
-        distance: parseFloat(p.distance || 0), percentPremium: parseFloat(p.percent_premium || 0),
-        payout: parseFloat(p.payout || 0)
-      }))
-    });
+    res.json({ success: true, round: { number: lastRound.round_number, startPrice: parseFloat(lastRound.start_price), endPrice: parseFloat(lastRound.end_price), result: lastRound.result, totalPool: parseFloat(lastRound.total_pool) }, winners: preds || [] });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ==== MINAS DE HORUS ====
-
-const MINES_MAX_CASHOUT = 400;
-
-app.post('/mines/start', requireAuth, async (req, res) => {
-  const userId = req.userId;
-  try {
-    await ensureUser(userId);
-    res.json({ success: true });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
+// ==== MINAS ====
+app.post('/mines/start', requireAuth, async (req, res) => { res.json({ success: true }); });
 app.post('/mines/cashout', requireAuth, async (req, res) => {
-  const userId = req.userId;
-  const { amount, type } = req.body;
-
-  if (!amount || amount <= 0) {
-    return res.status(400).json({ error: 'Monto inválido' });
-  }
-  if (amount > MINES_MAX_CASHOUT) {
-    return res.status(400).json({ error: 'Monto excede el máximo permitido' });
-  }
-
-  const lockKey = `mines_cashout_${userId}`;
-  if (!acquireLock(lockKey)) {
-    return res.status(429).json({ error: '⏳ Ya hay un cobro en proceso' });
-  }
-
+  const { amount, type } = req.body; if (!amount || amount <= 0 || amount > 400) return res.status(400).json({ error: 'Monto inválido' });
+  const lockKey = `mines_${req.userId}`; if (!acquireLock(lockKey)) return res.status(429).json({ error: '⏳ Esperá' });
   try {
-    const user = await ensureUser(userId);
-    const previousBalance = parseFloat(user.balance || 0);
-    const newBalance = previousBalance + amount;
-
-    await supabase
-      .from('users_balance')
-      .update({ balance: newBalance })
-      .eq('user_id', userId);
-
-    const tipoTexto = type === 'perfecto' ? '¡PERFECTO! 25 fragmentos' : 'Seguro alcanzado';
-    await addHistory(
-      userId,
-      'mines_game',
-      amount,
-      `⛏ Minas de Horus (${tipoTexto})`,
-      null,
-      null
-    );
-
-    console.log(`⛏ Minas: ${userId} +${amount.toFixed(2)} JHOAL (${type}) | Nuevo saldo: ${newBalance.toFixed(2)}`);
-
+    const user = await ensureUser(req.userId);
+    await supabase.from('users_balance').update({ balance: parseFloat(user.balance) + amount }).eq('user_id', req.userId);
+    await addHistory(req.userId, 'mines_game', amount, `⛏ Minas (${type})`, null, null);
     releaseLock(lockKey);
-    res.json({ success: true, newBalance, amount });
-
-  } catch (e) {
-    releaseLock(lockKey);
-    console.error('❌ Error en /mines/cashout:', e.message);
-    res.status(500).json({ error: e.message });
-  }
+    res.json({ success: true, newBalance: parseFloat(user.balance) + amount, amount });
+  } catch (e) { releaseLock(lockKey); res.status(500).json({ error: e.message }); }
 });
 
-// ==== BOT PRINCIPAL ====
+// ==== BOTS TELEGRAM ====
 let bot = null;
 if (BOT_TOKEN) {
   bot = new TelegramBot(BOT_TOKEN, { polling: true });
-  console.log('Bot principal iniciado');
-  bot.setChatMenuButton({
-    menu_button: {
-      type: 'web_app',
-      text: 'Abrir Faucet',
-      web_app: {
-        url: MINI_APP_URL
-      }
-    }
-  }).then(() => {
-    console.log('✅ Botón de menú (azul) actualizado');
-  }).catch((err) => {
-    console.log('❌ Error actualizando botón de menú:', err.message);
-  });
-  bot.on('polling_error', (error) => {
-    if (error.code === 'ETELEGRAM' && error.message.includes('409')) console.log('⚠️ Conflicto de polling');
-    else console.log('⚠️ Polling error:', error.code);
-  });
-
+  bot.setChatMenuButton({ menu_button: { type: 'web_app', text: 'Abrir Faucet', web_app: { url: MINI_APP_URL } } });
   bot.onText(/\/start(.*)/, async (msg, match) => {
-    const chatId = msg.chat.id;
-    const userId = String(msg.from.id);
-    const name = msg.from.first_name || 'guerrero';
-    const payload = (match[1] || '').trim();
-    if (payload && payload.startsWith('ref_')) {
+    const chatId = msg.chat.id; const userId = String(msg.from.id); const payload = (match[1] || '').trim();
+    if (payload.startsWith('ref_')) {
       const referrerId = payload.replace('ref_', '').trim();
       if (referrerId && referrerId !== userId) {
-        try {
-          const { data: yaPagado } = await supabase.from('referrals').select('id').eq('referred_id', userId).maybeSingle();
-          if (!yaPagado) {
-            const { data: yaPendiente } = await supabase.from('referrals_pending').select('id').eq('referred_id', userId).maybeSingle();
-            if (!yaPendiente) {
-              await supabase.from('referrals_pending').insert({ referrer_id: String(referrerId), referred_id: userId, created_at: Math.floor(Date.now() / 1000) });
-              console.log(`🔗 Referido pendiente: ${referrerId} ← ${userId}`);
-            }
-          }
-        } catch (e) { console.error('Error registrando referido en /start:', e); }
+        const { data: yaPagado } = await supabase.from('referrals').select('id').eq('referred_id', userId).maybeSingle();
+        const { data: yaPendiente } = await supabase.from('referrals_pending').select('id').eq('referred_id', userId).maybeSingle();
+        if (!yaPagado && !yaPendiente) await supabase.from('referrals_pending').insert({ referrer_id: String(referrerId), referred_id: userId, created_at: Math.floor(Date.now() / 1000) });
       }
     }
-    bot.sendMessage(chatId,
-      '⚱ *HORUS FAUCET - La ofrenda del Dios Horus* 🦅\n\n' +
-      '¡Bienvenido, ' + name + '!\n\n' +
-      '💰 Reclama *1 JHOAL GRATIS* cada 30 minutos\n' +
-      '📺 Mirá anuncios y ganá *5 JHOAL extra*\n' +
-      '🎲 Juega en *Los Dados de Horus*\n' +
-      '🌱 Planta en el *Huerto de Horus*\n' +
-      '🔮 Predice el precio de BTC en *Predicciones de los Dioses*\n' +
-      '⛏ Miná en *Minas de Horus*\n' +
-      '🌕 Atento a la *Luna Llena*\n' +
-      '👑 Atento a la *Bendición del Faraón*\n' +
-      '🎁 Gana *1000 JHOAL* por cada amigo que invites\n' +
-      '📜 Mirá tu *Historial*\n\n' +
-      '👉 Toca "Abrir Horus Faucet" para empezar.',
-      { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [
-        [{ text: '🏛 Abrir Horus Faucet', web_app: { url: MINI_APP_URL } }],
-        [{ text: '💬 Únete al Grupo', url: 'https://t.me/horusfaucet' }]
-      ] } }
-    );
-  });
-
-  bot.onText(/\/faucet/, (msg) => {
-    bot.sendMessage(msg.chat.id, '🏛 *Abrir Horus Faucet*', {
-      parse_mode: 'Markdown',
-      reply_markup: { inline_keyboard: [
-        [{ text: '🏛 Abrir Horus Faucet', web_app: { url: MINI_APP_URL } }],
-        [{ text: '💬 Únete al Grupo', url: 'https://t.me/horusfaucet' }]
-      ] }
-    });
-  });
-
-  bot.onText(/\/invitar|\/referidos|\/ref/, async (msg) => {
-    const userId = String(msg.from.id);
-    const link = 'https://t.me/' + REFERRAL_BOT_USERNAME + '?start=ref_' + userId;
-    const texto =
-      '🏛 *HORUS FAUCET* 🦅\n\n' +
-      '🎁 *INVITA Y GANA ' + REFERRAL_REWARD + ' JHOAL*\n' +
-      'por cada amigo que entre con tu enlace y reclame su primer faucet.\n\n' +
-      '🔗 *Tu enlace único:*\n`' + link + '`\n\n' +
-      '📋 Copialo y compartilo en tus grupos.\n' +
-      '💎 Sin límite de referidos.';
-    try {
-      await bot.sendPhoto(msg.chat.id, REFERRAL_BANNER_URL, {
-        caption: texto, parse_mode: 'Markdown',
-        reply_markup: { inline_keyboard: [
-          [{ text: '📤 Compartir enlace', url: 'https://t.me/share/url?url=' + encodeURIComponent(link) + '&text=' + encodeURIComponent('🎁 Gana 1000 JHOAL gratis en Horus Faucet 🏛') }],
-          [{ text: '🏛 Abrir Horus Faucet', web_app: { url: MINI_APP_URL } }]
-        ] }
-      });
-    } catch (e) {
-      await bot.sendMessage(msg.chat.id, texto, {
-        parse_mode: 'Markdown',
-        reply_markup: { inline_keyboard: [
-          [{ text: '📤 Compartir enlace', url: 'https://t.me/share/url?url=' + encodeURIComponent(link) + '&text=' + encodeURIComponent('🎁 Gana 1000 JHOAL gratis en Horus Faucet 🏛') }],
-          [{ text: '🏛 Abrir Horus Faucet', web_app: { url: MINI_APP_URL } }]
-        ] }
-      });
-    }
-  });
-
-  bot.onText(/\/price/, async (msg) => {
-    try {
-      const jhoalPrice = await getJhoalPrice();
-      if (jhoalPrice <= 0) { bot.sendMessage(msg.chat.id, '❌ Error al consultar precio.'); return; }
-      const jhoalPerUsdt = 1 / jhoalPrice;
-      bot.sendMessage(msg.chat.id,
-        '💰 *PRECIO JHOAL*\n\n' +
-        '💵 1 JHOAL = *$' + jhoalPrice.toFixed(8) + '*\n' +
-        '💎 1 USDT = *' + Math.round(jhoalPerUsdt).toLocaleString() + ' JHOAL*',
-        { parse_mode: 'Markdown' }
-      );
-    } catch (e) { bot.sendMessage(msg.chat.id, '❌ Error al consultar precio.'); }
-  });
-
-  bot.onText(/\/help/, (msg) => {
-    bot.sendMessage(msg.chat.id,
-      '🆘 *AYUDA*\n\n/start - Iniciar\n/faucet - Abrir faucet\n/invitar - Tu enlace de referidos\n/price - Precio\n/help - Esta ayuda\n\n📩 Soporte: @' + SUPPORT_USERNAME,
-      { parse_mode: 'Markdown' }
-    );
+    bot.sendMessage(chatId, '⚱ *HORUS FAUCET*\n\n¡Bienvenido, ' + (msg.from.first_name || 'guerrero') + '!\n\n👉 Toca abajo para empezar.', { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '🏛 Abrir Horus Faucet', web_app: { url: MINI_APP_URL } }]] } });
   });
 }
 
-// ==== BOT DE SOPORTE ====
-if (SUPPORT_BOT_TOKEN && SUPPORT_CHAT_ID) {
-  const supportBot = new TelegramBot(SUPPORT_BOT_TOKEN, { polling: true });
-  console.log('Bot de soporte iniciado');
-  
-  const replyToUser = new Map();
-  
-  supportBot.onText(/\/start/, (msg) => {
-    const chatId = msg.chat.id;
-    if (String(chatId) === String(SUPPORT_CHAT_ID)) {
-      supportBot.sendMessage(chatId,
-        '🛠️ *PANEL DE SOPORTE - HORUS FAUCET*\n\n' +
-        'Comandos disponibles:\n\n' +
-        '📩 `/reply <user_id> <mensaje>` - Responder a un usuario\n' +
-        '📋 `/list` - Ver últimos usuarios que escribieron\n' +
-        '🗑️ `/clear` - Limpiar el historial de respuestas\n' +
-        '🆘 `/help` - Ver esta ayuda\n\n' +
-        '💡 Cuando un usuario te escriba, recibirás su ID. Usa `/reply <ID> <mensaje>` para responderle.',
-        { parse_mode: 'Markdown' }
-      );
-      return;
-    }
-    supportBot.sendMessage(chatId,
-      '🆘 *SOPORTE HORUS FAUCET*\n\n' +
-      '¡Hola, ' + (msg.from.first_name || 'usuario') + '!\n\n' +
-      '📝 Podés enviarme:\n' +
-      '• Texto\n' +
-      '• Fotos 📷\n' +
-      '• Videos 🎥\n' +
-      '• Audios 🎤\n' +
-      '• Documentos 📎\n\n' +
-      'Te vamos a responder a la brevedad.',
-      { parse_mode: 'Markdown' }
-    );
-  });
-  
-  supportBot.onText(/\/reply (\d+) (.+)/, (msg, match) => {
-    const chatId = msg.chat.id;
-    if (String(chatId) !== String(SUPPORT_CHAT_ID)) return;
-    const targetUserId = match[1];
-    const replyMessage = match[2];
-    supportBot.sendMessage(targetUserId,
-      '📬 *RESPUESTA DEL SOPORTE*\n\n' + replyMessage,
-      { parse_mode: 'Markdown' }
-    ).then(() => {
-      supportBot.sendMessage(chatId, `✅ Respuesta enviada al usuario ${targetUserId}`);
-    }).catch((err) => {
-      supportBot.sendMessage(chatId, `❌ Error enviando respuesta: ${err.message}`);
-    });
-  });
-  supportBot.on('photo', (msg) => {
-    const chatId = msg.chat.id;
-    if (String(chatId) !== String(SUPPORT_CHAT_ID)) return;
-    const caption = msg.caption;
-    if (!caption || !caption.startsWith('/reply')) return;
-    const match = caption.match(/\/reply (\d+)\s+(.+)/);
-    if (!match) {
-      supportBot.sendMessage(chatId, 
-        '❌ Formato incorrecto.\n\nUsá: `/reply <user_id> <mensaje>` en el caption de la foto.',
-        { parse_mode: 'Markdown' }
-      );
-      return;
-    }
-    const targetUserId = match[1];
-    const replyMessage = match[2];
-    const photo = msg.photo[msg.photo.length - 1];
-    supportBot.sendPhoto(targetUserId, photo.file_id, {
-      caption: '📬 *RESPUESTA DEL SOPORTE*\n\n' + replyMessage,
-      parse_mode: 'Markdown'
-    }).then(() => {
-      supportBot.sendMessage(chatId, `✅ Foto enviada al usuario ${targetUserId}`);
-      console.log(`📷 Foto enviada a ${targetUserId}`);
-    }).catch((err) => {
-      supportBot.sendMessage(chatId, `❌ Error enviando foto: ${err.message}`);
-    });
-  });
-  supportBot.onText(/\/list/, (msg) => {
-    const chatId = msg.chat.id;
-    if (String(chatId) !== String(SUPPORT_CHAT_ID)) return;
-    if (replyToUser.size === 0) {
-      supportBot.sendMessage(chatId, '📋 No hay usuarios en el historial reciente.');
-      return;
-    }
-    let list = '📋 *ÚLTIMOS USUARIOS QUE ESCRIBIERON:*\n\n';
-    let count = 0;
-    for (const [userId, data] of replyToUser.entries()) {
-      count++;
-      if (count > 20) break;
-      list += `👤 ${data.name || 'Usuario'}\n`;
-      list += `   🆔 \`${userId}\`\n`;
-      list += `   💬 "${(data.lastMessage || '').substring(0, 50)}"\n\n`;
-    }
-    supportBot.sendMessage(chatId, list, { parse_mode: 'Markdown' });
-  });
-  
-  supportBot.onText(/\/clear/, (msg) => {
-    const chatId = msg.chat.id;
-    if (String(chatId) !== String(SUPPORT_CHAT_ID)) return;
-    replyToUser.clear();
-    supportBot.sendMessage(chatId, '🗑️ Historial limpiado.');
-  });
-  
-  supportBot.onText(/\/help/, (msg) => {
-    const chatId = msg.chat.id;
-    supportBot.sendMessage(chatId,
-      '🆘 *AYUDA DEL SOPORTE*\n\n' +
-      'Comandos:\n' +
-      '• `/reply <ID> <mensaje>` - Responder\n' +
-      '• `/list` - Ver usuarios\n' +
-      '• `/clear` - Limpiar historial\n\n' +
-      'Podés recibir: texto, fotos, videos, audios y documentos.',
-      { parse_mode: 'Markdown' }
-    );
-  });
-  
-  supportBot.on('message', async (msg) => {
-    const chatId = msg.chat.id;
-    const text = msg.text;
-    if (text && text.startsWith('/')) return;
-    if (String(chatId) === String(SUPPORT_CHAT_ID)) return;
-    const userInfo = {
-      name: msg.from.first_name || 'Usuario',
-      username: msg.from.username ? '@' + msg.from.username : 'sin username',
-      id: msg.from.id,
-      lastMessage: text || '[multimedia]'
-    };
-    replyToUser.set(String(msg.from.id), userInfo);
-    const header = '📩 *NUEVO MENSAJE DE SOPORTE*\n\n' +
-      '👤 De: ' + (msg.from.first_name || 'Usuario') + '\n' +
-      '🔗 Username: ' + (msg.from.username ? '@' + msg.from.username : 'sin username') + '\n' +
-      '🆔 ID: `' + msg.from.id + '`\n\n';
-    try {
-      if (msg.text) {
-        await supportBot.sendMessage(SUPPORT_CHAT_ID, header + '💬 Mensaje:\n' + msg.text, { parse_mode: 'Markdown' });
-        await supportBot.sendMessage(chatId, '✅ *Mensaje recibido*\n\nTu consulta fue enviada al equipo de soporte.', { parse_mode: 'Markdown' });
-      } else if (msg.photo) {
-        const photo = msg.photo[msg.photo.length - 1];
-        await supportBot.sendPhoto(SUPPORT_CHAT_ID, photo.file_id, {
-          caption: header + '📷 *Foto*' + (msg.caption ? '\n\n💬 ' + msg.caption : ''),
-          parse_mode: 'Markdown'
-        });
-        await supportBot.sendMessage(chatId, '✅ *Foto recibida*\n\nTu consulta fue enviada al equipo de soporte.', { parse_mode: 'Markdown' });
-      } else if (msg.video) {
-        await supportBot.sendVideo(SUPPORT_CHAT_ID, msg.video.file_id, {
-          caption: header + '🎥 *Video*' + (msg.caption ? '\n\n💬 ' + msg.caption : ''),
-          parse_mode: 'Markdown'
-        });
-        await supportBot.sendMessage(chatId, '✅ *Video recibido*\n\nTu consulta fue enviada al equipo de soporte.', { parse_mode: 'Markdown' });
-      } else if (msg.audio || msg.voice) {
-        const audioFile = msg.audio ? msg.audio.file_id : msg.voice.file_id;
-        await supportBot.sendAudio(SUPPORT_CHAT_ID, audioFile, {
-          caption: header + '🎤 *Audio*',
-          parse_mode: 'Markdown'
-        });
-        await supportBot.sendMessage(chatId, '✅ *Audio recibido*\n\nTu consulta fue enviada al equipo de soporte.', { parse_mode: 'Markdown' });
-      } else if (msg.document) {
-        await supportBot.sendDocument(SUPPORT_CHAT_ID, msg.document.file_id, {
-          caption: header + '📎 *Documento*' + (msg.caption ? '\n\n💬 ' + msg.caption : ''),
-          parse_mode: 'Markdown'
-        });
-        await supportBot.sendMessage(chatId, '✅ *Documento recibido*\n\nTu consulta fue enviada al equipo de soporte.', { parse_mode: 'Markdown' });
-      } else if (msg.sticker) {
-        await supportBot.sendSticker(SUPPORT_CHAT_ID, msg.sticker.file_id);
-        await supportBot.sendMessage(SUPPORT_CHAT_ID, header + '🎨 *Sticker*', { parse_mode: 'Markdown' });
-        await supportBot.sendMessage(chatId, '✅ *Sticker recibido*', { parse_mode: 'Markdown' });
-      } else if (msg.location) {
-        await supportBot.sendLocation(SUPPORT_CHAT_ID, msg.location.latitude, msg.location.longitude);
-        await supportBot.sendMessage(SUPPORT_CHAT_ID, header + '📍 *Ubicación*', { parse_mode: 'Markdown' });
-        await supportBot.sendMessage(chatId, '✅ *Ubicación recibida*', { parse_mode: 'Markdown' });
-      } else {
-        await supportBot.sendMessage(SUPPORT_CHAT_ID, header + '❓ Mensaje de tipo no soportado', { parse_mode: 'Markdown' });
-        await supportBot.sendMessage(chatId, '⚠️ *Tipo de mensaje no soportado*\n\nProbá enviar texto, foto, video, audio o documento.', { parse_mode: 'Markdown' });
-      }
-    } catch (err) {
-      console.error('Error en bot de soporte:', err.message);
-      try {
-        await supportBot.sendMessage(chatId, '❌ Hubo un error. Intentá de nuevo.', { parse_mode: 'Markdown' });
-      } catch (e) {}
-    }
-  });
-  
-  supportBot.on('polling_error', (error) => {
-    if (error.code === 'ETELEGRAM' && error.message.includes('409')) {
-      console.log('⚠️ Conflicto de polling en bot de soporte');
-    }
-  });
-  
-  console.log('✅ Bot de soporte listo: texto, fotos, videos, audios, documentos, stickers, ubicación');
-}
-
-// ==== INICIAR SERVIDOR ====
+// ==== SERVIDOR ====
 app.listen(process.env.PORT || 3000, () => {
-  console.log('Horus Faucet corriendo en puerto', process.env.PORT || 3000);
-  console.log('Wallet:', wallet.address);
-  console.log('🔐 Auth: Google + Telegram (Mini App + Widget) + JWT');
-  console.log('🎁 Referidos: +' + REFERRAL_REWARD + ' JHOAL por referido válido');
-  console.log('🛡️ hCaptcha DADOS: aleatorio entre ' + CAPTCHA_DICE_MIN_BETS + ' y ' + CAPTCHA_DICE_MAX_BETS + ' tiradas');
-  console.log('🔒 Locks anti-doble-click: ACTIVADOS');
-  console.log('⏳ Cooldown de compra de plantas: ' + BUY_COOLDOWN + 's');
-  console.log('🚫 Venta de plantas: DESHABILITADA');
-  console.log('⏳ Cooldown entre retiros: ' + WITHDRAW_COOLDOWN + 's');
-  console.log('🎲 Dados: x0=46% | x1.1=41% | x2=6% | x4=3% | x6=2% | x8=1% | x10=1% | EV=0.991');
-  console.log('🔮 Predicciones: rango ±$' + PREDICTION_RANGE + ' | SIN cooldown de anuncios');
-  console.log('⛏ Minas de Horus: ACTIVADAS | Máximo por partida: ' + MINES_MAX_CASHOUT + ' JHOAL');
-  console.log('🪙 BTC: PancakeSwap BTCB/USDT');
-  console.log('💰 JHOAL: PancakeSwap JHOAL/USDT');
-  console.log('🔥 Wallet de quema: ' + BURN_WALLET);
-  console.log('🧹 Limpieza automática de plantas: ACTIVADA');
-  console.log('✅ VERIFICACIÓN DE DEPÓSITOS POR HASH: ACTIVA');
-  console.log('⏰ Plazo máximo para verificar: ' + VERIFY_DEPOSIT_MAX_DAYS + ' días');
-
-  cleanupOldPlants();
-  cleanupExpiredPlants();
+  console.log('Servidor corriendo en puerto', process.env.PORT || 3000);
+  cleanupOldPlants(); cleanupExpiredPlants();
   setInterval(cleanupExpiredPlants, 5 * 60 * 1000);
-  setInterval(cleanupOldPlants, 6 * 60 * 60 * 1000);
-
-  predictionLoop();
-  setInterval(predictionLoop, 15 * 1000);
-
+  predictionLoop(); setInterval(predictionLoop, 15 * 1000);
   scheduleBurnAtMidnight();
 });
