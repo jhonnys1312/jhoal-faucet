@@ -81,7 +81,7 @@ const userVerifiedCaptcha = new Map();
 const CAPTCHA_VERIFICATION_TTL = 0;
 
 const CAPTCHA_DICE_MIN_BETS = 1;
-const CAPTCHA_DICE_MAX_BETS = 10;
+const CAPTCHA_DICE_MAX_BETS = 30;
 const userDiceBetCounters = new Map();
 const userDiceCaptchaThresholds = new Map();
 
