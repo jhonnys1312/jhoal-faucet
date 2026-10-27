@@ -689,17 +689,49 @@ async function cleanupOldPlants() {
 
 async function otorgarRecompensaReferido(referrerId, referredId) {
   try {
-    const { data: yaExiste } = await supabase.from('referrals').select('id').eq('referred_id', referredId).maybeSingle();
-    if (yaExiste) return { success: false };
-    const referredUser = await ensureUser(referredId);
-    if (!referredUser.total_claimed || parseFloat(referredUser.total_claimed) < 1) return { success: false };
-    await supabase.from('referrals').insert({ referrer_id: referrerId, referred_id: referredId, reward: REFERRAL_REWARD, created_at: Math.floor(Date.now() / 1000) });
+    // 1. Evitar auto-referidos
+    if (String(referrerId) === String(referredId)) return { success: false };
+
+    // 2. EL CANDADO: Verificar si este amigo ya cobró alguna vez
+    const { data: yaPagado } = await supabase.from('referrals').select('referred_id').eq('referred_id', referredId).maybeSingle();
+    if (yaPagado) {
+       console.log('🚨 Pago bloqueado: Este amigo ya fue pagado anteriormente.');
+       return { success: false }; 
+    }
+
+    // 3. Verificar que el amigo exista y haya reclamado
+    const referido = await ensureUser(referredId);
+    if (!referido || !referido.total_claimed || parseFloat(referido.total_claimed) < 1) {
+      return { success: false };
+    }
+
+    // 4. Registrar el pago en la base de datos
+    const { error: insertError } = await supabase.from('referrals').insert({ 
+        referrer_id: String(referrerId), 
+        referred_id: String(referredId), 
+        reward: REFERRAL_REWARD, 
+        created_at: Math.floor(Date.now() / 1000) 
+    });
+
+    if (insertError) {
+        console.log('Error insertando referido (posible duplicado):', insertError.message);
+        return { success: false }; 
+    }
+
+    // 5. Pagar al referidor
     const referrer = await ensureUser(referrerId);
     await supabase.from('users_balance').update({ balance: parseFloat(referrer.balance || 0) + REFERRAL_REWARD }).eq('user_id', referrerId);
     await addHistory(referrerId, 'referral_reward', REFERRAL_REWARD, '🎁 Recompensa por referido', null, null);
-    if (bot && referrer.chat_id) { try { await bot.sendMessage(referrer.chat_id, `🎁 *¡NUEVO REFERIDO!*\n\nGanaste *${REFERRAL_REWARD} JHOAL*`, { parse_mode: 'Markdown' }); } catch (e) {} }
+    
+    // 6. Notificar por Telegram (si tiene)
+    if (bot && referrer.chat_id) { 
+        try { await bot.sendMessage(referrer.chat_id, `🎁 *¡NUEVO REFERIDO!*\n\nGanaste *${REFERRAL_REWARD} JHOAL*`, { parse_mode: 'Markdown' }); } catch (e) {} 
+    }
+
     return { success: true };
-  } catch (e) { return { success: false }; }
+  } catch (e) { 
+    return { success: false }; 
+  }
 }
 
 async function intentarPagarReferido(userId) {
