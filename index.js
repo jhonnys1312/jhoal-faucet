@@ -81,7 +81,7 @@ const userVerifiedCaptcha = new Map();
 const CAPTCHA_VERIFICATION_TTL = 0;
 
 const CAPTCHA_DICE_MIN_BETS = 1;
-const CAPTCHA_DICE_MAX_BETS = 30;
+const CAPTCHA_DICE_MAX_BETS = 50;
 const userDiceBetCounters = new Map();
 const userDiceCaptchaThresholds = new Map();
 
@@ -692,14 +692,13 @@ async function otorgarRecompensaReferido(referrerId, referredId) {
     // 1. Evitar auto-referidos
     if (String(referrerId) === String(referredId)) return { success: false };
 
-    // 2. EL CANDADO: Verificar si este amigo ya cobró alguna vez
+    // 2. Verificar si este amigo ya cobró (doble candado)
     const { data: yaPagado } = await supabase.from('referrals').select('referred_id').eq('referred_id', referredId).maybeSingle();
     if (yaPagado) {
-       console.log('🚨 Pago bloqueado: Este amigo ya fue pagado anteriormente.');
        return { success: false }; 
     }
 
-    // 3. Verificar que el amigo exista y haya reclamado
+    // 3. Verificar que el amigo exista y haya jugado (opcional, puedes pedir 1 o más claims)
     const referido = await ensureUser(referredId);
     if (!referido || !referido.total_claimed || parseFloat(referido.total_claimed) < 1) {
       return { success: false };
@@ -713,33 +712,41 @@ async function otorgarRecompensaReferido(referrerId, referredId) {
         created_at: Math.floor(Date.now() / 1000) 
     });
 
-    if (insertError) {
-        console.log('Error insertando referido (posible duplicado):', insertError.message);
-        return { success: false }; 
-    }
+    if (insertError) return { success: false }; 
 
-    // 5. Pagar al referidor
+    // 5. Pagar al REFERIDOR
     const referrer = await ensureUser(referrerId);
     await supabase.from('users_balance').update({ balance: parseFloat(referrer.balance || 0) + REFERRAL_REWARD }).eq('user_id', referrerId);
     await addHistory(referrerId, 'referral_reward', REFERRAL_REWARD, '🎁 Recompensa por referido', null, null);
     
-    // 6. Notificar por Telegram (si tiene)
-    if (bot && referrer.chat_id) { 
-        try { await bot.sendMessage(referrer.chat_id, `🎁 *¡NUEVO REFERIDO!*\n\nGanaste *${REFERRAL_REWARD} JHOAL*`, { parse_mode: 'Markdown' }); } catch (e) {} 
-    }
+    // 6. PAGAR AL REFERIDO (El nuevo cambio)
+    await supabase.from('users_balance').update({ balance: parseFloat(referido.balance || 0) + REFERRAL_REWARD }).eq('user_id', referredId);
+    await addHistory(referredId, 'referral_reward', REFERRAL_REWARD, '🎁 Bono por unirte con un link', null, null);
 
     return { success: true };
   } catch (e) { 
     return { success: false }; 
   }
 }
-
 async function intentarPagarReferido(userId) {
   try {
+    // Buscamos si este usuario tiene un referido pendiente
     const { data: pendiente } = await supabase.from('referrals_pending').select('*').eq('referred_id', userId).maybeSingle();
     if (!pendiente) return;
-    const result = await otorgarRecompensaReferido(pendiente.referrer_id, userId);
-    if (result.success) await supabase.from('referrals_pending').delete().eq('referred_id', userId);
+
+    // Calculamos los días transcurridos
+    const ahora = Math.floor(Date.now() / 1000);
+    const fechaRegistro = pendiente.created_at;
+    const diasTranscurridos = (ahora - fechaRegistro) / (24 * 60 * 60); // Convertimos segundos a días
+
+    // Si han pasado 10 días o más, le pagamos a ambos
+    if (diasTranscurridos >= 10) {
+      const result = await otorgarRecompensaReferido(pendiente.referrer_id, userId);
+      if (result.success) {
+        // Borramos de la lista de pendientes para que no se pague dos veces
+        await supabase.from('referrals_pending').delete().eq('referred_id', userId);
+      }
+    }
   } catch (e) {}
 }
 
@@ -1308,7 +1315,7 @@ app.post('/mines/cashout', requireAuth, async (req, res) => {
 let bot = null;
 if (BOT_TOKEN) {
   bot = new TelegramBot(BOT_TOKEN, { polling: true });
-  bot.setChatMenuButton({ menu_button: { type: 'web_app', text: 'Abrir Faucet', web_app: { url: MINI_APP_URL } } });
+  bot.setChatMenuButton({ menu_button: { type: 'web_app', text: '🏛 Jugar Faucet', web_app: { url: MINI_APP_URL } } });
   bot.onText(/\/start(.*)/, async (msg, match) => {
     const chatId = msg.chat.id; const userId = String(msg.from.id); const payload = (match[1] || '').trim();
     if (payload.startsWith('ref_')) {
@@ -1331,3 +1338,27 @@ app.listen(process.env.PORT || 3000, () => {
   predictionLoop(); setInterval(predictionLoop, 15 * 1000);
   scheduleBurnAtMidnight();
 });
+// ==== REVISOR AUTOMÁTICO DE REFERIDOS (CRON JOB) ====
+setInterval(async () => {
+  try {
+    console.log('⏳ Revisando referidos pendientes de 10 días...');
+    const hace10Dias = Math.floor(Date.now() / 1000) - (10 * 24 * 60 * 60); // Tiempo actual menos 10 días
+    
+    // Buscamos todos los pendientes creados hace 10 días o más
+    const { data: pendientes } = await supabase.from('referrals_pending')
+        .select('*')
+        .lte('created_at', hace10Dias);
+
+    if (pendientes && pendientes.length > 0) {
+      for (const p of pendientes) {
+        const result = await otorgarRecompensaReferido(p.referrer_id, p.referred_id);
+        if (result.success) {
+          await supabase.from('referrals_pending').delete().eq('id', p.id);
+          console.log(`✅ Referido pagado a los 10 días: ${p.referrer_id} y ${p.referred_id}`);
+        }
+      }
+    }
+  } catch (e) {
+    console.error('Error en el cron de referidos:', e);
+  }
+}, 60 * 60 * 1000); // Se ejecuta cada 1 hora (3600000 ms)
